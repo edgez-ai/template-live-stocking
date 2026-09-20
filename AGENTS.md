@@ -44,7 +44,7 @@ It publishes the internal ESP32-S3 chip temperature every 30 seconds to the
 
 The workspace supplies `APP_NAME`, `DOMAIN_SUFFIX`, `APPWRITE_ENDPOINT`,
 `APPWRITE_PROJECT_ID`, `APPWRITE_PROJECT_NAME`, and `APPWRITE_API_KEY`.
-Committed `.env.local` contains only non-secret resource IDs and timing values.
+Stable resource IDs come from the committed `appwrite.config.json`.
 `APPWRITE_PUBLIC_ENDPOINT` may override the client endpoint. Non-local HTTP
 client endpoints must be normalized to HTTPS; the CLI may retain its injected
 server-side endpoint.

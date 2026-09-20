@@ -1,13 +1,20 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 
 export const infraDir = path.dirname(fileURLToPath(import.meta.url));
 export const rootDir = path.resolve(infraDir, "..");
-const envFile = path.join(rootDir, ".env.local");
-if (existsSync(envFile)) loadEnvFile(envFile);
+const appwriteConfig = JSON.parse(
+  readFileSync(path.join(rootDir, "appwrite.config.json"), "utf8"),
+);
+const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
+const database = appwriteConfig.tablesDB?.find(
+  (candidate) => candidate.$id === telemetryTable?.databaseId,
+);
+if (!database || !telemetryTable) {
+  throw new Error("appwrite.config.json must define the telemetry table and its database");
+}
 
 const cli = path.join(infraDir, "node_modules", ".bin", "appwrite");
 export const dryRun = process.env.INFRA_DRY_RUN === "1";
@@ -18,7 +25,7 @@ if (!existsSync(cli)) {
 
 const required = [
   "APP_NAME", "DOMAIN_SUFFIX", "APPWRITE_ENDPOINT", "APPWRITE_PROJECT_ID",
-  "APPWRITE_PROJECT_NAME", "APPWRITE_API_KEY", "DATABASE_ID", "TELEMETRY_TABLE_ID",
+  "APPWRITE_PROJECT_NAME", "APPWRITE_API_KEY",
 ];
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length) {
@@ -41,9 +48,8 @@ export const config = {
   projectId: process.env.APPWRITE_PROJECT_ID,
   projectName: process.env.APPWRITE_PROJECT_NAME,
   apiKey: process.env.APPWRITE_API_KEY,
-  databaseId: process.env.DATABASE_ID,
-  telemetryTableId: process.env.TELEMETRY_TABLE_ID,
-  pollIntervalMs: process.env.POLL_INTERVAL_MS || "5000",
+  databaseId: database.$id,
+  telemetryTableId: telemetryTable.$id,
 };
 export const domainPrefix = `${config.projectName}-${config.name}`;
 export const webDomain = `${domainPrefix}.sites.${config.domainSuffix}`;

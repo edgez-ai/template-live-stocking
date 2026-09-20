@@ -16,12 +16,9 @@ jobs:
   android:
     runs-on: ubuntu-latest
     env:
-      APP_NAME: live-stocking
       DOMAIN_SUFFIX: edgez.biz
       APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
       APPWRITE_PROJECT_ID: build-placeholder
-      DATABASE_ID: live-stocking
-      TELEMETRY_TABLE_ID: telemetry
       CI: "1"
       NODE_ENV: production
     steps:

@@ -1,16 +1,14 @@
-const { existsSync } = require("node:fs");
-const path = require("node:path");
-const { loadEnvFile } = require("node:process");
+const appwriteConfig = require("../appwrite.config.json");
+const edgezProject = require("../edgez.json");
 
-const rootEnv = path.resolve(__dirname, "..", ".env.local");
-if (existsSync(rootEnv)) loadEnvFile(rootEnv);
-
-const appName = process.env.APP_NAME;
+const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
+const databaseId = telemetryTable?.databaseId;
+const telemetryTableId = telemetryTable?.$id;
+const appName = process.env.APP_NAME || edgezProject.name;
 const domainSuffix = process.env.DOMAIN_SUFFIX;
-const configuredEndpoint = process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT;
+const configuredEndpoint =
+  process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT || appwriteConfig.endpoint;
 const projectId = process.env.APPWRITE_PROJECT_ID;
-const databaseId = process.env.DATABASE_ID;
-const telemetryTableId = process.env.TELEMETRY_TABLE_ID;
 
 if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId) {
   throw new Error("Appwrite project and telemetry table environment is incomplete");

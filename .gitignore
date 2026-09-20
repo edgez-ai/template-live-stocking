@@ -3,6 +3,7 @@ node_modules/
 .expo/
 dist/
 .env
+.env*.local
 app/android/
 firmware/.pio/
 firmware/managed_components/

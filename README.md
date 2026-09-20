@@ -64,14 +64,8 @@ APPWRITE_PROJECT_NAME=<dns-safe-project-name>
 APPWRITE_API_KEY=<server-api-key>
 ```
 
-The committed `.env.local` supplies `DATABASE_ID`, `TELEMETRY_TABLE_ID`, and
-`POLL_INTERVAL_MS`. Export it for direct commands:
-
-```sh
-set -a
-. ./.env.local
-set +a
-```
+Stable database and table IDs come directly from `appwrite.config.json`; the
+template does not require a committed `.env.local` file.
 
 `APPWRITE_ENDPOINT` configures the server-side CLI. Browser and mobile builds
 use `APPWRITE_PUBLIC_ENDPOINT` when provided; otherwise a non-local HTTP
