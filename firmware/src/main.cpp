@@ -3,7 +3,6 @@
 #include <cstring>
 
 #include "cJSON.h"
-#include "display.h"
 #include "halow_network.h"
 #include "driver/gpio.h"
 #include "driver/temperature_sensor.h"
@@ -77,7 +76,7 @@ void halow_ready() {
 
 void show_device_status(const char *title, const char *status) {
   strlcpy(device_status, status, sizeof(device_status));
-  display_show(title, device_status);
+  ESP_LOGI(kTag, "%s: %s", title ? title : "DEVICE STATUS", device_status);
 }
 
 void show_current_state() {
@@ -85,17 +84,17 @@ void show_current_state() {
     char instructions[96]{};
     std::snprintf(instructions, sizeof(instructions), "PAIR %s POP %s",
                   provisioning_name, provisioning_pop);
-    display_show("PROVISION DEVICE", instructions);
+    show_device_status("PROVISION DEVICE", instructions);
     return;
   }
   const EventBits_t bits = state_events ? xEventGroupGetBits(state_events) : 0;
   if (bits & kMqttConnected) {
-    display_show("MQTT CONNECTED", device_serial);
+    show_device_status("MQTT CONNECTED", device_serial);
   } else if (bits & kNetworkConnected) {
-    display_show("HALOW CONNECTED",
-                 bits & kMqttConfigured ? "CONNECTING MQTT" : "MQTT SETUP REQUIRED");
+    show_device_status("HALOW CONNECTED",
+                       bits & kMqttConfigured ? "CONNECTING MQTT" : "MQTT SETUP REQUIRED");
   } else {
-    display_show("DEVICE STATUS", device_status);
+    ESP_LOGI(kTag, "DEVICE STATUS: %s", device_status);
   }
 }
 
@@ -207,7 +206,7 @@ esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_leng
     mqtt_config = candidate;
     xEventGroupSetBits(state_events, kMqttConfigured);
     ESP_LOGI(kTag, "MQTT credential stored for serial %s", mqtt_config.username);
-    display_show("MQTT CONFIG", "CREDENTIAL STORED");
+    show_device_status("MQTT CONFIG", "CREDENTIAL STORED");
   } else {
     ESP_LOGW(kTag, "Rejected MQTT provisioning data: %s", esp_err_to_name(result));
   }
@@ -385,7 +384,7 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
   auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
   if (event_id == MQTT_EVENT_CONNECTED) {
     xEventGroupSetBits(state_events, kMqttConnected);
-    display_show("MQTT CONNECTED", device_serial);
+    show_device_status("MQTT CONNECTED", device_serial);
     char telemetry_topic[384]{};
     char command_topic[384]{};
     std::snprintf(telemetry_topic, sizeof(telemetry_topic),
@@ -448,7 +447,7 @@ void reset_button_task(void *) {
       pressed = true;
       pressed_at = xTaskGetTickCount();
       last_remaining = kResetHoldSeconds;
-      display_show("RESET DEVICE", "KEEP HOLDING 5 SECONDS");
+      show_device_status("RESET DEVICE", "KEEP HOLDING 5 SECONDS");
       ESP_LOGI(kTag, "User button pressed; hold for 5 seconds to reset provisioning");
     } else if (is_pressed && pressed) {
       const int held_seconds = static_cast<int>(
@@ -458,15 +457,15 @@ void reset_button_task(void *) {
         last_remaining = remaining;
         char message[40]{};
         std::snprintf(message, sizeof(message), "KEEP HOLDING %d SECONDS", remaining);
-        display_show("RESET DEVICE", message);
+        show_device_status("RESET DEVICE", message);
       }
       if (held_seconds >= kResetHoldSeconds) {
         ESP_LOGW(kTag, "Erasing HaLow and MQTT provisioning data from NVS");
-        display_show("RESET DEVICE", "DATA CLEARED - RESTARTING");
+        show_device_status("RESET DEVICE", "DATA CLEARED - RESTARTING");
         const esp_err_t result = nvs_flash_erase();
         if (result != ESP_OK) {
           ESP_LOGE(kTag, "Could not erase NVS: %s", esp_err_to_name(result));
-          display_show("RESET FAILED", esp_err_to_name(result));
+          show_device_status("RESET FAILED", esp_err_to_name(result));
           pressed = false;
         } else {
           vTaskDelay(pdMS_TO_TICKS(750));
@@ -494,8 +493,7 @@ void initialize_nvs() {
 }  // namespace
 
 extern "C" void app_main() {
-  ESP_ERROR_CHECK(display_init());
-  display_show("IOT PROVISIONING", "STARTING");
+  ESP_LOGI(kTag, "HT-HC33 provisioning firmware starting");
   initialize_nvs();
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -528,7 +526,7 @@ extern "C" void app_main() {
     char instructions[96]{};
     std::snprintf(instructions, sizeof(instructions), "PAIR %s POP %s",
                   provisioning_name, provisioning_pop);
-    display_show("PROVISION DEVICE", instructions);
+    show_device_status("PROVISION DEVICE", instructions);
     ESP_LOGI(kTag, "BLE provisioning service %s, PoP %s", provisioning_name, provisioning_pop);
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kMqttEndpoint));
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kHalowScanEndpoint));

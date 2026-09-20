@@ -52,15 +52,15 @@ The firmware also subscribes at QoS 1 to
 `projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.
 
-The onboard 128x64 SSD1306 OLED shows BLE provisioning, HaLow, MQTT, and reset
-status. Its Heltec WiFi LoRa 32 V3 connections are SDA 17, SCL 18, reset 21,
-and active-low Vext power on GPIO 36.
+This target is the Heltec HT-HC33. It has no dependency on the WiFi LoRa 32 V3
+SSD1306 display or its I2C/Vext pins; provisioning, HaLow, MQTT, and reset status
+are reported on the serial monitor at 115200 baud.
 
 To clear all saved provisioning data, press and hold the Heltec `USER/PRG`
-button on GPIO 0 for five seconds after the firmware boots. The OLED shows a
-countdown, the firmware erases the HaLow and MQTT credentials from NVS, and
+button on GPIO 0 for five seconds after the firmware boots. The serial log shows
+a countdown, the firmware erases the HaLow and MQTT credentials from NVS, and
 the board restarts advertising `PROV_<serial>` over BLE. Releasing the button
-before five seconds cancels the reset and restores the current status display.
+before five seconds cancels the reset and reports the current status over serial.
 
 Production hardware should enable encrypted NVS/flash encryption. Credentials
 must never be compiled into source or logged.
