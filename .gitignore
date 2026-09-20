@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+.expo/
+dist/
+.env
+app/android/
+firmware/.pio/
+firmware/managed_components/
+infra/appwrite.config.json
+site/.next
+site/out

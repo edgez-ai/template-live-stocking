@@ -1,0 +1,13 @@
+{
+  "name": "iot-provisioning-function",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "check": "node --check src/main.js"
+  },
+  "dependencies": {
+    "node-appwrite": "^20.0.0"
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "projectId": "<PROJECT_ID>",
+  "endpoint": "https://appwrite.edgez.ai/v1",
+  "authMethods": [
+    { "$id": "email-password", "name": "Email and password", "enabled": true },
+    { "$id": "jwt", "name": "JWT", "enabled": true },
+    { "$id": "anonymous", "name": "Anonymous sessions", "enabled": false }
+  ],
+  "platforms": [
+    {
+      "$id": "iot-provisioning-web",
+      "name": "IoT Provisioning web",
+      "type": "web",
+      "hostname": "{siteDomain:iot-provisioning}"
+    },
+    {
+      "$id": "iot-provisioning-local",
+      "name": "IoT Provisioning local web",
+      "type": "web",
+      "hostname": "localhost"
+    },
+    {
+      "$id": "iot-provisioning-android",
+      "name": "IoT Provisioning Android",
+      "type": "android",
+      "applicationId": "biz.edgez.iot_provisioning"
+    }
+  ],
+  "tablesDB": [
+    {
+      "$id": "iot-provisioning",
+      "name": "IoT Provisioning",
+      "enabled": true
+    }
+  ],
+  "tables": [
+    {
+      "$id": "telemetry",
+      "databaseId": "iot-provisioning",
+      "name": "Telemetry",
+      "permissions": [],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "channel", "type": "varchar", "size": 160, "required": true, "array": false },
+        { "key": "topic", "type": "varchar", "size": 320, "required": true, "array": false },
+        { "key": "payload", "type": "varchar", "size": 10000, "required": true, "array": false },
+        { "key": "receivedAt", "type": "varchar", "size": 40, "required": true, "array": false }
+      ],
+      "indexes": [
+        { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
+        { "key": "device-id", "type": "key", "attributes": ["deviceId"] },
+        { "key": "device-history", "type": "key", "attributes": ["deviceId", "receivedAt"], "orders": ["ASC", "ASC"] }
+      ]
+    }
+  ],
+  "buckets": [],
+  "functions": [
+    {
+      "$id": "iot-provisioning",
+      "name": "IoT MQTT ingest",
+      "runtime": "node-24",
+      "path": "function",
+      "entrypoint": "src/main.js",
+      "commands": "npm ci",
+      "execute": [],
+      "events": ["devices.*.mqtt.message.publish"],
+      "schedule": "",
+      "timeout": 15,
+      "enabled": true,
+      "logging": true,
+      "buildSpecification": "s-1vcpu-1gb",
+      "runtimeSpecification": "s-1vcpu-512mb",
+      "scopes": ["devices.read", "rows.write"],
+      "vars": [
+        { "key": "IOT_PROV_DATABASE_ID", "value": "iot-provisioning" },
+        { "key": "IOT_PROV_TELEMETRY_TABLE_ID", "value": "telemetry" }
+      ]
+    }
+  ],
+  "sites": [
+    {
+      "$id": "iot-provisioning",
+      "name": "IoT Provisioning",
+      "framework": "nextjs",
+      "buildRuntime": "node-24",
+      "adapter": "static",
+      "path": "site",
+      "enabled": true,
+      "logging": true,
+      "timeout": 30,
+      "installCommand": "npm ci",
+      "buildCommand": "npm run build",
+      "outputDirectory": "out",
+      "fallbackFile": "index.html",
+      "vars": [
+        { "key": "IOT_PROV_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
+        { "key": "IOT_PROV_DATABASE_ID", "value": "iot-provisioning" },
+        { "key": "IOT_PROV_TELEMETRY_TABLE_ID", "value": "telemetry" }
+      ]
+    }
+  ]
+}

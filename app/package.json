@@ -1,0 +1,25 @@
+{
+  "name": "iot-provisioning-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "node ./scripts/start-remote-android.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@orbital-systems/react-native-esp-idf-provisioning": "^0.5.5",
+    "expo": "~57.0.9",
+    "expo-constants": "~55.0.17",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.2.0",
+    "react-native": "0.83.0",
+    "react-native-appwrite": "^0.20.0",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.0",
+    "typescript": "~5.9.2"
+  }
+}

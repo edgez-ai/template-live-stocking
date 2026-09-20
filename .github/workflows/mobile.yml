@@ -1,0 +1,63 @@
+name: Build mobile app
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      APP_NAME: iot-provisioning
+      DOMAIN_SUFFIX: edgez.biz
+      APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
+      APPWRITE_PROJECT_ID: build-placeholder
+      DATABASE_ID: iot-provisioning
+      TELEMETRY_TABLE_ID: telemetry
+      CI: "1"
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Install mobile dependencies
+        working-directory: app
+        run: npm ci
+      - name: Generate Android project
+        working-directory: app
+        run: npx expo prebuild --platform android --clean --no-install
+      - name: Build APK and app bundle
+        working-directory: app/android
+        run: ./gradlew assembleRelease bundleRelease --no-daemon
+      - name: Package mobile artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/mobile
+          cp app/android/app/build/outputs/apk/release/app-release.apk dist/mobile/iot-provisioning.apk
+          cp app/android/app/build/outputs/bundle/release/app-release.aab dist/mobile/iot-provisioning.aab
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iot-provisioning-mobile
+          path: dist/mobile/*
+      - name: Attach mobile builds to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/mobile/iot-provisioning.apk dist/mobile/iot-provisioning.aab --clobber
