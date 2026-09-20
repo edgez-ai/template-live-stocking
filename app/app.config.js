@@ -34,6 +34,7 @@ module.exports = {
     orientation: "portrait",
     userInterfaceStyle: "light",
     plugins: [
+      "expo-status-bar",
       ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
       "./plugins/withOrganicMaps",
     ],
