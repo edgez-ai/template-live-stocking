@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "name": "iot-provisioning",
+  "name": "live-stocking",
   "appwriteConfig": "appwrite.config.json",
   "deploymentEngine": {
     "name": "appwrite-cli",
@@ -13,7 +13,7 @@
     {
       "id": "mqtt-ingest",
       "type": "function",
-      "name": "IoT MQTT ingest",
+      "name": "Live Stocking MQTT ingest",
       "rootDirectory": "function",
       "runtime": "node-24",
       "entrypoint": "src/main.js",
@@ -22,7 +22,7 @@
     {
       "id": "web",
       "type": "site",
-      "name": "IoT Provisioning",
+      "name": "Live Stocking",
       "rootDirectory": "site",
       "framework": "nextjs",
       "installCommand": "npm ci",

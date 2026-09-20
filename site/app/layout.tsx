@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./styles.css";
 
 export const metadata: Metadata = {
-  title: "IoT Provisioning",
+  title: "Live Stocking",
   description: "Authenticated device and MQTT telemetry dashboard",
 };
 

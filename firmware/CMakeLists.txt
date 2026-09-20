@@ -6,4 +6,4 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(COMPILE_DEFINITIONS "LWIP_NETIF_LINK_CALLBACK=1" APPEND)
 idf_build_set_property(COMPILE_DEFINITIONS "LWIP_NETIF_STATUS_CALLBACK=1" APPEND)
 
-project(iot_provisioning)
+project(live_stocking)

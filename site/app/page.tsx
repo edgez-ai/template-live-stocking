@@ -231,7 +231,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">P</span><strong>IoT Provisioning</strong>{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read your permitted device and telemetry rows directly from Appwrite.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void authenticate(false); }}>

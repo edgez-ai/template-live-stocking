@@ -8,35 +8,35 @@
   ],
   "platforms": [
     {
-      "$id": "iot-provisioning-web",
-      "name": "IoT Provisioning web",
+      "$id": "live-stocking-web",
+      "name": "Live Stocking web",
       "type": "web",
-      "hostname": "{siteDomain:iot-provisioning}"
+      "hostname": "{siteDomain:live-stocking}"
     },
     {
-      "$id": "iot-provisioning-local",
-      "name": "IoT Provisioning local web",
+      "$id": "live-stocking-local",
+      "name": "Live Stocking local web",
       "type": "web",
       "hostname": "localhost"
     },
     {
-      "$id": "iot-provisioning-android",
-      "name": "IoT Provisioning Android",
+      "$id": "live-stocking-android",
+      "name": "Live Stocking Android",
       "type": "android",
-      "applicationId": "biz.edgez.iot_provisioning"
+      "applicationId": "biz.edgez.live_stocking"
     }
   ],
   "tablesDB": [
     {
-      "$id": "iot-provisioning",
-      "name": "IoT Provisioning",
+      "$id": "live-stocking",
+      "name": "Live Stocking",
       "enabled": true
     }
   ],
   "tables": [
     {
       "$id": "telemetry",
-      "databaseId": "iot-provisioning",
+      "databaseId": "live-stocking",
       "name": "Telemetry",
       "permissions": [],
       "rowSecurity": true,
@@ -59,8 +59,8 @@
   "buckets": [],
   "functions": [
     {
-      "$id": "iot-provisioning",
-      "name": "IoT MQTT ingest",
+      "$id": "live-stocking",
+      "name": "Live Stocking MQTT ingest",
       "runtime": "node-24",
       "path": "function",
       "entrypoint": "src/main.js",
@@ -75,15 +75,15 @@
       "runtimeSpecification": "s-1vcpu-512mb",
       "scopes": ["devices.read", "rows.write"],
       "vars": [
-        { "key": "IOT_PROV_DATABASE_ID", "value": "iot-provisioning" },
-        { "key": "IOT_PROV_TELEMETRY_TABLE_ID", "value": "telemetry" }
+        { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
+        { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" }
       ]
     }
   ],
   "sites": [
     {
-      "$id": "iot-provisioning",
-      "name": "IoT Provisioning",
+      "$id": "live-stocking",
+      "name": "Live Stocking",
       "framework": "nextjs",
       "buildRuntime": "node-24",
       "adapter": "static",
@@ -96,9 +96,9 @@
       "outputDirectory": "out",
       "fallbackFile": "index.html",
       "vars": [
-        { "key": "IOT_PROV_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
-        { "key": "IOT_PROV_DATABASE_ID", "value": "iot-provisioning" },
-        { "key": "IOT_PROV_TELEMETRY_TABLE_ID", "value": "telemetry" }
+        { "key": "LIVE_STOCKING_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
+        { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
+        { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" }
       ]
     }
   ]

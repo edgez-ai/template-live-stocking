@@ -10,13 +10,13 @@ export function installSite() {
   ];
   run(exists(["sites", "get", "--site-id", id]) ? ["sites", "update", ...settings] : ["sites", "create", ...settings]);
   const variables = [
-    ["IOT_PROV_APP_NAME", config.name],
-    ["IOT_PROV_PROJECT_NAME", config.projectName],
-    ["IOT_PROV_DOMAIN_SUFFIX", config.domainSuffix],
-    ["IOT_PROV_ENDPOINT", config.publicEndpoint],
-    ["IOT_PROV_PROJECT_ID", config.projectId],
-    ["IOT_PROV_DATABASE_ID", config.databaseId],
-    ["IOT_PROV_TELEMETRY_TABLE_ID", config.telemetryTableId],
+    ["LIVE_STOCKING_APP_NAME", config.name],
+    ["LIVE_STOCKING_PROJECT_NAME", config.projectName],
+    ["LIVE_STOCKING_DOMAIN_SUFFIX", config.domainSuffix],
+    ["LIVE_STOCKING_ENDPOINT", config.publicEndpoint],
+    ["LIVE_STOCKING_PROJECT_ID", config.projectId],
+    ["LIVE_STOCKING_DATABASE_ID", config.databaseId],
+    ["LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId],
   ];
   for (const [key, value] of variables) upsertResourceVariable("sites", "--site-id", id, key, value);
   run(["sites", "create-deployment", "--site-id", id, "--code", "../site", "--install-command", "npm install", "--build-command", "npm run build", "--output-directory", "out", "--activate", "true"], { cwd: infraDir });

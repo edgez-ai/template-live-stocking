@@ -1,5 +1,5 @@
 {
-  "name": "iot-provisioning-function",
+  "name": "live-stocking-function",
   "version": "1.0.0",
   "private": true,
   "type": "module",

@@ -11,7 +11,7 @@ export function installFunction() {
   run(exists(["functions", "get", "--function-id", id])
     ? ["functions", "update", ...settings]
     : ["functions", "create", ...settings]);
-  upsertResourceVariable("functions", "--function-id", id, "IOT_PROV_DATABASE_ID", config.databaseId);
-  upsertResourceVariable("functions", "--function-id", id, "IOT_PROV_TELEMETRY_TABLE_ID", config.telemetryTableId);
+  upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_DATABASE_ID", config.databaseId);
+  upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId);
   run(["functions", "create-deployment", "--function-id", id, "--code", "../function", "--activate", "true", "--entrypoint", "src/main.js", "--commands", "npm install"], { cwd: infraDir });
 }

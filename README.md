@@ -1,4 +1,4 @@
-# IoT Provisioning
+# Live Stocking
 
 An Appwrite + Next.js + React Native + ESP32-S3 starter for authenticated device
 onboarding, offline device mapping, Wi-Fi HaLow provisioning, and MQTT telemetry.
@@ -23,7 +23,7 @@ version-controlled solution plan. **Deploy on EdgeZ** applies the auth methods,
 web and Android platforms, telemetry database and indexes, MQTT Function, Site,
 variables, domains, and both source deployments after project selection.
 
-Open `iot-provisioning.code-workspace` in VS Code to work on all five folders.
+Open `live-stocking.code-workspace` in VS Code to work on all five folders.
 
 ## Provisioning flow
 

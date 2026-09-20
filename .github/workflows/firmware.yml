@@ -32,13 +32,13 @@ jobs:
           find firmware/.pio/build/heltec_wifi_lora_32_V3 -maxdepth 1 -type f \
             \( -name '*.bin' -o -name '*.elf' -o -name '*.map' \) \
             -exec cp {} dist/firmware/ \;
-          tar -C dist -czf dist/iot-provisioning-firmware.tar.gz firmware
+          tar -C dist -czf dist/live-stocking-firmware.tar.gz firmware
       - uses: actions/upload-artifact@v4
         with:
-          name: iot-provisioning-firmware
-          path: dist/iot-provisioning-firmware.tar.gz
+          name: live-stocking-firmware
+          path: dist/live-stocking-firmware.tar.gz
       - name: Attach firmware to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/iot-provisioning-firmware.tar.gz --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/live-stocking-firmware.tar.gz --clobber

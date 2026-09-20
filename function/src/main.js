@@ -1,7 +1,7 @@
 import { Client, ID, TablesDB } from "node-appwrite";
 
-const DATABASE_ID = process.env.IOT_PROV_DATABASE_ID || process.env.DATABASE_ID;
-const TELEMETRY_TABLE_ID = process.env.IOT_PROV_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
+const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABASE_ID;
+const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
 
 function json(res, payload, status = 200) {
   return res.json(payload, status, { "cache-control": "no-store" });

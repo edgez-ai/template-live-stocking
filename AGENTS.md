@@ -1,10 +1,10 @@
-# IoT Provisioning project guide
+# Live Stocking project guide
 
 Read this file before changing this repository.
 
 ## Product
 
-IoT Provisioning is an authenticated Appwrite example for onboarding ESP32-S3
+Live Stocking is an authenticated Appwrite example for onboarding ESP32-S3
 devices and viewing MQTT telemetry. Web and mobile use Appwrite Auth and access
 TablesDB directly under row-level permissions. The Function is reserved for
 trusted MQTT ingestion and is the only MQTT-to-TablesDB writer.
