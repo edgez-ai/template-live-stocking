@@ -1,0 +1,33 @@
+name: Keep Deploy on EdgeZ link current
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-deploy-link-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the deploy button at this repository
+        run: python3 .github/scripts/sync-deploy-link.py
+      - name: Commit the updated link
+        shell: bash
+        run: |
+          if git diff --quiet -- README.md; then
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update Deploy on EdgeZ repository"
+          git push

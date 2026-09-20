@@ -5,8 +5,8 @@ onboarding, offline device mapping, Wi-Fi HaLow provisioning, and MQTT telemetry
 It mirrors the five-part structure of Hello Channels while giving each folder a
 provisioning-specific responsibility.
 
-[![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-iot-prov&template_owner=edgez-ai)
-[![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-iot-prov)
+[![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-live-stocking&template_owner=edgez-ai)
+[![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-live-stocking)
 
 ## Repository layout
 
