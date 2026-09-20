@@ -33,7 +33,10 @@ module.exports = {
     version: "1.0.0",
     orientation: "portrait",
     userInterfaceStyle: "light",
-    plugins: [["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }]],
+    plugins: [
+      ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
+      "./plugins/withOrganicMaps",
+    ],
     android: { package: platform },
     extra: {
       appwriteEndpoint: endpoint,

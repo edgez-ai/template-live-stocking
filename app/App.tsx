@@ -1,19 +1,22 @@
 import Constants from "expo-constants";
 import { StatusBar } from "expo-status-bar";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { LayoutChangeEvent } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Account, Client, ID, Models, Permission, Query, Role, TablesDB } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
+import { EdgezOrganicMap } from "@edgez/react-native-sdk";
+import type { EdgezMapDownloadUpdate, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean };
+type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; latitude?: number; longitude?: number };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; databaseId: string; telemetryTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type TemperaturePoint = { timestamp: number; value: number };
+type HalowWifiList = ESPWifiList & { halowSsid?: string };
 
 const appConfig = Constants.expoConfig?.extra as AppConfig | undefined;
 if (!appConfig) throw new Error("Expo Appwrite configuration is missing");
@@ -90,6 +93,49 @@ function TemperatureChart({ points, duration }: { points: TemperaturePoint[]; du
   </View>;
 }
 
+function OfflineMap({ devices }: { devices: Device[] }) {
+  const map = useRef<EdgezOrganicMapRef>(null);
+  const [region, setRegion] = useState("");
+  const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
+  const [mapError, setMapError] = useState("");
+  const markers = useMemo<EdgezMapNode[]>(() => devices.flatMap((device) =>
+    Number.isFinite(device.latitude) && Number.isFinite(device.longitude) ? [{
+      id: device.$id,
+      label: device.name,
+      latitude: device.latitude!,
+      longitude: device.longitude!,
+      marker: device.enabled ? "blue" : "gray",
+    }] : [],
+  ), [devices]);
+
+  return <View style={styles.mapCard}>
+    <EdgezOrganicMap
+      ref={map}
+      nodes={markers}
+      centerLatitude={59.3293}
+      centerLongitude={18.0686}
+      zoom={9}
+      enableMapDownloads
+      style={styles.map}
+      onMapRegionAvailable={setRegion}
+      onMapDownloadUpdate={(update) => { setRegion(""); setDownload(update); }}
+      onMapError={setMapError}
+    />
+    <View style={styles.mapLabel}><Text style={styles.mapLabelText}>OFFLINE MAP</Text></View>
+    {region ? <View style={styles.mapPrompt}>
+      <Text style={styles.mapPromptTitle}>Save {region} offline?</Text>
+      <Text style={styles.mapPromptText}>Download this region so the map keeps working without internet.</Text>
+      <View style={styles.mapPromptActions}>
+        <Pressable style={styles.mapDownloadButton} onPress={() => { map.current?.downloadRegion(region); setRegion(""); }}><Text style={styles.mapDownloadText}>DOWNLOAD</Text></Pressable>
+        <Pressable style={styles.mapLaterButton} onPress={() => { map.current?.dismissDownloadRegion(region); setRegion(""); }}><Text style={styles.mapLaterText}>NOT NOW</Text></Pressable>
+      </View>
+    </View> : null}
+    {download && !download.finished ? <View style={styles.mapNotice}><Text style={styles.mapNoticeText}>{download.status}{download.progress === undefined ? "" : ` · ${Math.round(download.progress)}%`}</Text></View> : null}
+    {mapError ? <View style={[styles.mapNotice, styles.mapError]}><Text style={styles.mapNoticeText}>{mapError}</Text></View> : null}
+    <Text style={styles.mapAttribution}>{markers.length ? `${markers.length} located devices` : "Pan or zoom to choose an offline region"} · © OpenStreetMap contributors</Text>
+  </View>;
+}
+
 function serialFromBleName(name: string) {
   const serial = name.startsWith("PROV_") ? name.slice(5).toUpperCase() : "";
   if (!/^[A-F0-9]{12}$/.test(serial)) throw new Error(`Invalid provisioning name: ${name}`);
@@ -141,7 +187,7 @@ export default function App() {
   const [selectedBleDevice, setSelectedBleDevice] = useState<ESPDevice | null>(null);
   const [proofOfPossession, setProofOfPossession] = useState(provisioningPop);
   const [bleConnected, setBleConnected] = useState(false);
-  const [wifiNetworks, setWifiNetworks] = useState<ESPWifiList[]>([]);
+  const [wifiNetworks, setWifiNetworks] = useState<HalowWifiList[]>([]);
   const [name, setName] = useState("");
   const [ssid, setSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
@@ -250,9 +296,12 @@ export default function App() {
   }
 
   async function scanWifiNetworks(device: ESPDevice) {
-    setProvisioningStatus("Asking the ESP32 to scan nearby Wi-Fi networks…");
-    const found = await device.scanWifiList();
-    const strongestBySsid = new Map<string, ESPWifiList>();
+    setProvisioningStatus("Asking the ESP32-S3 to scan nearby Wi-Fi HaLow networks…");
+    const response = await device.sendData("halow-scan", "{}");
+    const payload = JSON.parse(response) as { networks?: HalowWifiList[]; error?: string };
+    if (payload.error) throw new Error(`HaLow scan failed: ${payload.error}`);
+    const found = payload.networks || [];
+    const strongestBySsid = new Map<string, HalowWifiList>();
     for (const network of found) {
       const networkSsid = network.ssid.trim();
       if (!networkSsid) continue;
@@ -263,7 +312,7 @@ export default function App() {
     }
     const networks = [...strongestBySsid.values()].sort((left, right) => right.rssi - left.rssi);
     setWifiNetworks(networks);
-    setProvisioningStatus(networks.length ? "Select the Wi-Fi network for this device." : "The ESP32 found no Wi-Fi networks.");
+    setProvisioningStatus(networks.length ? "Select the Wi-Fi HaLow network for this device." : "The ESP32-S3 found no Wi-Fi HaLow networks.");
   }
 
   function selectBleDevice(device: ESPDevice) {
@@ -335,11 +384,15 @@ export default function App() {
       const accepted = JSON.parse(mqttResponse) as { ok?: boolean };
       if (!accepted.ok) throw new Error("The device rejected its MQTT credential.");
 
-      setProvisioningStatus("Sending Wi-Fi credentials…");
-      const result = await selectedBleDevice.provision(ssid.trim(), wifiPassword);
-      if (result.status && !/success|connected/i.test(result.status)) {
-        throw new Error(`Wi-Fi provisioning failed: ${result.status}`);
-      }
+      setProvisioningStatus("Sending Wi-Fi HaLow credentials…");
+      const selectedNetwork = wifiNetworks.find((network) => network.ssid === ssid);
+      const halowResponse = await selectedBleDevice.sendData("halow-config", JSON.stringify({
+        ssid: selectedNetwork?.halowSsid || ssid.replace(/ \(\d+ MHz\)$/, ""),
+        password: wifiPassword,
+        bssid: selectedNetwork?.bssid || "",
+      }));
+      const halowAccepted = JSON.parse(halowResponse) as { ok?: boolean; error?: string };
+      if (!halowAccepted.ok) throw new Error(halowAccepted.error || "The device rejected the HaLow credentials.");
       setProvisioningStatus(`Provisioned ${serial}. Waiting for temperature telemetry.`);
       setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setWifiNetworks([]); setName(""); setSsid(""); setWifiPassword("");
       setProvisioningDialogOpen(false);
@@ -396,7 +449,7 @@ export default function App() {
   if (busy && !user) return <SafeAreaProvider><SafeAreaView style={styles.safe}><ActivityIndicator style={styles.loader} color="#62d8cf" size="large" /></SafeAreaView></SafeAreaProvider>;
 
   return <SafeAreaProvider><SafeAreaView style={styles.safe}><StatusBar style="light" /><KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-    <View style={styles.header}><View><Text style={styles.eyebrow}>APPWRITE DEVICES · MQTT</Text><Text style={styles.title}>{user ? "Device telemetry" : "Operator access"}</Text></View>{user && <View style={styles.headerActions}><Pressable style={styles.addButton} onPress={openProvisioningDialog} disabled={busy}><Text style={styles.addButtonText}>+ ADD</Text></Pressable><Pressable onPress={signOut}><Text style={styles.signOut}>SIGN OUT</Text></Pressable></View>}</View>
+    <View style={styles.header}><View><Text style={styles.eyebrow}>APPWRITE DEVICES · MQTT</Text><Text style={styles.title}>{user ? "Live stocking" : "Operator access"}</Text></View>{user && <View style={styles.headerActions}><Pressable style={styles.addButton} onPress={openProvisioningDialog} disabled={busy}><Text style={styles.addButtonText}>+ ADD</Text></Pressable><Pressable onPress={signOut}><Text style={styles.signOut}>SIGN OUT</Text></Pressable></View>}</View>
     {!user ? <View style={styles.auth}>
       <Text style={styles.hero}>Devices in.{"\n"}<Text style={styles.accent}>Signals out.</Text></Text>
       <Text style={styles.authLabel}>EMAIL</Text>
@@ -406,6 +459,7 @@ export default function App() {
       <Pressable style={styles.primary} onPress={() => authenticate(false)} disabled={busy}><Text style={styles.primaryText}>SIGN IN</Text></Pressable>
       <Pressable style={styles.secondary} onPress={() => authenticate(true)} disabled={busy}><Text style={styles.secondaryText}>CREATE ACCOUNT</Text></Pressable>
     </View> : <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <OfflineMap devices={devices} />
       <Text style={styles.sectionLabel}>{devices.length} DEVICES</Text>
       {devices.map((device) => {
         const latest = latestTemperatureByDevice.get(device.$id);
@@ -421,7 +475,7 @@ export default function App() {
     <Modal visible={provisioningDialogOpen} animationType="slide" onRequestClose={closeProvisioningDialog}>
       <SafeAreaView style={styles.dialogPage}>
         <KeyboardAvoidingView style={styles.dialogScreen} behavior={Platform.OS === "ios" ? "padding" : undefined} accessibilityViewIsModal>
-          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {provisioningStep} OF 3</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : "Connect Wi-Fi"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
+          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {provisioningStep} OF 3</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : "Connect HaLow"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
           <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
             {provisioningStep === 1 && <>
               <Text style={styles.dialogHelp}>Put the ESP32 in provisioning mode, then scan for its PROV_ Bluetooth name.</Text>
@@ -435,12 +489,12 @@ export default function App() {
               <Text style={styles.fieldHint}>Optional. The serial is used when no name is entered.</Text>
               <Text style={styles.fieldLabel}>PROOF OF POSSESSION (PoP)</Text>
               <TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder="PoP shown on the device OLED" autoCapitalize="none" autoCorrect={false} />
-              <Pressable style={styles.primary} onPress={connectAndScanWifi} disabled={busy || !proofOfPossession.trim()}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT &amp; SCAN WI-FI"}</Text></Pressable>
+              <Pressable style={styles.primary} onPress={connectAndScanWifi} disabled={busy || !proofOfPossession.trim()}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT &amp; SCAN HALOW"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
-              <View style={styles.wifiHeader}><Text style={styles.fieldLabel}>WI-FI NETWORK</Text><Pressable onPress={rescanWifiNetworks} disabled={busy}><Text style={styles.rescan}>RESCAN</Text></Pressable></View>
+              <View style={styles.wifiHeader}><Text style={styles.fieldLabel}>WI-FI HALOW NETWORK</Text><Pressable onPress={rescanWifiNetworks} disabled={busy}><Text style={styles.rescan}>RESCAN</Text></Pressable></View>
               {wifiNetworks.map((network) => <Pressable key={`${network.ssid}-${network.bssid || network.channel || "ap"}`} style={[styles.wifiNetwork, ssid === network.ssid && styles.wifiNetworkSelected]} onPress={() => { setSsid(network.ssid); setWifiPassword(""); }} disabled={busy}><View><Text style={styles.deviceNameDark}>{network.ssid}</Text><Text style={styles.muted}>{network.auth === 0 ? "Open network" : "Password required"}{network.channel ? ` · Channel ${network.channel}` : ""}</Text></View><Text style={styles.signal}>{network.rssi} dBm</Text></Pressable>)}
-              {ssid && wifiNetworks.find((network) => network.ssid === ssid)?.auth !== 0 ? <><Text style={styles.fieldLabel}>WI-FI PASSWORD</Text><TextInput style={styles.inputLight} value={wifiPassword} onChangeText={setWifiPassword} placeholder={`Password for ${ssid}`} secureTextEntry /></> : null}
+              {ssid && wifiNetworks.find((network) => network.ssid === ssid)?.auth !== 0 ? <><Text style={styles.fieldLabel}>HALOW PASSWORD</Text><TextInput style={styles.inputLight} value={wifiPassword} onChangeText={setWifiPassword} placeholder={`Password for ${ssid}`} secureTextEntry /></> : null}
               <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !ssid || (wifiNetworks.find((network) => network.ssid === ssid)?.auth !== 0 && !wifiPassword)}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep > 1 && <Pressable style={styles.backButton} onPress={previousProvisioningStep} disabled={busy}><Text style={styles.secondaryText}>BACK</Text></Pressable>}
@@ -477,6 +531,7 @@ const styles = StyleSheet.create({
   auth: { flex: 1, justifyContent: "center", gap: 8, paddingBottom: 40 }, hero: { color: "white", fontSize: 45, lineHeight: 51, fontWeight: "900", letterSpacing: -1.8, marginBottom: 24 }, accent: { color: "#ff8264" }, authLabel: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: 1, marginTop: 5 },
   input: { height: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, color: "white", fontSize: 16 }, primary: { minHeight: 54, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87", marginTop: 5 }, primaryText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, secondary: { minHeight: 52, alignItems: "center", justifyContent: "center" }, secondaryText: { color: "#69cfc7", fontSize: 11, fontWeight: "900", letterSpacing: 1 },
   content: { paddingBottom: 30, gap: 12 }, inputLight: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, color: "#0a3037", backgroundColor: "white" }, muted: { color: "#59716f", fontSize: 11 },
+  mapCard: { height: 390, overflow: "hidden", borderRadius: 18, backgroundColor: "#dce8e5" }, map: { ...StyleSheet.absoluteFillObject }, mapLabel: { position: "absolute", left: 12, top: 12, borderRadius: 9, paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#092e35e8" }, mapLabelText: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, mapPrompt: { position: "absolute", left: 12, right: 12, bottom: 28, padding: 14, borderRadius: 14, backgroundColor: "#092e35f2" }, mapPromptTitle: { color: "white", fontSize: 14, fontWeight: "900" }, mapPromptText: { color: "#b8cdca", fontSize: 11, lineHeight: 16, marginTop: 3 }, mapPromptActions: { flexDirection: "row", gap: 8, marginTop: 10 }, mapDownloadButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13, borderRadius: 9, backgroundColor: "#0a8c87" }, mapDownloadText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapLaterButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13 }, mapLaterText: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapNotice: { position: "absolute", left: 12, right: 90, top: 52, borderRadius: 9, padding: 9, backgroundColor: "#092e35e8" }, mapError: { backgroundColor: "#8f3422e8" }, mapNoticeText: { color: "white", fontSize: 10, fontWeight: "700" }, mapAttribution: { position: "absolute", left: 10, right: 10, bottom: 5, color: "#173e43", fontSize: 9, textShadowColor: "white", textShadowRadius: 4 },
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },
   wifiHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, rescan: { color: "#0a8c87", fontSize: 10, fontWeight: "900" }, wifiNetwork: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, wifiNetworkSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" }, signal: { color: "#59716f", fontSize: 10, fontWeight: "700" },
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },

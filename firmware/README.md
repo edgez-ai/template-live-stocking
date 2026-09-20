@@ -3,10 +3,11 @@
 The ESP32-S3 derives its Appwrite serial from the Wi-Fi station MAC as
 `<12 uppercase hex digits>`, for example `AABBCCDDEEFF`. It advertises it as
 `PROV_AABBCCDDEEFF` so the provisioning client can obtain the serial by stripping
-the `PROV_` prefix before creating the Appwrite Device. It provisions Wi-Fi
-through ESP-IDF BLE provisioning with the example proof of possession (PoP)
-`abcd1234` and exposes a
-custom `mqtt-config` endpoint. Send this JSON before applying Wi-Fi credentials:
+the `PROV_` prefix before creating the Appwrite Device. It uses ESP-IDF BLE
+provisioning as the secure transport, with the example proof of possession (PoP)
+`abcd1234`, but provisions the Morse Micro Wi-Fi HaLow interface through custom
+`halow-scan` and `halow-config` endpoints. It also exposes a `mqtt-config`
+endpoint. Send this JSON before applying HaLow credentials:
 
 ```json
 {
@@ -18,7 +19,15 @@ custom `mqtt-config` endpoint. Send this JSON before applying Wi-Fi credentials:
 }
 ```
 
-The endpoint rejects credentials whose MQTT username does not exactly equal
+`halow-scan` accepts `{}` and returns the nearby HaLow SSIDs, BSSIDs, signal
+strength, security, bandwidth, and frequency. `halow-config` accepts the
+selected network as `{ "ssid": "...", "password": "...", "bssid": "..." }`,
+stores it in NVS, stops BLE advertising, and connects the HaLow station using
+DHCP. The Morse driver, regulatory database, firmware, and board configuration
+are packaged in `components/morse_halow`; public builds link its ESP32-S3
+`libmorse.a` directly and do not require the internal MM-IoT source tree.
+
+The MQTT endpoint rejects credentials whose username does not exactly equal
 the device-generated serial. The broker is pinned in firmware to
 `mqtts://mqtt.edgez.ai:8883`. TLS validates
 the broker's Let's Encrypt certificate chain through ESP-IDF's trusted root
@@ -43,13 +52,13 @@ The firmware also subscribes at QoS 1 to
 `projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.
 
-The onboard 128x64 SSD1306 OLED shows BLE provisioning, Wi-Fi, MQTT, and reset
+The onboard 128x64 SSD1306 OLED shows BLE provisioning, HaLow, MQTT, and reset
 status. Its Heltec WiFi LoRa 32 V3 connections are SDA 17, SCL 18, reset 21,
 and active-low Vext power on GPIO 36.
 
 To clear all saved provisioning data, press and hold the Heltec `USER/PRG`
 button on GPIO 0 for five seconds after the firmware boots. The OLED shows a
-countdown, the firmware erases the Wi-Fi and MQTT credentials from NVS, and
+countdown, the firmware erases the HaLow and MQTT credentials from NVS, and
 the board restarts advertising `PROV_<serial>` over BLE. Releasing the button
 before five seconds cancels the reset and restores the current status display.
 

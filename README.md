@@ -1,8 +1,9 @@
 # IoT Provisioning
 
 An Appwrite + Next.js + React Native + ESP32-S3 starter for authenticated device
-onboarding and MQTT telemetry. It mirrors the five-part structure of Hello
-Channels while giving each folder a provisioning-specific responsibility.
+onboarding, offline device mapping, Wi-Fi HaLow provisioning, and MQTT telemetry.
+It mirrors the five-part structure of Hello Channels while giving each folder a
+provisioning-specific responsibility.
 
 [![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-iot-prov&template_owner=edgez-ai)
 [![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-iot-prov)
@@ -12,7 +13,7 @@ Channels while giving each folder a provisioning-specific responsibility.
 | Folder | Purpose |
 | --- | --- |
 | `site/` | Read-only Next.js portal for sign-in, devices, and telemetry |
-| `app/` | Expo + React Native BLE provisioning app |
+| `app/` | Expo app with an offline Organic Maps dashboard and BLE HaLow provisioning |
 | `function/` | Trusted MQTT webhook that writes telemetry |
 | `firmware/` | PlatformIO + ESP-IDF device client |
 | `infra/` | Rerunnable Appwrite CLI installer |
@@ -32,7 +33,9 @@ Open `iot-provisioning.code-workspace` in VS Code to work on all five folders.
 3. The mobile app strips the `PROV_` prefix, creates an Appwrite Device with that
    project-unique serial, then
    creates its one-time MQTT credential directly through the Devices API.
-4. The app sends that credential to the firmware's `mqtt-config` BLE endpoint.
+4. The app scans and selects a Wi-Fi HaLow network through the `halow-scan` BLE
+   endpoint, then sends the MQTT credential and selected HaLow network to the
+   firmware's `mqtt-config` and `halow-config` endpoints.
    Firmware connects to `mqtts://mqtt.edgez.ai:8883`, verifying the Let's Encrypt
    chain with ESP-IDF's trusted root bundle.
 5. The device publishes JSON to

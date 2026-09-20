@@ -38,11 +38,21 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 6.0.1
+    version: 5.5.1
+  u8g2:
+    component_hash: 425477116e5bd2bdc6210e77061dcab811615e85312d5e3d29d509aeba1b4f9e
+    dependencies: []
+    source:
+      git: https://github.com/olikraus/u8g2.git
+      path: .
+      type: git
+    version: ab9e48b2228351e9476682a70b7f3ee4909cd585
 direct_dependencies:
 - espressif/cjson
 - espressif/mqtt
 - espressif/network_provisioning
-manifest_hash: 8ddf63f42ed0dd6d75daaac61eb764b59a471b8edf9af40ff6323b6833e63034
+- idf
+- u8g2
+manifest_hash: 0eb49f4898089ae4ba48808e9fca0668316c495574060f6f94924fd803e1e60a
 target: esp32s3
 version: 2.0.0
