@@ -1,6 +1,7 @@
 {
   "version": 1,
   "name": "live-stocking",
+  "buildInstance": "tiny",
   "appwriteConfig": "appwrite.config.json",
   "deploymentEngine": {
     "name": "appwrite-cli",

@@ -22,6 +22,8 @@ The root `edgez.json` selects `appwrite.config.json` as the complete,
 version-controlled solution plan. **Deploy on EdgeZ** applies the auth methods,
 web and Android platforms, telemetry database and indexes, MQTT Function, Site,
 variables, domains, and both source deployments after project selection.
+Its `buildInstance` accepts `tiny`, `small`, `medium`, or `large`; this template
+defaults to `tiny` for both Site and Function builds.
 
 Open `live-stocking.code-workspace` in VS Code to work on all five folders.
 
