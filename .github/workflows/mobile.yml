@@ -23,6 +23,12 @@ jobs:
       NODE_ENV: production
     steps:
       - uses: actions/checkout@v5
+      - name: Check Appwrite project ID
+        run: |
+          if [[ -z "$APPWRITE_PROJECT_ID" ]]; then
+            echo 'Set the repository Actions variable APPWRITE_PROJECT_ID to the deployed Appwrite project ID.' >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
