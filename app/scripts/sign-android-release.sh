@@ -8,7 +8,7 @@ if [[ -z "$sdk_root" || ! -d "$sdk_root/build-tools" ]]; then
   exit 1
 fi
 
-build_tools="$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+build_tools="$(find "$sdk_root/build-tools" -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
 zipalign="$build_tools/zipalign"
 apksigner="$build_tools/apksigner"
 if [[ ! -x "$zipalign" || ! -x "$apksigner" ]]; then
@@ -17,7 +17,9 @@ if [[ ! -x "$zipalign" || ! -x "$apksigner" ]]; then
 fi
 
 apk_dir="app/android/app/build/outputs/apk/release"
-mapfile -t apks < <(find "$apk_dir" -maxdepth 1 -type f -name '*.apk')
+shopt -s nullglob
+apks=("$apk_dir"/*.apk)
+shopt -u nullglob
 if [[ "${#apks[@]}" -ne 1 ]]; then
   echo "Expected one unsigned release APK in $apk_dir" >&2
   exit 1
@@ -26,8 +28,9 @@ fi
 mkdir -p dist/mobile
 unsigned="dist/mobile/live-stocking-unsigned.apk"
 signed="dist/mobile/live-stocking-signed.apk"
-aligned="$RUNNER_TEMP/live-stocking-aligned.apk"
-keystore="$RUNNER_TEMP/live-stocking-upload.jks"
+temp_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+aligned="$temp_dir/live-stocking-aligned.apk"
+keystore="$temp_dir/live-stocking-upload.jks"
 trap 'rm -f "$aligned" "$keystore"' EXIT
 
 cp "${apks[0]}" "$unsigned"
@@ -36,7 +39,7 @@ if "$apksigner" verify "$unsigned" >/dev/null 2>&1; then
   exit 1
 fi
 
-printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+python3 -c 'import base64, os, sys; sys.stdout.buffer.write(base64.b64decode(os.environ["ANDROID_KEYSTORE_BASE64"]))' > "$keystore"
 "$zipalign" -P 16 -f 4 "$unsigned" "$aligned"
 "$apksigner" sign \
   --ks "$keystore" \

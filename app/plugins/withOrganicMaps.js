@@ -44,6 +44,12 @@ ${anchor}`);
       contents = contents.replace(anchor, `${anchor}
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")`);
     }
+    // The map SDK selects OkHttp 5.3.2, so React Native's cookie adapter must match.
+    if (!contents.includes("com.squareup.okhttp3:okhttp-urlconnection:5.3.2")) {
+      const anchor = "dependencies {";
+      contents = contents.replace(anchor, `${anchor}
+    implementation("com.squareup.okhttp3:okhttp-urlconnection:5.3.2")`);
+    }
     gradleConfig.modResults.contents = contents;
     return gradleConfig;
   });
