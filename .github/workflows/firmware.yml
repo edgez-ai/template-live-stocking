@@ -16,12 +16,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Install PlatformIO
-        run: python -m pip install platformio
+      - name: Install PlatformIO and esptool
+        run: python -m pip install platformio esptool
       - name: Build firmware
         run: pio run --project-dir firmware
       - name: Package firmware
@@ -29,16 +29,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/firmware
-          find firmware/.pio/build/heltec_wifi_lora_32_V3 -maxdepth 1 -type f \
-            \( -name '*.bin' -o -name '*.elf' -o -name '*.map' \) \
-            -exec cp {} dist/firmware/ \;
-          tar -C dist -czf dist/live-stocking-firmware.tar.gz firmware
-      - uses: actions/upload-artifact@v4
+          build_dir=firmware/.pio/build/heltec-hc33
+          cp "$build_dir/firmware.bin" dist/firmware/live-stocking-ota.bin
+          python -m esptool --chip esp32s3 merge-bin \
+            --output dist/firmware/live-stocking-flash.bin \
+            --flash-mode dio --flash-freq 80m --flash-size 16MB \
+            0x0 "$build_dir/bootloader.bin" \
+            0x8000 "$build_dir/partitions.bin" \
+            0x10000 "$build_dir/firmware.bin"
+      - uses: actions/upload-artifact@v6
         with:
           name: live-stocking-firmware
-          path: dist/live-stocking-firmware.tar.gz
+          path: dist/firmware/*.bin
       - name: Attach firmware to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/live-stocking-firmware.tar.gz --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/firmware/live-stocking-flash.bin dist/firmware/live-stocking-ota.bin --clobber

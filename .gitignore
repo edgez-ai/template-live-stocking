@@ -5,6 +5,7 @@ dist/
 .env
 .env*.local
 app/android/
+app/signing/
 firmware/.pio/
 firmware/managed_components/
 infra/appwrite.config.json

@@ -29,6 +29,16 @@ jobs:
             echo 'Set the repository Actions variable or secret APPWRITE_PROJECT_ID to the deployed Appwrite project ID.' >&2
             exit 1
           fi
+      - name: Check Android signing credentials
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" ]]; then
+            echo 'Set ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets and the ANDROID_KEY_ALIAS variable.' >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
@@ -45,22 +55,21 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Build APK and app bundle
+      - name: Build unsigned APK
         working-directory: app/android
-        run: ./gradlew assembleRelease bundleRelease --no-daemon
-      - name: Package mobile artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/mobile
-          cp app/android/app/build/outputs/apk/release/app-release.apk dist/mobile/live-stocking.apk
-          cp app/android/app/build/outputs/bundle/release/app-release.aab dist/mobile/live-stocking.aab
+        run: ./gradlew assembleRelease --no-daemon
+      - name: Sign release APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: bash app/scripts/sign-android-release.sh
       - uses: actions/upload-artifact@v6
         with:
           name: live-stocking-mobile
-          path: dist/mobile/*
+          path: dist/mobile/*.apk
       - name: Attach mobile builds to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/mobile/live-stocking.apk dist/mobile/live-stocking.aab --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/mobile/live-stocking-signed.apk dist/mobile/live-stocking-unsigned.apk --clobber

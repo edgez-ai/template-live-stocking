@@ -35,6 +35,7 @@ module.exports = {
       "expo-status-bar",
       ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
       "./plugins/withOrganicMaps",
+      "./plugins/withUnsignedRelease",
     ],
     android: { package: platform },
     extra: {

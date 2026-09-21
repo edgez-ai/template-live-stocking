@@ -105,6 +105,14 @@ Devices, and project-wide authentication settings.
 
 The separate `Build firmware` and `Build mobile app` GitHub Actions workflows
 run when a GitHub Release is published and can each be started independently
-with **Run workflow**. Firmware produces a PlatformIO archive; mobile produces
-Android APK and AAB files. Workflow-run artifacts are always retained, while
-release-triggered builds are also attached to the GitHub Release.
+with **Run workflow**. Firmware produces `live-stocking-flash.bin` for flashing
+at address `0x0` and `live-stocking-ota.bin` as the app-only OTA payload. Mobile
+produces `live-stocking-signed.apk` and `live-stocking-unsigned.apk`. Only these
+four files are attached to a GitHub Release; the two workflow-run artifacts
+contain the same files.
+
+The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
+and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
+The upload keystore and password have an ignored local backup in `app/signing/`;
+back them up securely before deleting that directory. The unsigned APK is for
+separate signing and cannot be installed as-is.
