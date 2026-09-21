@@ -5,11 +5,14 @@ const port = Number(process.env.EXPO_PORT ?? 8081);
 const serial = process.env.ANDROID_SERIAL ?? "127.0.0.1:5555";
 const metroUrl = `http://127.0.0.1:${port}`;
 const developmentClientUrl = `edgez-devtools://expo-development-client/?url=${encodeURIComponent(metroUrl)}`;
+const nodeOptions = process.env.NODE_OPTIONS?.includes("--dns-result-order=")
+  ? process.env.NODE_OPTIONS
+  : [process.env.NODE_OPTIONS, "--dns-result-order=ipv4first"].filter(Boolean).join(" ");
 
 const expo = spawn(
   "expo",
   ["start", "--dev-client", "--host", "localhost", "--port", String(port)],
-  { stdio: "inherit" },
+  { stdio: "inherit", env: { ...process.env, NODE_OPTIONS: nodeOptions } },
 );
 
 function stop() {

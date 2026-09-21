@@ -4,6 +4,7 @@ export function installAuth() {
   run(["project", "update-auth-method", "--method-id", "email-password", "--enabled", "true"]);
   run(["project", "update-auth-method", "--method-id", "jwt", "--enabled", "true"]);
   run(["project", "update-auth-method", "--method-id", "anonymous", "--enabled", "false"]);
+  run(["project", "update-membership-privacy-policy", "--user-id=true", "--user-email=true", "--user-name=true"]);
 
   ensure(
     "web auth platform",

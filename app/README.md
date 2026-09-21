@@ -13,7 +13,16 @@ reads permitted telemetry directly from TablesDB.
 
 The first signed-in session opens Settings to create a farm and its Appwrite
 team. Each farm has a row in the `farms` table, and its creator owns the team.
-Settings can create and edit farms and switch the active farm. Farm fields are
+Settings can create and edit farms through one form opened by the Create farm
+or Edit farm button, switch the active farm, and manage its team. Farm owners
+can invite members by email, optionally enter their names, and remove them.
+The team list shows email and also shows a name when available. Invitees accept
+through the web site's `/invite` page. New invitees set a password before signing in to
+the mobile app. The invitation URL defaults to the deployed site domain;
+`APPWRITE_PROJECT_NAME` selects the domain prefix, or
+`APPWRITE_TEAM_INVITE_URL` can override the complete URL at build time. Restart
+Metro after changing these variables so the updated Expo manifest reaches the
+development app. Farm fields are
 name, country, location, HaLow channel, mesh ID, and passphrase. The selected
 farm ID is saved in Appwrite account preferences and restored on the next app
 launch. The map and list show devices assigned to that farm; the list heading

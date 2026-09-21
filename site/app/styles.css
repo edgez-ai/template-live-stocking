@@ -21,6 +21,10 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .actions button { padding: 13px 18px; border: 0; border-radius: 10px; color: white; background: #0a7c78; font-weight: 800; }
 .actions button:disabled, button:disabled { opacity: .5; cursor: default; }
 .actions .secondary { color: #0a7c78; background: #e8f3f2; }
+.invite-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.invite-panel { width: min(520px, 100%); }
+.invite-panel h1 { font-size: clamp(34px, 6vw, 52px); }
+.invite-link { display: inline-flex; align-items: center; padding: 13px 18px; border-radius: 10px; color: #0a7c78; background: #e8f3f2; font-size: 14px; font-weight: 800; text-decoration: none; }
 .dashboard { padding: 42px 0; }
 .dashboard h1 { font-size: clamp(38px, 4vw, 56px); }
 .heading-row { display: flex; justify-content: space-between; align-items: end; margin-bottom: 28px; }

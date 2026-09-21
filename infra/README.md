@@ -1,6 +1,7 @@
 # Appwrite infrastructure
 
 `npm run deploy` enables email/password auth, disables anonymous auth,
+allows farm team members to see each other's user ID, email, and name,
 registers web and Android platforms, and installs the row-secured farms and
 telemetry tables, event-driven MQTT Function, static Next.js Site, variables,
 and domains. Authenticated users create farm teams and rows from the mobile

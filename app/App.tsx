@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, PermissionsAndroid, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { LayoutChangeEvent } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { Account, Client, ID, Models, Permission, Query, Role, TablesDB, Teams } from "react-native-appwrite";
+import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, Teams } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
 import { EdgezOrganicMap } from "@edgez/react-native-sdk";
@@ -16,14 +16,14 @@ import { centerChannelForCountry, channelsForCountry, halowCountries } from "./h
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
-type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs">;
+type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
 type CachedSnapshot = { version: 1; user: CurrentUser; farms: CachedFarm[]; devices: Device[]; telemetry: CachedTelemetry[] };
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "receivedAt">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; databaseId: string; telemetryTableId: string; farmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; farmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map";
@@ -109,7 +109,7 @@ async function cacheSnapshot(user: CurrentUser, farms: Farm[], devices: Device[]
     ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId } }));
   const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, receivedAt }) =>
     ({ $id, deviceId, serial, channel, topic, payload, receivedAt }));
-  const safeUser: CurrentUser = { $id: user.$id, email: user.email, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
+  const safeUser: CurrentUser = { $id: user.$id, email: user.email, name: user.name, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
   try {
     await AsyncStorage.multiSet([
       [snapshotCacheKey(user.$id), JSON.stringify({ version: 1, user: safeUser, farms: safeFarms, devices: safeDevices, telemetry: safeTelemetry } satisfies CachedSnapshot)],
@@ -338,9 +338,15 @@ export default function App() {
   const [farms, setFarms] = useState<Farm[]>([]);
   const [currentFarmId, setCurrentFarmId] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [locationPickerFor, setLocationPickerFor] = useState<"new" | "edit" | null>(null);
-  const [newFarm, setNewFarm] = useState<FarmDetails>(emptyFarmDetails);
+  const [locationPickerOpen, setLocationPickerOpen] = useState(false);
+  const [farmFormMode, setFarmFormMode] = useState<"create" | "edit" | null>(null);
   const [farmDraft, setFarmDraft] = useState<FarmDetails>(emptyFarmDetails);
+  const [members, setMembers] = useState<Models.Membership[]>([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [teamError, setTeamError] = useState("");
+  const [profileName, setProfileName] = useState("");
+  const [inviteName, setInviteName] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -450,6 +456,7 @@ export default function App() {
           setCurrentFarmId((current.prefs as { currentFarmId?: string }).currentFarmId || "");
         }
         setUser(current);
+        setProfileName(current.name || "");
         const availableFarms = await refresh(current);
         if (active && !availableFarms.length) setSettingsOpen(true);
       } catch (caught) {
@@ -520,6 +527,7 @@ export default function App() {
       const current = await account.get();
       activeUserId.current = current.$id;
       setUser(current);
+      setProfileName(current.name || "");
       setCurrentFarmId((current.prefs as { currentFarmId?: string }).currentFarmId || "");
       const availableFarms = await refresh(current);
       if (!availableFarms.length) setSettingsOpen(true);
@@ -704,13 +712,16 @@ export default function App() {
     }
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerFor(null); setTelemetry([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
   }
 
   function openSettings() {
     setMenuOpen(false);
-    setLocationPickerFor(null);
-    setFarmDraft(detailsFromFarm(farms.find((farm) => farm.$id === currentFarmId)));
+    setLocationPickerOpen(false);
+    setFarmFormMode(null);
+    setTeamError("");
+    setProfileName(user?.name || "");
+    setError("");
     setSettingsOpen(true);
   }
 
@@ -724,7 +735,9 @@ export default function App() {
       }
       setCurrentFarmId(farm.$id);
       await cacheSelectedFarm(user.$id, farm.$id);
-      setFarmDraft(detailsFromFarm(farm));
+      setFarmFormMode(null);
+      setInviteName("");
+      setInviteEmail("");
       setDetailDevice(null);
     } catch (caught) { setError(messageOf(caught)); }
     finally { setBusy(false); }
@@ -735,7 +748,7 @@ export default function App() {
     setBusy(true); setError("");
     const teamId = ID.unique();
     try {
-      const data = farmData(newFarm);
+      const data = farmData(farmDraft);
       await teams.create({ teamId, name: data.name });
       let farm: Farm;
       try {
@@ -757,7 +770,8 @@ export default function App() {
       farmsRef.current = [...farmsRef.current, farm];
       setFarms(farmsRef.current);
       await cacheSnapshot(user, farmsRef.current, devicesRef.current, telemetryRef.current);
-      setNewFarm(emptyFarmDetails);
+      setFarmFormMode(null);
+      setFarmDraft(emptyFarmDetails);
       await selectFarm(farm);
     } catch (caught) { setError(messageOf(caught)); }
     finally { setBusy(false); }
@@ -774,7 +788,65 @@ export default function App() {
       farmsRef.current = farmsRef.current.map((item) => item.$id === farm.$id ? updated : item);
       setFarms(farmsRef.current);
       await cacheSnapshot(user!, farmsRef.current, devicesRef.current, telemetryRef.current);
+      setFarmFormMode(null);
     } catch (caught) { setError(messageOf(caught)); }
+    finally { setBusy(false); }
+  }
+
+  async function inviteMember() {
+    const farm = farms.find((candidate) => candidate.$id === currentFarmId);
+    const address = inviteEmail.trim().toLowerCase();
+    const name = inviteName.trim();
+    const inviteUrl = config.teamInviteUrl?.trim();
+    if (!farm || offline || farm.ownerId !== user?.$id) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { setTeamError("Enter a valid email address."); return; }
+    if (!inviteUrl) { setTeamError("Invitation link is missing from this app build. Restart Metro or install an updated build."); return; }
+    setBusy(true); setTeamError("");
+    try {
+      await teams.createMembership({ teamId: farm.teamId, roles: [Roles.Developer], email: address, ...(name ? { name } : {}), url: inviteUrl });
+      setInviteName("");
+      setInviteEmail("");
+      setMembers((await teams.listMemberships({ teamId: farm.teamId, queries: [Query.limit(100)] })).memberships);
+      Alert.alert("Invitation sent", `An invitation was sent to ${address}.`);
+    } catch (caught) { setTeamError(messageOf(caught)); }
+    finally { setBusy(false); }
+  }
+
+  async function saveProfileName() {
+    const name = profileName.trim();
+    if (!user || offline) return;
+    if (!name) { setTeamError("Enter your name."); return; }
+    setBusy(true); setTeamError("");
+    try {
+      const updated = await account.updateName({ name });
+      setUser(updated);
+      await cacheSnapshot(updated, farmsRef.current, devicesRef.current, telemetryRef.current);
+      if (currentFarmId) {
+        const farm = farms.find((candidate) => candidate.$id === currentFarmId);
+        if (farm) setMembers((await teams.listMemberships({ teamId: farm.teamId, queries: [Query.limit(100)] })).memberships);
+      }
+    } catch (caught) { setTeamError(messageOf(caught)); }
+    finally { setBusy(false); }
+  }
+
+  function requestRemoveMember(member: Models.Membership) {
+    const farm = farms.find((candidate) => candidate.$id === currentFarmId);
+    if (!farm || farm.ownerId !== user?.$id || member.roles.includes("owner") || member.userId === user.$id) return;
+    Alert.alert(`Remove ${member.userName || member.userEmail}?`, "This person will lose access to this farm and its device readings.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Remove", style: "destructive", onPress: () => void removeMember(farm.teamId, member.$id) },
+    ]);
+  }
+
+  async function removeMember(teamId: string, membershipId: string) {
+    const farm = farms.find((candidate) => candidate.$id === currentFarmId);
+    const member = members.find((candidate) => candidate.$id === membershipId);
+    if (offline || !farm || farm.teamId !== teamId || farm.ownerId !== user?.$id || !member || member.roles.includes("owner") || member.userId === user.$id) return;
+    setBusy(true); setTeamError("");
+    try {
+      await teams.deleteMembership({ teamId, membershipId });
+      setMembers((current) => current.filter((member) => member.$id !== membershipId));
+    } catch (caught) { setTeamError(messageOf(caught)); }
     finally { setBusy(false); }
   }
 
@@ -824,6 +896,17 @@ export default function App() {
   const detailLatest = detailDevice ? latestVoltageByDevice.get(detailDevice.$id) : undefined;
   const detailStatus = detailDevice ? statusOf(detailDevice, latestTelemetryByDevice.get(detailDevice.$id)) : "";
   const currentFarm = farms.find((farm) => farm.$id === currentFarmId);
+  const activeTeamId = currentFarm?.teamId;
+  useEffect(() => {
+    if (!settingsOpen || !activeTeamId || offline || !user) { setMembers([]); setMembersLoading(false); return; }
+    let active = true;
+    setMembers([]); setMembersLoading(true); setTeamError("");
+    teams.listMemberships({ teamId: activeTeamId, queries: [Query.limit(100)] })
+      .then((result) => { if (active) setMembers(result.memberships); })
+      .catch((caught) => { if (active) setTeamError(messageOf(caught)); })
+      .finally(() => { if (active) setMembersLoading(false); });
+    return () => { active = false; };
+  }, [settingsOpen, activeTeamId, offline, user?.$id]);
   const visibleDevices = devices.filter((device) => Boolean(currentFarmId) && device.metadata?.farmId === currentFarmId);
   if (busy && !user) return <SafeAreaProvider><SafeAreaView style={styles.safe}><ActivityIndicator style={styles.loader} color="#62d8cf" size="large" /></SafeAreaView></SafeAreaProvider>;
 
@@ -867,21 +950,50 @@ export default function App() {
         </View>}
       </View>
     </View>}
-    <Modal visible={settingsOpen && Boolean(user)} animationType="slide" onRequestClose={() => locationPickerFor ? setLocationPickerFor(null) : setSettingsOpen(false)}>
-      {locationPickerFor ? <FarmLocationPicker location={locationPickerFor === "new" ? newFarm.location : farmDraft.location} country={locationPickerFor === "new" ? newFarm.country : farmDraft.country} onCancel={() => setLocationPickerFor(null)} onSelect={(location) => { if (locationPickerFor === "new") setNewFarm({ ...newFarm, location }); else setFarmDraft({ ...farmDraft, location }); setLocationPickerFor(null); }} /> : <SafeAreaView style={styles.dialogPage}>
+    <Modal visible={settingsOpen && Boolean(user)} animationType="slide" onRequestClose={() => locationPickerOpen ? setLocationPickerOpen(false) : setSettingsOpen(false)}>
+      {locationPickerOpen ? <FarmLocationPicker location={farmDraft.location} country={farmDraft.country} onCancel={() => setLocationPickerOpen(false)} onSelect={(location) => { setFarmDraft({ ...farmDraft, location }); setLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
         <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>SETTINGS</Text><Text style={styles.dialogTitle}>Farms</Text></View><Pressable onPress={() => setSettingsOpen(false)}><Text style={styles.close}>CLOSE</Text></Pressable></View>
         <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
           <Text style={styles.dialogHelp}>Choose the farm for this app. The selected farm is saved to your account and opens next time.</Text>
           {offline && <Text style={styles.dialogHelp}>Offline: cached farms can be viewed and switched. Connect to edit or create a farm.</Text>}
           {farms.map((farm) => <Pressable key={farm.$id} style={[styles.farmRow, farm.$id === currentFarmId && styles.farmRowSelected]} onPress={() => void selectFarm(farm)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: farm.$id === currentFarmId }}><Text style={styles.deviceNameDark}>{farm.name}</Text><Text style={styles.muted}>{farm.$id === currentFarmId ? "CURRENT FARM" : "TAP TO SWITCH"}</Text></Pressable>)}
-          {!farms.length && <Text style={styles.muted}>No farms yet. Create the first farm below.</Text>}
-          <Text style={styles.fieldLabel}>CREATE FARM</Text>
-          <FarmFields value={newFarm} onChange={setNewFarm} onPickLocation={() => setLocationPickerFor("new")} />
-          <Pressable style={[styles.primary, offline && styles.disabledButton]} onPress={() => void createFarm()} disabled={busy || offline}><Text style={styles.primaryText}>CREATE FARM & TEAM</Text></Pressable>
-          {currentFarm && currentFarm.ownerId === user?.$id && <>
-            <Text style={styles.fieldLabel}>EDIT CURRENT FARM</Text>
-            <FarmFields value={farmDraft} onChange={setFarmDraft} onPickLocation={() => setLocationPickerFor("edit")} />
-            <Pressable style={[styles.primary, offline && styles.disabledButton]} onPress={() => void saveFarm()} disabled={busy || offline}><Text style={styles.primaryText}>SAVE FARM</Text></Pressable>
+          {!farms.length && <Text style={styles.muted}>No farms yet. Create your first farm.</Text>}
+          <View style={styles.settingsActions}>
+            <Pressable style={[styles.primary, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(emptyFarmDetails); setFarmFormMode("create"); setError(""); }} disabled={busy || offline}><Text style={styles.primaryText}>CREATE FARM</Text></Pressable>
+            {currentFarm?.ownerId === user?.$id && <Pressable style={[styles.outlineButton, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(detailsFromFarm(currentFarm)); setFarmFormMode("edit"); setError(""); }} disabled={busy || offline}><Text style={styles.outlineButtonText}>EDIT FARM</Text></Pressable>}
+          </View>
+          {farmFormMode && <>
+            <Text style={styles.fieldLabel}>{farmFormMode === "create" ? "CREATE FARM" : `EDIT ${currentFarm?.name || "FARM"}`}</Text>
+            <FarmFields value={farmDraft} onChange={setFarmDraft} onPickLocation={() => setLocationPickerOpen(true)} />
+            <View style={styles.settingsActions}>
+              <Pressable style={[styles.primary, styles.settingsAction]} onPress={() => void (farmFormMode === "create" ? createFarm() : saveFarm())} disabled={busy}><Text style={styles.primaryText}>{farmFormMode === "create" ? "CREATE FARM & TEAM" : "SAVE FARM"}</Text></Pressable>
+              <Pressable style={[styles.outlineButton, styles.settingsAction]} onPress={() => { setFarmFormMode(null); setError(""); }} disabled={busy}><Text style={styles.outlineButtonText}>CANCEL</Text></Pressable>
+            </View>
+          </>}
+          {currentFarm && <>
+            <Text style={styles.sectionLabel}>FARM TEAM</Text>
+            <Text style={styles.dialogHelp}>Team members can view this farm, its devices, and their readings.</Text>
+            {offline ? <Text style={styles.muted}>Connect to view and manage team members.</Text> : membersLoading ? <ActivityIndicator color="#0a8c87" /> : members.length ? members.map((member) => {
+              const isCurrentOwner = currentFarm.ownerId === user?.$id && member.roles.includes("owner");
+              const displayName = isCurrentOwner ? user.name?.trim() || member.userName?.trim() : member.userName?.trim();
+              const displayEmail = member.userEmail || (isCurrentOwner ? user.email : "");
+              const status = member.confirm ? (member.roles.includes("owner") ? "Owner" : "Member") : "Invitation pending";
+              return <View key={member.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{displayEmail || displayName || "Member details hidden by Appwrite"}</Text><Text style={styles.muted}>{displayEmail && displayName ? `${displayName} · ${status}` : status}</Text></View>{currentFarm.ownerId === user?.$id && !member.roles.includes("owner") && member.userId !== user.$id && <Pressable onPress={() => requestRemoveMember(member)} disabled={busy} accessibilityRole="button" accessibilityLabel={`Remove ${displayEmail || displayName || "member"}`}><Text style={styles.removeMemberText}>REMOVE</Text></Pressable>}</View>;
+            }) : <Text style={styles.muted}>No team members found.</Text>}
+            {!offline && <>
+              <Text style={styles.fieldLabel}>YOUR NAME</Text>
+              <TextInput style={styles.inputLight} value={profileName} onChangeText={setProfileName} placeholder="Your name in the team" autoCapitalize="words" autoComplete="name" />
+              <Pressable style={[styles.outlineButton, !profileName.trim() && styles.disabledButton]} onPress={() => void saveProfileName()} disabled={busy || !profileName.trim() || profileName.trim() === user?.name?.trim()}><Text style={styles.outlineButtonText}>SAVE NAME</Text></Pressable>
+            </>}
+            {currentFarm.ownerId === user?.$id && !offline && <>
+              <Text style={styles.sectionLabel}>INVITE MEMBER</Text>
+              <Text style={styles.fieldLabel}>NAME (OPTIONAL)</Text>
+              <TextInput style={styles.inputLight} value={inviteName} onChangeText={setInviteName} placeholder="Member's name" placeholderTextColor="#59716f" autoCapitalize="words" autoComplete="name" />
+              <Text style={styles.fieldLabel}>EMAIL (REQUIRED)</Text>
+              <TextInput style={styles.inputLight} value={inviteEmail} onChangeText={setInviteEmail} placeholder="name@example.com" placeholderTextColor="#59716f" autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
+              <Pressable style={styles.primary} onPress={() => void inviteMember()} disabled={busy || !inviteEmail.trim()}><Text style={styles.primaryText}>SEND INVITATION</Text></Pressable>
+            </>}
+            {teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}
           </>}
           {error ? <Text style={styles.dialogError}>{error}</Text> : null}
         </ScrollView>
@@ -965,6 +1077,7 @@ const styles = StyleSheet.create({
   listScroll: { flex: 1 }, listContent: { paddingHorizontal: 22, paddingTop: 94, paddingBottom: 30, gap: 12 }, inputLight: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, color: "#0a3037", backgroundColor: "white" }, muted: { color: "#59716f", fontSize: 11 },
   mapCard: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, map: { ...StyleSheet.absoluteFill }, mapPrompt: { position: "absolute", left: 12, right: 12, bottom: 28, padding: 14, borderRadius: 14, backgroundColor: "#092e35f2" }, mapPromptTitle: { color: "white", fontSize: 14, fontWeight: "900" }, mapPromptText: { color: "#b8cdca", fontSize: 11, lineHeight: 16, marginTop: 3 }, mapPromptActions: { flexDirection: "row", gap: 8, marginTop: 10 }, mapDownloadButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13, borderRadius: 9, backgroundColor: "#0a8c87" }, mapDownloadText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapLaterButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13 }, mapLaterText: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapNotice: { position: "absolute", left: 12, right: 90, top: 68, borderRadius: 9, padding: 9, backgroundColor: "#092e35e8" }, mapError: { backgroundColor: "#8f3422e8" }, mapNoticeText: { color: "white", fontSize: 10, fontWeight: "700" }, mapAttribution: { position: "absolute", left: 10, right: 10, bottom: 5, color: "#173e43", fontSize: 9, textShadowColor: "white", textShadowRadius: 4 },
   farmRow: { padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", gap: 4 }, farmRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" },
+  settingsActions: { flexDirection: "row", gap: 10 }, settingsAction: { flex: 1 }, outlineButton: { minHeight: 54, borderRadius: 14, borderWidth: 1, borderColor: "#0a8c87", alignItems: "center", justifyContent: "center", marginTop: 5 }, outlineButtonText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, memberRow: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 }, memberInfo: { flex: 1, gap: 4 }, removeMemberText: { color: "#b9472f", fontSize: 10, fontWeight: "900" },
   selectField: { minHeight: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }, selectText: { color: "#0a3037", fontSize: 14 }, optionList: { borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", overflow: "hidden" }, optionRow: { minHeight: 46, paddingHorizontal: 15, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
   passphraseField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passphraseInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037" }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
   locationMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, mapCrosshair: { position: "absolute", left: "50%", top: "50%", marginLeft: -18, marginTop: -26, width: 36, height: 52, alignItems: "center", justifyContent: "center" }, mapCrosshairText: { color: "#0a8c87", fontSize: 42, fontWeight: "900", textShadowColor: "white", textShadowRadius: 4 }, locationFooter: { paddingHorizontal: 22, paddingVertical: 12, gap: 5, backgroundColor: "#f7faf9" },

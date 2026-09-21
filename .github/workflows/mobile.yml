@@ -19,6 +19,8 @@ jobs:
       DOMAIN_SUFFIX: edgez.biz
       APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
       APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID || secrets.APPWRITE_PROJECT_ID }}
+      APPWRITE_PROJECT_NAME: ${{ vars.APPWRITE_PROJECT_NAME }}
+      APPWRITE_TEAM_INVITE_URL: ${{ vars.APPWRITE_TEAM_INVITE_URL }}
       CI: "1"
       NODE_ENV: production
     steps:
