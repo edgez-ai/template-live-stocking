@@ -7,8 +7,8 @@ firmware and the value shown on its OLED. The app establishes an ESP-IDF
 Security 1 session. The operator chooses whether the device has regular Wi-Fi
 as its upstream connection. If so, the app uses the ESP32's built-in Wi-Fi scan
 and provisioning flow. It creates or reuses the Appwrite Device, sends its
-one-time MQTT credential to `mqtt-config`, and sends the selected farm's country,
-HaLow channel, mesh ID, and passphrase to `halow-config` in either path. It also uses Appwrite Auth and
+one-time MQTT credential, selected farm's country, HaLow channel, mesh ID,
+passphrase, and optional device location together to `mqtt-config`. It also uses Appwrite Auth and
 reads permitted telemetry directly from TablesDB.
 
 The first signed-in session opens Settings to create a farm and its Appwrite
@@ -23,6 +23,9 @@ permissions. Existing devices without a farm ID remain unassigned.
 The `+ ADD` button opens a four-step flow: choose the BLE device, confirm its
 name and PoP, choose whether to use upstream Wi-Fi, then confirm the farm mesh
 settings. The Wi-Fi branch scans nearby networks and accepts SSID/password.
+Provisioning sends optional device coordinates through the existing BLE
+`mqtt-config` endpoint. The device stores them and reports them in unified status telemetry;
+the app uses the latest telemetry coordinates for map markers.
 
 The signed-in home screen opens with a full-screen Organic Maps view from
 `@edgez/react-native-sdk`. The top-right menu switches between map and list
@@ -30,8 +33,8 @@ views or signs out; `+ ADD` remains beside it. Operators can download the
 current map region once and continue viewing it offline; device coordinates
 are displayed as map nodes when latitude and longitude are present. List view
 shows the selected farm name and each device as a card with its connectivity
-status and latest internal chip temperature. Selecting a card opens the full-screen device
-history view, where the temperature line chart can show the last 30 minutes,
+status and latest battery voltage. Selecting a card opens the full-screen device
+history view, where the battery voltage line chart can show the last 30 minutes,
 1 hour, 6 hours, or 24 hours.
 The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;

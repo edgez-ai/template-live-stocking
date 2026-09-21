@@ -1,11 +1,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 #include "cJSON.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "halow_network.h"
 #include "driver/gpio.h"
-#include "driver/temperature_sensor.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -26,10 +29,12 @@ namespace {
 constexpr char kTag[] = "iot_prov";
 constexpr char kMqttNamespace[] = "mqtt";
 constexpr char kHalowNamespace[] = "halow";
+constexpr char kLocationNamespace[] = "location";
 constexpr char kMqttEndpoint[] = "mqtt-config";
-constexpr char kHalowConfigEndpoint[] = "halow-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
-constexpr TickType_t kTemperaturePublishInterval = pdMS_TO_TICKS(30000);
+constexpr TickType_t kBatteryPublishInterval = pdMS_TO_TICKS(30000);
+constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
+constexpr adc_channel_t kBatteryAdcChannel = ADC_CHANNEL_0;  // GPIO1 / ADC_IN
 constexpr EventBits_t kNetworkConnected = BIT0;
 constexpr EventBits_t kMqttConfigured = BIT1;
 constexpr EventBits_t kMqttConnected = BIT2;
@@ -52,11 +57,19 @@ struct HalowConfig {
   bool wifi_upstream;
 };
 
+struct DeviceLocation {
+  bool has_location;
+  int32_t latitude_e6;
+  int32_t longitude_e6;
+};
+
 EventGroupHandle_t state_events;
 esp_mqtt_client_handle_t mqtt_client;
-temperature_sensor_handle_t temperature_sensor;
+adc_oneshot_unit_handle_t battery_adc;
+adc_cali_handle_t battery_calibration;
 MqttConfig mqtt_config{};
 HalowConfig halow_config{};
+DeviceLocation device_location{};
 char provisioning_name[32]{};
 char provisioning_pop[16]{};
 char device_serial[24]{};
@@ -66,6 +79,7 @@ bool halow_connect_started = false;
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
+esp_err_t configure_mesh(cJSON *root);
 
 void halow_ready() {
   xEventGroupSetBits(state_events, kNetworkConnected);
@@ -189,6 +203,40 @@ bool load_halow_config() {
   return loaded;
 }
 
+esp_err_t save_device_location(const DeviceLocation &location) {
+  nvs_handle_t handle;
+  esp_err_t result = nvs_open(kLocationNamespace, NVS_READWRITE, &handle);
+  if (result != ESP_OK) return result;
+  result = nvs_set_u8(handle, "enabled", location.has_location ? 1 : 0);
+  if (result == ESP_OK && location.has_location) result = nvs_set_i32(handle, "latitude", location.latitude_e6);
+  if (result == ESP_OK && location.has_location) result = nvs_set_i32(handle, "longitude", location.longitude_e6);
+  if (result == ESP_OK) result = nvs_commit(handle);
+  nvs_close(handle);
+  return result;
+}
+
+void load_device_location() {
+  nvs_handle_t handle;
+  if (nvs_open(kLocationNamespace, NVS_READONLY, &handle) != ESP_OK) return;
+  uint8_t enabled = 0;
+  device_location.has_location =
+      nvs_get_u8(handle, "enabled", &enabled) == ESP_OK && enabled != 0 &&
+      nvs_get_i32(handle, "latitude", &device_location.latitude_e6) == ESP_OK &&
+      nvs_get_i32(handle, "longitude", &device_location.longitude_e6) == ESP_OK;
+  nvs_close(handle);
+}
+
+void append_location(char *payload, size_t capacity) {
+  if (!device_location.has_location) return;
+  const size_t length = std::strlen(payload);
+  if (length == 0 || length >= capacity) return;
+  // The caller leaves the closing brace as the last character.
+  std::snprintf(payload + length - 1, capacity - length + 1,
+                ",\"latitude\":%.6f,\"longitude\":%.6f}",
+                device_location.latitude_e6 / 1000000.0,
+                device_location.longitude_e6 / 1000000.0);
+}
+
 esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_length,
                               uint8_t **output, ssize_t *output_length, void *) {
   if (!input || input_length <= 0 || input_length > 1024 || !output || !output_length) {
@@ -207,31 +255,23 @@ esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_leng
           std::strchr(candidate.channel, '/') == nullptr;
 
   esp_err_t result = valid ? save_mqtt_config(candidate) : ESP_ERR_INVALID_ARG;
+  if (result == ESP_OK) result = configure_mesh(root);
   if (result == ESP_OK) {
     mqtt_config = candidate;
     xEventGroupSetBits(state_events, kMqttConfigured);
-    ESP_LOGI(kTag, "MQTT credential stored for serial %s", mqtt_config.username);
-    show_device_status("MQTT CONFIG", "CREDENTIAL STORED");
+    ESP_LOGI(kTag, "MQTT, mesh, and location configuration stored for serial %s", mqtt_config.username);
+    show_device_status("DEVICE CONFIG", "CREDENTIALS STORED");
   } else {
-    ESP_LOGW(kTag, "Rejected MQTT provisioning data: %s", esp_err_to_name(result));
+    ESP_LOGW(kTag, "Rejected device provisioning data: %s", esp_err_to_name(result));
   }
 
-  const char *response = result == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"invalid mqtt config\"}";
+  const char *response = result == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"invalid device config\"}";
   *output = static_cast<uint8_t *>(std::malloc(std::strlen(response) + 1));
   if (*output) std::memcpy(*output, response, std::strlen(response) + 1);
   if (!*output) result = ESP_ERR_NO_MEM;
   *output_length = *output ? std::strlen(response) : 0;
   cJSON_Delete(root);
   return result;
-}
-
-esp_err_t write_json_response(cJSON *root, uint8_t **output, ssize_t *output_length) {
-  if (!root || !output || !output_length) return ESP_ERR_INVALID_ARG;
-  char *json = cJSON_PrintUnformatted(root);
-  if (!json) return ESP_ERR_NO_MEM;
-  *output = reinterpret_cast<uint8_t *>(json);
-  *output_length = std::strlen(json);
-  return ESP_OK;
 }
 
 void connect_halow_task(void *) {
@@ -258,16 +298,19 @@ esp_err_t start_halow_connection() {
   return ESP_OK;
 }
 
-esp_err_t halow_config_handler(uint32_t, const uint8_t *input, ssize_t input_length,
-                               uint8_t **output, ssize_t *output_length, void *) {
-  if (!input || input_length <= 0 || input_length > 512 || !output || !output_length) {
-    return ESP_ERR_INVALID_ARG;
-  }
-  cJSON *root = cJSON_ParseWithLength(reinterpret_cast<const char *>(input), input_length);
+esp_err_t configure_mesh(cJSON *root) {
   HalowConfig candidate{};
   cJSON *passphrase = root ? cJSON_GetObjectItemCaseSensitive(root, "passphrase") : nullptr;
-  cJSON *channel = root ? cJSON_GetObjectItemCaseSensitive(root, "channel") : nullptr;
+  cJSON *channel = root ? cJSON_GetObjectItemCaseSensitive(root, "halowChannel") : nullptr;
   cJSON *wifi_upstream = root ? cJSON_GetObjectItemCaseSensitive(root, "wifiUpstream") : nullptr;
+  cJSON *latitude = root ? cJSON_GetObjectItemCaseSensitive(root, "latitude") : nullptr;
+  cJSON *longitude = root ? cJSON_GetObjectItemCaseSensitive(root, "longitude") : nullptr;
+  const bool location_provided = latitude || longitude;
+  const bool clear_location = cJSON_IsNull(latitude) && cJSON_IsNull(longitude);
+  const bool coordinates_valid = cJSON_IsNumber(latitude) && cJSON_IsNumber(longitude) &&
+      std::isfinite(latitude->valuedouble) && std::isfinite(longitude->valuedouble) &&
+      latitude->valuedouble >= -90 && latitude->valuedouble <= 90 &&
+      longitude->valuedouble >= -180 && longitude->valuedouble <= 180;
   const bool valid = root &&
       copy_json_string(root, "meshId", candidate.mesh_id, sizeof(candidate.mesh_id)) &&
       copy_json_string(root, "country", candidate.country, sizeof(candidate.country)) &&
@@ -278,24 +321,27 @@ esp_err_t halow_config_handler(uint32_t, const uint8_t *input, ssize_t input_len
       cJSON_IsNumber(channel) && channel->valuedouble >= 1 && channel->valuedouble <= 255 &&
       channel->valuedouble == channel->valueint &&
       cJSON_IsBool(wifi_upstream) &&
-      halow_channel_supported(candidate.country, static_cast<uint8_t>(channel->valueint));
+      halow_channel_supported(candidate.country, static_cast<uint8_t>(channel->valueint)) &&
+      (!location_provided || clear_location || coordinates_valid);
   if (valid) {
     strlcpy(candidate.passphrase, passphrase->valuestring, sizeof(candidate.passphrase));
     candidate.channel = static_cast<uint8_t>(channel->valueint);
     candidate.wifi_upstream = cJSON_IsTrue(wifi_upstream);
   }
+  DeviceLocation new_location{};
+  if (coordinates_valid) {
+    new_location.has_location = true;
+    new_location.latitude_e6 = static_cast<int32_t>(std::lround(latitude->valuedouble * 1000000));
+    new_location.longitude_e6 = static_cast<int32_t>(std::lround(longitude->valuedouble * 1000000));
+  }
   esp_err_t result = valid ? save_halow_config(candidate) : ESP_ERR_INVALID_ARG;
+  if (result == ESP_OK && location_provided) result = save_device_location(new_location);
   if (result == ESP_OK) {
     halow_config = candidate;
+    if (location_provided) device_location = new_location;
     if (!candidate.wifi_upstream) result = start_halow_connection();
   }
-  cJSON *response = cJSON_CreateObject();
-  cJSON_AddBoolToObject(response, "ok", result == ESP_OK);
-  if (result != ESP_OK) cJSON_AddStringToObject(response, "error", esp_err_to_name(result));
-  const esp_err_t response_result = write_json_response(response, output, output_length);
-  cJSON_Delete(response);
-  cJSON_Delete(root);
-  return response_result;
+  return result;
 }
 
 void make_device_identity() {
@@ -310,29 +356,53 @@ void make_device_identity() {
 
 void mqtt_event_handler(void *, esp_event_base_t, int32_t, void *);
 
-void temperature_telemetry_task(void *) {
+esp_err_t read_battery_millivolts(int *battery_mv) {
+  // HT-HC33: GPIO20 enables the battery divider, and GPIO1 reads its midpoint.
+  // R17 and R28 are both 100 kOhm, so VBAT is twice the calibrated ADC voltage.
+  gpio_set_level(kBatteryAdcControl, 1);
+  vTaskDelay(pdMS_TO_TICKS(10));
+  int sum_mv = 0;
+  esp_err_t result = ESP_OK;
+  for (int sample = 0; sample < 16; ++sample) {
+    int raw = 0;
+    int adc_mv = 0;
+    result = adc_oneshot_read(battery_adc, kBatteryAdcChannel, &raw);
+    if (result == ESP_OK) result = adc_cali_raw_to_voltage(battery_calibration, raw, &adc_mv);
+    if (result != ESP_OK) break;
+    sum_mv += adc_mv;
+  }
+  gpio_set_level(kBatteryAdcControl, 0);
+  if (result == ESP_OK) *battery_mv = (sum_mv / 16) * 2;
+  return result;
+}
+
+void battery_telemetry_task(void *) {
   while (true) {
     xEventGroupWaitBits(state_events, kMqttConnected, pdFALSE, pdTRUE, portMAX_DELAY);
 
-    float temperature_celsius = 0;
-    const esp_err_t result = temperature_sensor_get_celsius(temperature_sensor, &temperature_celsius);
-    if (result == ESP_OK && (xEventGroupGetBits(state_events) & kMqttConnected)) {
-      char topic[384]{};
-      char payload[128]{};
-      std::snprintf(topic, sizeof(topic),
-                    "projects/%s/devices/%s/telemetry/temp",
-                    mqtt_config.project_id, mqtt_config.username);
+    int battery_mv = 0;
+    const esp_err_t result = read_battery_millivolts(&battery_mv);
+    char payload[160] = "{\"status\":\"online\"}";
+    if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
       std::snprintf(payload, sizeof(payload),
-                    "{\"temperatureC\":%.2f,\"unit\":\"celsius\",\"sensor\":\"internal\"}",
-                    static_cast<double>(temperature_celsius));
-      const int message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
-      ESP_LOGI(kTag, "Temperature %.2f C published to %s (%d)",
-               static_cast<double>(temperature_celsius), topic, message_id);
+                    "{\"status\":\"online\",\"batteryVoltageMv\":%d,\"unit\":\"millivolt\"}",
+                    battery_mv);
     } else if (result != ESP_OK) {
-      ESP_LOGW(kTag, "Temperature read failed: %s", esp_err_to_name(result));
+      ESP_LOGW(kTag, "Battery ADC read failed: %s", esp_err_to_name(result));
+    } else if (battery_mv < 2500 || battery_mv > 5000) {
+      ESP_LOGW(kTag, "Battery voltage %d mV outside expected range; skipping telemetry", battery_mv);
+    }
+    append_location(payload, sizeof(payload));
+    if (xEventGroupGetBits(state_events) & kMqttConnected) {
+      char topic[384]{};
+      std::snprintf(topic, sizeof(topic),
+                    "projects/%s/devices/%s/telemetry/%s",
+                    mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
+      const int message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+      ESP_LOGI(kTag, "Unified telemetry published to %s (%d): %s", topic, message_id, payload);
     }
 
-    vTaskDelay(kTemperaturePublishInterval);
+    vTaskDelay(kBatteryPublishInterval);
   }
 }
 
@@ -358,19 +428,12 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
   if (event_id == MQTT_EVENT_CONNECTED) {
     xEventGroupSetBits(state_events, kMqttConnected);
     show_device_status("MQTT CONNECTED", device_serial);
-    char telemetry_topic[384]{};
     char command_topic[384]{};
-    std::snprintf(telemetry_topic, sizeof(telemetry_topic),
-                  "projects/%s/devices/%s/telemetry/%s",
-                  mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
     std::snprintf(command_topic, sizeof(command_topic),
                   "projects/%s/devices/%s/commands/#",
                   mqtt_config.project_id, mqtt_config.username);
     const int subscription_id = esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
-    const int publish_id = esp_mqtt_client_publish(
-        mqtt_client, telemetry_topic, "{\"status\":\"online\"}", 0, 1, 0);
-    ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d), published telemetry (%d)",
-             command_topic, subscription_id, publish_id);
+    ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)", command_topic, subscription_id);
   } else if (event_id == MQTT_EVENT_DISCONNECTED) {
     xEventGroupClearBits(state_events, kMqttConnected);
     show_device_status("MQTT STATUS", "DISCONNECTED - RETRYING");
@@ -449,7 +512,7 @@ void reset_button_task(void *) {
         show_device_status("RESET DEVICE", message);
       }
       if (held_seconds >= kResetHoldSeconds) {
-        ESP_LOGW(kTag, "Erasing HaLow and MQTT provisioning data from NVS");
+        ESP_LOGW(kTag, "Erasing HaLow, MQTT, and location provisioning data from NVS");
         show_device_status("RESET DEVICE", "DATA CLEARED - RESTARTING");
         const esp_err_t result = nvs_flash_erase();
         if (result != ESP_OK) {
@@ -491,12 +554,28 @@ extern "C" void app_main() {
   state_events = xEventGroupCreate();
   ESP_ERROR_CHECK(state_events ? ESP_OK : ESP_ERR_NO_MEM);
   if (load_mqtt_config()) xEventGroupSetBits(state_events, kMqttConfigured);
+  load_device_location();
 
-  temperature_sensor_config_t temperature_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-  ESP_ERROR_CHECK(temperature_sensor_install(&temperature_config, &temperature_sensor));
-  ESP_ERROR_CHECK(temperature_sensor_enable(temperature_sensor));
+  gpio_config_t battery_control{};
+  battery_control.pin_bit_mask = 1ULL << kBatteryAdcControl;
+  battery_control.mode = GPIO_MODE_OUTPUT;
+  ESP_ERROR_CHECK(gpio_config(&battery_control));
+  ESP_ERROR_CHECK(gpio_set_level(kBatteryAdcControl, 0));
+  adc_oneshot_unit_init_cfg_t battery_adc_config{};
+  battery_adc_config.unit_id = ADC_UNIT_1;
+  ESP_ERROR_CHECK(adc_oneshot_new_unit(&battery_adc_config, &battery_adc));
+  adc_oneshot_chan_cfg_t battery_channel_config{};
+  battery_channel_config.bitwidth = ADC_BITWIDTH_DEFAULT;
+  battery_channel_config.atten = ADC_ATTEN_DB_12;
+  ESP_ERROR_CHECK(adc_oneshot_config_channel(battery_adc, kBatteryAdcChannel, &battery_channel_config));
+  adc_cali_curve_fitting_config_t calibration_config{};
+  calibration_config.unit_id = ADC_UNIT_1;
+  calibration_config.chan = kBatteryAdcChannel;
+  calibration_config.atten = ADC_ATTEN_DB_12;
+  calibration_config.bitwidth = ADC_BITWIDTH_DEFAULT;
+  ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&calibration_config, &battery_calibration));
   const BaseType_t task_created = xTaskCreate(
-      temperature_telemetry_task, "temperature_telemetry", 4096, nullptr, 5, nullptr);
+      battery_telemetry_task, "battery_telemetry", 4096, nullptr, 5, nullptr);
   ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
   ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
@@ -525,12 +604,9 @@ extern "C" void app_main() {
     show_device_status("PROVISION DEVICE", instructions);
     ESP_LOGI(kTag, "BLE provisioning service %s, PoP %s", provisioning_name, provisioning_pop);
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kMqttEndpoint));
-    ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kHalowConfigEndpoint));
     ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1, provisioning_pop, provisioning_name, nullptr));
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_register(kMqttEndpoint, mqtt_config_handler, nullptr));
-    ESP_ERROR_CHECK(network_prov_mgr_endpoint_register(kHalowConfigEndpoint, halow_config_handler, nullptr));
-    ESP_LOGI(kTag, "Provision HaLow with endpoints '%s' and '%s'",
-             kMqttEndpoint, kHalowConfigEndpoint);
+    ESP_LOGI(kTag, "Provision MQTT, mesh, and location with endpoint '%s'", kMqttEndpoint);
   }
 
   const BaseType_t reset_task_created = xTaskCreate(

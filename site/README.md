@@ -7,7 +7,7 @@ The Site lists Devices but never creates them or MQTT credentials. Onboarding
 is exclusively available from the React Native app over BLE.
 
 On desktop, the authenticated dashboard uses a master-detail layout with the
-device list on the left and the selected device's current temperature, history
+device list on the left and the selected device's current battery voltage, history
 chart, statistics, and recent telemetry on the right. On mobile, devices are
 shown as app-style cards and selecting one opens a full-screen detail view.
 Both layouts require an explicit confirmation before deleting the selected

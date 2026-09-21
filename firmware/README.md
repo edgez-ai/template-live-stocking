@@ -5,10 +5,10 @@ The ESP32-S3 derives its Appwrite serial from the Wi-Fi station MAC as
 `PROV_AABBCCDDEEFF` so the provisioning client can obtain the serial by stripping
 the `PROV_` prefix before creating the Appwrite Device. It uses ESP-IDF BLE
 provisioning as the secure transport, with the example proof of possession (PoP)
-`abcd1234`. The app always sends farm mesh settings through `halow-config` and
-MQTT credentials through `mqtt-config`. When the device has regular upstream
+`abcd1234`. The app sends farm mesh settings, MQTT credentials, and optional
+device coordinates together through `mqtt-config`. When the device has regular upstream
 Wi-Fi, the app also uses ESP-IDF's standard Wi-Fi scan and provisioning calls.
-Send this MQTT JSON before applying mesh settings:
+Send this unified configuration JSON:
 
 ```json
 {
@@ -16,12 +16,20 @@ Send this MQTT JSON before applying mesh settings:
   "username": "AABBCCDDEEFF",
   "password": "one-time-device-secret",
   "projectId": "049391cf-9119-4ff3-9b64-3d92b70bd612",
-  "channel": "test"
+  "channel": "status",
+  "meshId": "edgez",
+  "passphrase": "example-passphrase",
+  "country": "US",
+  "halowChannel": 27,
+  "wifiUpstream": true,
+  "latitude": 59.3293,
+  "longitude": 18.0686
 }
 ```
 
-`halow-config` accepts `{ "meshId": "...", "passphrase": "...", "country": "SE",
-"channel": 1, "wifiUpstream": false }`. The country is a two-letter regulatory
+Latitude and longitude may both be `null` to clear the saved location. The
+firmware stores coordinates in NVS and includes them in subsequent telemetry.
+The country is a two-letter regulatory
 code, and the channel is an S1G channel number supported in that country. The
 mesh settings are stored in NVS. Without upstream Wi-Fi, firmware stops BLE
 and starts the HaLow mesh directly. With upstream Wi-Fi, it waits for standard
@@ -38,19 +46,23 @@ certificate bundle; certificate verification is not disabled. The handler
 validates the Appwrite serial syntax, stores the credential in NVS, and
 publishes an online event to
 `projects/<projectId>/devices/<serial>/telemetry/<channel>` after Wi-Fi and MQTT
-connect. Every 30 seconds it also reads the ESP32-S3 internal chip temperature
-and publishes a QoS 1 JSON message to
-`projects/<projectId>/devices/<serial>/telemetry/temp`:
+connect. Every 30 seconds it reads the HT-HC33 battery voltage using its
+GPIO20 controlled divider and GPIO1 ADC input. It publishes a single QoS 1
+JSON message to `projects/<projectId>/devices/<serial>/telemetry/status`:
 
 ```json
 {
-  "temperatureC": 42.31,
-  "unit": "celsius",
-  "sensor": "internal"
+  "status": "online",
+  "batteryVoltageMv": 3840,
+  "unit": "millivolt",
+  "latitude": 59.3293,
+  "longitude": 18.0686
 }
 ```
 
-The internal sensor measures chip temperature, not ambient room temperature.
+The ADC is calibrated and the measured divider voltage is doubled to recover
+the battery voltage. A disconnected battery omits the voltage fields; status
+and any configured location still publish.
 The firmware also subscribes at QoS 1 to
 `projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.

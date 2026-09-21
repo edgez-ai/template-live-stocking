@@ -31,26 +31,35 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
 
 1. The ESP32 derives the serial as the 12 uppercase hexadecimal characters of
    its Wi-Fi MAC and advertises `PROV_<serial>` over BLE.
-2. An operator creates an Appwrite account or signs in from web/mobile.
+2. An operator signs in and creates a farm and Appwrite team. Farm settings include
+   a map location, a Morse Micro country and 1 MHz HaLow channel, and mesh credentials.
 3. The mobile app strips the `PROV_` prefix, creates an Appwrite Device with that
-   project-unique serial, then
-   creates its one-time MQTT credential directly through the Devices API.
-4. The app scans and selects a Wi-Fi HaLow network through the `halow-scan` BLE
-   endpoint, then sends the MQTT credential and selected HaLow network to the
-   firmware's `mqtt-config` and `halow-config` endpoints.
+   project-unique serial and farm ID, and creates its one-time MQTT credential
+   through the Devices API. The operator can leave device location unset, use the
+   phone's current location, or choose coordinates on the offline map. Selected
+   coordinates are stored in device metadata and shown on the farm map.
+4. The operator chooses whether the ESP32 has upstream Wi-Fi. The app sends the
+   farm's mesh settings, device location, and MQTT credential together through
+   the `mqtt-config` BLE endpoint, then provisions upstream Wi-Fi when selected.
    Firmware connects to `mqtts://mqtt.edgez.ai:8883`, verifying the Let's Encrypt
    chain with ESP-IDF's trusted root bundle.
 5. The device publishes JSON to
    `projects/<projectId>/devices/<serial>/telemetry/<channel>`. Appwrite's EMQX
    ACL allows that serial to publish only beneath its own telemetry/events
    topics and subscribe only beneath its own commands topic.
-   Firmware publishes its internal chip temperature every 30 seconds on the
-   `temp` channel as `{ "temperatureC": ..., "unit": "celsius", "sensor": "internal" }`.
+   Firmware reads the HT-HC33 battery ADC every 30 seconds and publishes one
+   `status` message with online state, optional `batteryVoltageMv` in millivolts,
+   and optional provisioning coordinates.
 6. Appwrite resolves the MQTT client and emits
    `devices.<deviceId>.mqtt.message.publish` to the Function.
 7. The Function verifies the topic project and serial against the built-in
    device, then creates a telemetry row carrying its read permissions.
 8. Web and mobile read permitted telemetry directly from TablesDB.
+
+The mobile app caches each signed-in user's farm list, device list, and recent
+telemetry for offline viewing. It refreshes them when Appwrite is reachable and
+clears the cache on sign-out. Farm mesh passphrases and MQTT credentials are not
+stored in this offline cache; provisioning and edits require a connection.
 
 ## Environment
 

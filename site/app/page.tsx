@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
-type TemperaturePoint = { timestamp: number; value: number };
+type VoltagePoint = { timestamp: number; value: number };
 
 const client = new Client()
   .setEndpoint(process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!)
@@ -28,10 +28,10 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
-function temperatureOf(row: Telemetry) {
+function voltageOf(row: Telemetry) {
   try {
-    const value = Number((JSON.parse(row.payload) as { temperatureC?: unknown }).temperatureC);
-    return Number.isFinite(value) ? value : null;
+    const value = Number((JSON.parse(row.payload) as { batteryVoltageMv?: unknown }).batteryVoltageMv);
+    return (row.channel === "status" || row.channel === "battery") && Number.isInteger(value) && value >= 2500 && value <= 5000 ? value / 1000 : null;
   } catch { return null; }
 }
 
@@ -53,16 +53,16 @@ function prettyPayload(payload: string) {
   catch { return payload; }
 }
 
-function TemperatureChart({ points, duration }: { points: TemperaturePoint[]; duration: number }) {
+function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: number }) {
   const width = 720;
   const height = 260;
   const inset = 28;
   const sampled = points.length <= 240 ? points : points.filter((_, index) => index % Math.ceil(points.length / 240) === 0 || index === points.length - 1);
-  if (!points.length) return <div className="chart-empty">No temperature data in this range.</div>;
+  if (!points.length) return <div className="chart-empty">No battery voltage data in this range.</div>;
   const values = points.map((point) => point.value);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
-  const padding = Math.max(1, (rawMax - rawMin) * .15);
+  const padding = Math.max(0.05, (rawMax - rawMin) * .15);
   const min = rawMin - padding;
   const max = rawMax + padding;
   const end = Date.now();
@@ -75,12 +75,12 @@ function TemperatureChart({ points, duration }: { points: TemperaturePoint[]; du
   const last = coordinates[coordinates.length - 1];
 
   return <div className="chart-wrap">
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Internal temperature history line chart">
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Battery voltage history line chart">
       {[0, 1, 2, 3].map((line) => <line key={line} className="chart-grid" x1={inset} x2={width - inset} y1={inset + line * (height - inset * 2) / 3} y2={inset + line * (height - inset * 2) / 3} />)}
       <polyline className="chart-line" points={path} />
       <circle className="chart-dot" cx={last.x} cy={last.y} r="5" />
-      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(1)}°C</text>
-      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(1)}°C</text>
+      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(2)} V</text>
+      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(2)} V</text>
     </svg>
   </div>;
 }
@@ -122,7 +122,7 @@ export default function Home() {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
-  const [historyPoints, setHistoryPoints] = useState<TemperaturePoint[]>([]);
+  const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -168,7 +168,7 @@ export default function Home() {
     }).then((result) => {
       if (!active) return;
       setHistoryPoints((result.rows as unknown as Telemetry[]).flatMap((row) => {
-        const value = temperatureOf(row);
+        const value = voltageOf(row);
         return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
       }));
     }).catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
@@ -203,18 +203,23 @@ export default function Home() {
     finally { setDeleting(false); }
   }
 
-  const latestTemperatureByDevice = useMemo(() => {
+  const latestVoltageByDevice = useMemo(() => {
     const latest = new Map<string, { row: Telemetry; value: number }>();
     for (const row of telemetry) {
       if (latest.has(row.deviceId)) continue;
-      const value = temperatureOf(row);
+      const value = voltageOf(row);
       if (value !== null) latest.set(row.deviceId, { row, value });
     }
     return latest;
   }, [telemetry]);
+  const latestTelemetryByDevice = useMemo(() => {
+    const latest = new Map<string, Telemetry>();
+    for (const row of telemetry) if (!latest.has(row.deviceId)) latest.set(row.deviceId, row);
+    return latest;
+  }, [telemetry]);
   const selectedDevice = devices.find((device) => device.$id === selectedDeviceId);
-  const selectedLatest = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
-  const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatest?.row) : "";
+  const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
+  const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
   const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
   const historyStats = useMemo(() => {
@@ -247,11 +252,11 @@ export default function Home() {
           <div className="master-heading"><div><p className="eyebrow">DEVICES</p><h2>Provisioned devices</h2></div><span>{devices.length}</span></div>
           <p className="master-help">Onboard new devices from the mobile app over BLE.</p>
           <div className="device-list">{devices.map((device) => {
-            const latest = latestTemperatureByDevice.get(device.$id);
-            const status = statusOf(device, latest?.row);
+            const latest = latestVoltageByDevice.get(device.$id);
+            const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
             return <button key={device.$id} className={`device-card ${selectedDeviceId === device.$id ? "selected" : ""}`} onClick={() => selectDevice(device)}>
               <span className="device-card-top"><span><strong>{device.name}</strong><code>{device.serial}</code></span><span className={`status ${status === "Online" ? "online" : "offline"}`}><i />{status}</span></span>
-              <span className="device-value"><small>INTERNAL TEMPERATURE</small><b>{latest ? `${latest.value.toFixed(1)}°C` : "—"}</b></span>
+              <span className="device-value"><small>BATTERY VOLTAGE</small><b>{latest ? `${latest.value.toFixed(2)} V` : "—"}</b></span>
               <span className="device-seen">{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for telemetry"}<i>›</i></span>
             </button>;
           })}</div>
@@ -262,11 +267,11 @@ export default function Home() {
             <button className="mobile-back" onClick={() => { setDeleteConfirm(false); setMobileDetailOpen(false); }}>‹ All devices</button>
             <div className="detail-heading"><div><p className="eyebrow">DEVICE · {selectedDevice.serial}</p><h2>{selectedDevice.name}</h2></div><div className="detail-actions"><span className={`status ${selectedStatus === "Online" ? "online" : "offline"}`}><i />{selectedStatus}</span><button className="delete-device" onClick={() => setDeleteConfirm(true)}>Delete</button></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing telemetry rows are not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
-            <div className="metric-card"><span>INTERNAL TEMPERATURE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(1)}°C` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
+            <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
-            <div className="chart-card"><header><div><h3>Temperature history</h3><p>ESP32-S3 internal sensor · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><TemperatureChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
-            {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(1)}°</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(1)}°</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(1)}°</strong></div></div>}
-            <p className="sensor-note">This is the ESP32-S3 chip temperature, not ambient room temperature.</p>
+            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>HT-HC33 battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><VoltageChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
+            {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
+            <p className="sensor-note">Battery voltage is measured on the HT-HC33; no reading appears when a battery is disconnected.</p>
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>

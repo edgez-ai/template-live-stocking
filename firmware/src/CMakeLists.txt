@@ -1,7 +1,7 @@
 idf_component_register(
   SRCS "main.cpp" "halow_network.cpp"
   INCLUDE_DIRS "."
-  REQUIRES cjson driver mqtt morse_halow network_provisioning nvs_flash esp_event esp_netif esp_system mbedtls esp_driver_tsens
+  REQUIRES cjson driver mqtt morse_halow network_provisioning nvs_flash esp_event esp_netif esp_system mbedtls esp_adc
 )
 
 # The packaged Morse headers contain C initializers and enum conversions that

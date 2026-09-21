@@ -34,6 +34,7 @@ module.exports = {
     userInterfaceStyle: "light",
     plugins: [
       "expo-status-bar",
+      ["expo-location", { locationWhenInUsePermission: "Use your current location when placing a device on the farm map." }],
       ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
       "./plugins/withOrganicMaps",
       "./plugins/withUnsignedRelease",

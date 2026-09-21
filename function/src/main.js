@@ -62,6 +62,20 @@ export default async function main({ req, res, error }) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return json(res, { error: "MQTT payload must be a JSON object" }, 400);
   }
+  if ((route.channel === "status" || route.channel === "battery") &&
+      payload.batteryVoltageMv !== undefined &&
+      (!Number.isInteger(payload.batteryVoltageMv) || payload.batteryVoltageMv < 2500 ||
+       payload.batteryVoltageMv > 5000 || payload.unit !== "millivolt")) {
+    return json(res, { error: "Battery telemetry must contain a valid batteryVoltageMv and millivolt unit" }, 400);
+  }
+  if (payload.latitude !== undefined || payload.longitude !== undefined) {
+    if (typeof payload.latitude !== "number" || !Number.isFinite(payload.latitude) ||
+        payload.latitude < -90 || payload.latitude > 90 ||
+        typeof payload.longitude !== "number" || !Number.isFinite(payload.longitude) ||
+        payload.longitude < -180 || payload.longitude > 180) {
+      return json(res, { error: "Telemetry location must contain valid latitude and longitude" }, 400);
+    }
+  }
   const serialized = JSON.stringify(payload);
   if (serialized.length > 10000) return json(res, { error: "MQTT payload is too large" }, 413);
 

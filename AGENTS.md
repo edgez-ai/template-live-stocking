@@ -37,8 +37,9 @@ Firmware derives serial as 12 uppercase Wi-Fi MAC hex characters, advertises
 BLE `mqtt-config` endpoint. It connects only to `mqtts://mqtt.edgez.ai:8883`,
 publishes under `projects/<projectId>/devices/<serial>/telemetry/#`, and
 subscribes under `projects/<projectId>/devices/<serial>/commands/#`.
-It publishes the internal ESP32-S3 chip temperature every 30 seconds to the
-`temp` telemetry channel; do not describe this reading as ambient temperature.
+It reads the HT-HC33 battery ADC every 30 seconds and publishes one `status`
+telemetry message with online state, optional battery voltage in millivolts,
+and optional coordinates stored on the device during BLE provisioning.
 
 ## Environment
 
