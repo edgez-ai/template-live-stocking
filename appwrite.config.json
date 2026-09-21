@@ -71,7 +71,7 @@
       "timeout": 15,
       "enabled": true,
       "logging": true,
-      "runtimeSpecification": "s-1vcpu-512mb",
+      "runtimeSpecification": "s-1vcpu-2gb",
       "scopes": ["devices.read", "rows.write"],
       "vars": [
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
@@ -85,6 +85,7 @@
       "name": "Live Stocking",
       "framework": "nextjs",
       "buildRuntime": "node-24",
+      "buildSpecification": "s-1vcpu-2gb",
       "adapter": "static",
       "path": "site",
       "enabled": true,
