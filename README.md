@@ -73,6 +73,10 @@ template does not require a committed `.env.local` file.
 use `APPWRITE_PUBLIC_ENDPOINT` when provided; otherwise a non-local HTTP
 endpoint is automatically upgraded to HTTPS to prevent mixed-content errors.
 
+For GitHub Actions mobile builds, set the repository Actions variable
+`APPWRITE_PROJECT_ID` to the deployed Appwrite project ID. The build embeds this
+ID in the Android app's Appwrite client configuration.
+
 All clients derive the Function URL as
 `https://${APPWRITE_PROJECT_NAME}-${APP_NAME}.functions.${DOMAIN_SUFFIX}`.
 The web/mobile clients also receive the public Appwrite endpoint, project ID,

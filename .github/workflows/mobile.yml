@@ -18,7 +18,7 @@ jobs:
     env:
       DOMAIN_SUFFIX: edgez.biz
       APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
-      APPWRITE_PROJECT_ID: build-placeholder
+      APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID }}
       CI: "1"
       NODE_ENV: production
     steps:
