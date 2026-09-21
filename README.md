@@ -73,7 +73,7 @@ template does not require a committed `.env.local` file.
 use `APPWRITE_PUBLIC_ENDPOINT` when provided; otherwise a non-local HTTP
 endpoint is automatically upgraded to HTTPS to prevent mixed-content errors.
 
-For GitHub Actions mobile builds, set the repository Actions variable
+For GitHub Actions mobile builds, set the repository Actions variable or secret
 `APPWRITE_PROJECT_ID` to the deployed Appwrite project ID. The build embeds this
 ID in the Android app's Appwrite client configuration.
 
