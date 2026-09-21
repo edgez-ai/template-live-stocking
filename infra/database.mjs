@@ -12,6 +12,26 @@ export function installDatabase() {
     ["tables-db", "get", "--database-id", config.databaseId],
     ["tables-db", "create", "--database-id", config.databaseId, "--name", `${config.name} database`]);
 
+  const farms = ["--database-id", config.databaseId, "--table-id", config.farmTableId];
+  ensure("farms table",
+    ["tables-db", "get-table", ...farms],
+    ["tables-db", "create-table", ...farms, "--name", "Farms", "--permissions", 'create("users")', "--row-security", "true"]);
+  run(["tables-db", "update-table", ...farms, "--permissions", 'create("users")', "--row-security", "true"]);
+  for (const [key, size] of [["name", "128"], ["country", "2"], ["location", "128"], ["meshId", "32"], ["teamId", "36"], ["ownerId", "36"]]) {
+    ensure(`farms.${key} column`,
+      ["tables-db", "get-column", ...farms, "--key", key],
+      ["tables-db", "create-string-column", ...farms, "--key", key, "--size", size, "--required", "true"]);
+  }
+  ensure("farms.halowChannel column",
+    ["tables-db", "get-column", ...farms, "--key", "halowChannel"],
+    ["tables-db", "create-integer-column", ...farms, "--key", "halowChannel", "--min", "1", "--max", "255", "--required", "true"]);
+  ensure("farms.meshPassphrase column",
+    ["tables-db", "get-column", ...farms, "--key", "meshPassphrase"],
+    ["tables-db", "create-string-column", ...farms, "--key", "meshPassphrase", "--size", "63", "--required", "true", "--encrypt", "true"]);
+  ensure("farms team index",
+    ["tables-db", "get-index", ...farms, "--key", "team-id"],
+    ["tables-db", "create-index", ...farms, "--key", "team-id", "--type", "key", "--columns", "teamId"]);
+
   const telemetry = ["--database-id", config.databaseId, "--table-id", config.telemetryTableId];
   ensure("telemetry table",
     ["tables-db", "get-table", ...telemetry],

@@ -27,7 +27,6 @@ constexpr char kTag[] = "iot_prov";
 constexpr char kMqttNamespace[] = "mqtt";
 constexpr char kHalowNamespace[] = "halow";
 constexpr char kMqttEndpoint[] = "mqtt-config";
-constexpr char kHalowScanEndpoint[] = "halow-scan";
 constexpr char kHalowConfigEndpoint[] = "halow-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kTemperaturePublishInterval = pdMS_TO_TICKS(30000);
@@ -46,9 +45,11 @@ struct MqttConfig {
 };
 
 struct HalowConfig {
-  char ssid[33];
-  char password[64];
-  uint8_t bssid[6];
+  char mesh_id[33];
+  char passphrase[64];
+  char country[3];
+  uint8_t channel;
+  bool wifi_upstream;
 };
 
 EventGroupHandle_t state_events;
@@ -61,6 +62,7 @@ char provisioning_pop[16]{};
 char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
+bool halow_connect_started = false;
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
@@ -162,9 +164,11 @@ esp_err_t save_halow_config(const HalowConfig &config) {
   nvs_handle_t handle;
   esp_err_t result = nvs_open(kHalowNamespace, NVS_READWRITE, &handle);
   if (result != ESP_OK) return result;
-  result = nvs_set_str(handle, "ssid", config.ssid);
-  if (result == ESP_OK) result = nvs_set_str(handle, "password", config.password);
-  if (result == ESP_OK) result = nvs_set_blob(handle, "bssid", config.bssid, sizeof(config.bssid));
+  result = nvs_set_str(handle, "meshId", config.mesh_id);
+  if (result == ESP_OK) result = nvs_set_str(handle, "passphrase", config.passphrase);
+  if (result == ESP_OK) result = nvs_set_str(handle, "country", config.country);
+  if (result == ESP_OK) result = nvs_set_u8(handle, "channel", config.channel);
+  if (result == ESP_OK) result = nvs_set_u8(handle, "upstream", config.wifi_upstream ? 1 : 0);
   if (result == ESP_OK) result = nvs_commit(handle);
   nvs_close(handle);
   return result;
@@ -173,14 +177,15 @@ esp_err_t save_halow_config(const HalowConfig &config) {
 bool load_halow_config() {
   nvs_handle_t handle;
   if (nvs_open(kHalowNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
-  size_t password_length = sizeof(halow_config.password);
-  size_t bssid_length = sizeof(halow_config.bssid);
+  uint8_t wifi_upstream = 0;
   const bool loaded =
-      load_nvs_string(handle, "ssid", halow_config.ssid, sizeof(halow_config.ssid)) &&
-      nvs_get_str(handle, "password", halow_config.password, &password_length) == ESP_OK &&
-      nvs_get_blob(handle, "bssid", halow_config.bssid, &bssid_length) == ESP_OK &&
-      bssid_length == sizeof(halow_config.bssid);
+      load_nvs_string(handle, "meshId", halow_config.mesh_id, sizeof(halow_config.mesh_id)) &&
+      load_nvs_string(handle, "passphrase", halow_config.passphrase, sizeof(halow_config.passphrase)) &&
+      load_nvs_string(handle, "country", halow_config.country, sizeof(halow_config.country)) &&
+      nvs_get_u8(handle, "channel", &halow_config.channel) == ESP_OK &&
+      nvs_get_u8(handle, "upstream", &wifi_upstream) == ESP_OK;
   nvs_close(handle);
+  halow_config.wifi_upstream = wifi_upstream != 0;
   return loaded;
 }
 
@@ -229,54 +234,6 @@ esp_err_t write_json_response(cJSON *root, uint8_t **output, ssize_t *output_len
   return ESP_OK;
 }
 
-esp_err_t halow_scan_handler(uint32_t, const uint8_t *, ssize_t,
-                             uint8_t **output, ssize_t *output_length, void *) {
-  HalowNetwork networks[24]{};
-  size_t count = 0;
-  esp_err_t result = halow_scan(networks, 24, &count);
-  cJSON *root = cJSON_CreateObject();
-  if (!root) return ESP_ERR_NO_MEM;
-  cJSON *items = cJSON_AddArrayToObject(root, "networks");
-  if (!items) {
-    cJSON_Delete(root);
-    return ESP_ERR_NO_MEM;
-  }
-  if (result == ESP_OK) {
-    for (size_t index = 0; index < count; ++index) {
-      const HalowNetwork &network = networks[index];
-      cJSON *item = cJSON_CreateObject();
-      char display_name[48]{};
-      char bssid[18]{};
-      std::snprintf(display_name, sizeof(display_name), "%s (%u MHz)",
-                    network.ssid, network.bandwidth_mhz);
-      std::snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
-                    network.bssid[0], network.bssid[1], network.bssid[2],
-                    network.bssid[3], network.bssid[4], network.bssid[5]);
-      cJSON_AddStringToObject(item, "ssid", display_name);
-      cJSON_AddStringToObject(item, "halowSsid", network.ssid);
-      cJSON_AddStringToObject(item, "bssid", bssid);
-      cJSON_AddNumberToObject(item, "rssi", network.rssi);
-      cJSON_AddNumberToObject(item, "auth", network.secured ? 5 : 0);
-      cJSON_AddNumberToObject(item, "channel", network.frequency_khz);
-      cJSON_AddItemToArray(items, item);
-    }
-  } else {
-    cJSON_AddStringToObject(root, "error", esp_err_to_name(result));
-  }
-  const esp_err_t response_result = write_json_response(root, output, output_length);
-  cJSON_Delete(root);
-  return response_result;
-}
-
-bool parse_bssid(const char *value, uint8_t output[6]) {
-  unsigned parsed[6]{};
-  if (!value || std::sscanf(value, "%02x:%02x:%02x:%02x:%02x:%02x",
-                            &parsed[0], &parsed[1], &parsed[2],
-                            &parsed[3], &parsed[4], &parsed[5]) != 6) return false;
-  for (size_t index = 0; index < 6; ++index) output[index] = static_cast<uint8_t>(parsed[index]);
-  return true;
-}
-
 void connect_halow_task(void *) {
   if (provisioning_active) {
     vTaskDelay(pdMS_TO_TICKS(750));
@@ -284,7 +241,8 @@ void connect_halow_task(void *) {
   }
   show_device_status("HALOW STATUS", "CONNECTING");
   const esp_err_t result = halow_connect(
-      halow_config.ssid, halow_config.password, halow_config.bssid, halow_ready);
+      halow_config.mesh_id, halow_config.passphrase,
+      halow_config.country, halow_config.channel, halow_ready);
   if (result != ESP_OK) {
     show_device_status("HALOW FAILED", esp_err_to_name(result));
     ESP_LOGE(kTag, "HaLow connect failed: %s", esp_err_to_name(result));
@@ -293,8 +251,11 @@ void connect_halow_task(void *) {
 }
 
 esp_err_t start_halow_connection() {
-  return xTaskCreate(connect_halow_task, "halow-connect", 6144, nullptr, 5, nullptr) == pdPASS
-      ? ESP_OK : ESP_ERR_NO_MEM;
+  if (halow_connect_started) return ESP_OK;
+  if (xTaskCreate(connect_halow_task, "halow-connect", 6144, nullptr, 5, nullptr) != pdPASS)
+    return ESP_ERR_NO_MEM;
+  halow_connect_started = true;
+  return ESP_OK;
 }
 
 esp_err_t halow_config_handler(uint32_t, const uint8_t *input, ssize_t input_length,
@@ -304,17 +265,29 @@ esp_err_t halow_config_handler(uint32_t, const uint8_t *input, ssize_t input_len
   }
   cJSON *root = cJSON_ParseWithLength(reinterpret_cast<const char *>(input), input_length);
   HalowConfig candidate{};
-  cJSON *password = root ? cJSON_GetObjectItemCaseSensitive(root, "password") : nullptr;
+  cJSON *passphrase = root ? cJSON_GetObjectItemCaseSensitive(root, "passphrase") : nullptr;
+  cJSON *channel = root ? cJSON_GetObjectItemCaseSensitive(root, "channel") : nullptr;
+  cJSON *wifi_upstream = root ? cJSON_GetObjectItemCaseSensitive(root, "wifiUpstream") : nullptr;
   const bool valid = root &&
-      copy_json_string(root, "ssid", candidate.ssid, sizeof(candidate.ssid)) &&
-      cJSON_IsString(password) && password->valuestring &&
-      std::strlen(password->valuestring) < sizeof(candidate.password) &&
-      parse_bssid(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "bssid")), candidate.bssid);
-  if (valid) strlcpy(candidate.password, password->valuestring, sizeof(candidate.password));
+      copy_json_string(root, "meshId", candidate.mesh_id, sizeof(candidate.mesh_id)) &&
+      copy_json_string(root, "country", candidate.country, sizeof(candidate.country)) &&
+      std::strlen(candidate.country) == 2 &&
+      cJSON_IsString(passphrase) && passphrase->valuestring &&
+      std::strlen(passphrase->valuestring) >= 8 &&
+      std::strlen(passphrase->valuestring) < sizeof(candidate.passphrase) &&
+      cJSON_IsNumber(channel) && channel->valuedouble >= 1 && channel->valuedouble <= 255 &&
+      channel->valuedouble == channel->valueint &&
+      cJSON_IsBool(wifi_upstream) &&
+      halow_channel_supported(candidate.country, static_cast<uint8_t>(channel->valueint));
+  if (valid) {
+    strlcpy(candidate.passphrase, passphrase->valuestring, sizeof(candidate.passphrase));
+    candidate.channel = static_cast<uint8_t>(channel->valueint);
+    candidate.wifi_upstream = cJSON_IsTrue(wifi_upstream);
+  }
   esp_err_t result = valid ? save_halow_config(candidate) : ESP_ERR_INVALID_ARG;
   if (result == ESP_OK) {
     halow_config = candidate;
-    result = start_halow_connection();
+    if (!candidate.wifi_upstream) result = start_halow_connection();
   }
   cJSON *response = cJSON_CreateObject();
   cJSON_AddBoolToObject(response, "ok", result == ESP_OK);
@@ -411,6 +384,18 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
 }
 
 void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+  if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP && halow_config.wifi_upstream) {
+    xEventGroupSetBits(state_events, kNetworkConnected);
+    show_device_status("UPSTREAM WI-FI", "CONNECTED - STARTING MQTT");
+    start_mqtt();
+    return;
+  }
+  if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED &&
+      halow_config.wifi_upstream && !provisioning_active) {
+    ESP_LOGW(kTag, "Upstream Wi-Fi disconnected; retrying");
+    esp_wifi_connect();
+    return;
+  }
   if (event_base == NETWORK_PROV_EVENT) {
     if (event_id == NETWORK_PROV_START) {
       ESP_LOGI(kTag, "BLE provisioning started as %s", provisioning_name);
@@ -424,6 +409,10 @@ void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *
     } else if (event_id == NETWORK_PROV_END) {
       provisioning_active = false;
       network_prov_mgr_deinit();
+      if (halow_config.wifi_upstream && halow_config.mesh_id[0]) {
+        const esp_err_t result = start_halow_connection();
+        if (result != ESP_OK) ESP_LOGE(kTag, "Could not start HaLow mesh: %s", esp_err_to_name(result));
+      }
     }
     return;
   }
@@ -511,13 +500,20 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
   ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
+  ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, nullptr));
+  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, event_handler, nullptr));
+  esp_netif_create_default_wifi_sta();
+  wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
   if (load_halow_config()) {
     show_device_status("HALOW STATUS", "CONNECTING WITH SAVED SETTINGS");
+    if (halow_config.wifi_upstream) {
+      ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+      ESP_ERROR_CHECK(esp_wifi_start());
+      ESP_ERROR_CHECK(esp_wifi_connect());
+    }
     ESP_ERROR_CHECK(start_halow_connection());
   } else {
-    esp_netif_create_default_wifi_sta();
-    wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
     network_prov_mgr_config_t provisioning_config{};
     provisioning_config.scheme = network_prov_scheme_ble;
     provisioning_config.scheme_event_handler = NETWORK_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM;
@@ -529,14 +525,12 @@ extern "C" void app_main() {
     show_device_status("PROVISION DEVICE", instructions);
     ESP_LOGI(kTag, "BLE provisioning service %s, PoP %s", provisioning_name, provisioning_pop);
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kMqttEndpoint));
-    ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kHalowScanEndpoint));
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_create(kHalowConfigEndpoint));
     ESP_ERROR_CHECK(network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1, provisioning_pop, provisioning_name, nullptr));
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_register(kMqttEndpoint, mqtt_config_handler, nullptr));
-    ESP_ERROR_CHECK(network_prov_mgr_endpoint_register(kHalowScanEndpoint, halow_scan_handler, nullptr));
     ESP_ERROR_CHECK(network_prov_mgr_endpoint_register(kHalowConfigEndpoint, halow_config_handler, nullptr));
-    ESP_LOGI(kTag, "Provision HaLow with endpoints '%s', '%s', and '%s'",
-             kHalowScanEndpoint, kMqttEndpoint, kHalowConfigEndpoint);
+    ESP_LOGI(kTag, "Provision HaLow with endpoints '%s' and '%s'",
+             kMqttEndpoint, kHalowConfigEndpoint);
   }
 
   const BaseType_t reset_task_created = xTaskCreate(

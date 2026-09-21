@@ -5,9 +5,10 @@ The ESP32-S3 derives its Appwrite serial from the Wi-Fi station MAC as
 `PROV_AABBCCDDEEFF` so the provisioning client can obtain the serial by stripping
 the `PROV_` prefix before creating the Appwrite Device. It uses ESP-IDF BLE
 provisioning as the secure transport, with the example proof of possession (PoP)
-`abcd1234`, but provisions the Morse Micro Wi-Fi HaLow interface through custom
-`halow-scan` and `halow-config` endpoints. It also exposes a `mqtt-config`
-endpoint. Send this JSON before applying HaLow credentials:
+`abcd1234`. The app always sends farm mesh settings through `halow-config` and
+MQTT credentials through `mqtt-config`. When the device has regular upstream
+Wi-Fi, the app also uses ESP-IDF's standard Wi-Fi scan and provisioning calls.
+Send this MQTT JSON before applying mesh settings:
 
 ```json
 {
@@ -19,11 +20,13 @@ endpoint. Send this JSON before applying HaLow credentials:
 }
 ```
 
-`halow-scan` accepts `{}` and returns the nearby HaLow SSIDs, BSSIDs, signal
-strength, security, bandwidth, and frequency. `halow-config` accepts the
-selected network as `{ "ssid": "...", "password": "...", "bssid": "..." }`,
-stores it in NVS, stops BLE advertising, and connects the HaLow station using
-DHCP. The Morse driver, regulatory database, firmware, and board configuration
+`halow-config` accepts `{ "meshId": "...", "passphrase": "...", "country": "SE",
+"channel": 1, "wifiUpstream": false }`. The country is a two-letter regulatory
+code, and the channel is an S1G channel number supported in that country. The
+mesh settings are stored in NVS. Without upstream Wi-Fi, firmware stops BLE
+and starts the HaLow mesh directly. With upstream Wi-Fi, it waits for standard
+ESP-IDF Wi-Fi provisioning to finish before starting the mesh. The Morse driver,
+regulatory database, firmware, and board configuration
 are packaged in `components/morse_halow`; public builds link its ESP32-S3
 `libmorse.a` directly and do not require the internal MM-IoT source tree.
 

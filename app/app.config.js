@@ -4,13 +4,14 @@ const edgezProject = require("../edgez.json");
 const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
 const databaseId = telemetryTable?.databaseId;
 const telemetryTableId = telemetryTable?.$id;
+const farmTableId = appwriteConfig.tables?.find((table) => table.$id === "farms")?.$id;
 const appName = process.env.APP_NAME || edgezProject.name;
 const domainSuffix = process.env.DOMAIN_SUFFIX;
 const configuredEndpoint =
   process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT || appwriteConfig.endpoint;
 const projectId = process.env.APPWRITE_PROJECT_ID;
 
-if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId) {
+if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !farmTableId) {
   throw new Error("Appwrite project and telemetry table environment is incomplete");
 }
 
@@ -44,6 +45,7 @@ module.exports = {
       appwritePlatform: platform,
       databaseId,
       telemetryTableId,
+      farmTableId,
     },
   },
 };

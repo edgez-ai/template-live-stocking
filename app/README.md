@@ -4,32 +4,41 @@ The Expo app is the only device-onboarding client. It scans `PROV_` BLE
 advertisements and derives the serial. After the operator selects a device,
 the example proof of possession (PoP) `abcd1234` is prefilled to match the
 firmware and the value shown on its OLED. The app establishes an ESP-IDF
-Security 1 session, asks the ESP32 to scan nearby Wi-Fi HaLow networks through
-the firmware's `halow-scan` endpoint, and lets the operator select an SSID and
-enter its password. It then creates or
-reuses the Appwrite Device, sends its one-time MQTT credential to `mqtt-config`,
-and sends the selected network to `halow-config`. It also uses Appwrite Auth and
+Security 1 session. The operator chooses whether the device has regular Wi-Fi
+as its upstream connection. If so, the app uses the ESP32's built-in Wi-Fi scan
+and provisioning flow. It creates or reuses the Appwrite Device, sends its
+one-time MQTT credential to `mqtt-config`, and sends the selected farm's country,
+HaLow channel, mesh ID, and passphrase to `halow-config` in either path. It also uses Appwrite Auth and
 reads permitted telemetry directly from TablesDB.
 
-The `+ ADD` button in the dashboard header opens a full-screen, three-step flow
-for selecting the BLE device, confirming its labeled name and PoP fields, and
-selecting the scanned Wi-Fi network. The Wi-Fi password field is shown only for
-secured networks.
+The first signed-in session opens Settings to create a farm and its Appwrite
+team. Each farm has a row in the `farms` table, and its creator owns the team.
+Settings can create and edit farms and switch the active farm. Farm fields are
+name, country, location, HaLow channel, mesh ID, and passphrase. The selected
+farm ID is saved in Appwrite account preferences and restored on the next app
+launch. The map and list show devices assigned to that farm; the list heading
+uses its name. New devices receive the farm ID in their metadata and team-based
+permissions. Existing devices without a farm ID remain unassigned.
 
-The home screen uses the local `@edgez/react-native-sdk` package to render an
-Organic Maps view above the device list. Operators can download the current map
-region once and continue viewing it offline; device coordinates are displayed
-as map nodes when latitude and longitude are present. The screen also presents
-each device as a card with its connectivity status and
-latest internal chip temperature. Selecting a card opens the full-screen device
+The `+ ADD` button opens a four-step flow: choose the BLE device, confirm its
+name and PoP, choose whether to use upstream Wi-Fi, then confirm the farm mesh
+settings. The Wi-Fi branch scans nearby networks and accepts SSID/password.
+
+The signed-in home screen opens with a full-screen Organic Maps view from
+`@edgez/react-native-sdk`. The top-right menu switches between map and list
+views or signs out; `+ ADD` remains beside it. Operators can download the
+current map region once and continue viewing it offline; device coordinates
+are displayed as map nodes when latitude and longitude are present. List view
+shows the selected farm name and each device as a card with its connectivity
+status and latest internal chip temperature. Selecting a card opens the full-screen device
 history view, where the temperature line chart can show the last 30 minutes,
 1 hour, 6 hours, or 24 hours.
 The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.
 
-New Devices are created with explicit read, update, and delete permissions for
-the signed-in creator only. Telemetry inherits only that Device read permission.
+New Devices grant read access to farm team members and update/delete access to
+farm team owners. Telemetry inherits the Device read permission.
 Its Expo deep-link scheme is `edgez-devtools`, so application links begin with
 `edgez-devtools://`.
 

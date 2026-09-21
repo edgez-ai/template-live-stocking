@@ -9,11 +9,12 @@ const appwriteConfig = JSON.parse(
   readFileSync(path.join(rootDir, "appwrite.config.json"), "utf8"),
 );
 const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
+const farmTable = appwriteConfig.tables?.find((table) => table.$id === "farms");
 const database = appwriteConfig.tablesDB?.find(
   (candidate) => candidate.$id === telemetryTable?.databaseId,
 );
-if (!database || !telemetryTable) {
-  throw new Error("appwrite.config.json must define the telemetry table and its database");
+if (!database || !telemetryTable || !farmTable || farmTable.databaseId !== database.$id) {
+  throw new Error("appwrite.config.json must define the farm and telemetry tables in the same database");
 }
 
 const cli = path.join(infraDir, "node_modules", ".bin", "appwrite");
@@ -50,6 +51,7 @@ export const config = {
   apiKey: process.env.APPWRITE_API_KEY,
   databaseId: database.$id,
   telemetryTableId: telemetryTable.$id,
+  farmTableId: farmTable.$id,
 };
 export const domainPrefix = `${config.projectName}-${config.name}`;
 export const webDomain = `${domainPrefix}.sites.${config.domainSuffix}`;

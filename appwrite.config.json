@@ -35,6 +35,27 @@
   ],
   "tables": [
     {
+      "$id": "farms",
+      "databaseId": "live-stocking",
+      "name": "Farms",
+      "permissions": ["create(\"users\")"],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
+        { "key": "country", "type": "varchar", "size": 2, "required": true, "array": false },
+        { "key": "location", "type": "varchar", "size": 128, "required": true, "array": false },
+        { "key": "halowChannel", "type": "integer", "required": true, "array": false },
+        { "key": "meshId", "type": "varchar", "size": 32, "required": true, "array": false },
+        { "key": "meshPassphrase", "type": "varchar", "size": 63, "required": true, "array": false, "encrypt": true },
+        { "key": "teamId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "ownerId", "type": "varchar", "size": 36, "required": true, "array": false }
+      ],
+      "indexes": [
+        { "key": "team-id", "type": "key", "attributes": ["teamId"] }
+      ]
+    },
+    {
       "$id": "telemetry",
       "databaseId": "live-stocking",
       "name": "Telemetry",
