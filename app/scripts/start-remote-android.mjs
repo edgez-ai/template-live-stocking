@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import net from "node:net";
 
+const require = createRequire(import.meta.url);
+const inviteUrl = require("../app.config.js").expo.extra.teamInviteUrl;
 const port = Number(process.env.EXPO_PORT ?? 8081);
 const serial = process.env.ANDROID_SERIAL ?? "127.0.0.1:5555";
 const metroUrl = `http://127.0.0.1:${port}`;
@@ -12,7 +15,7 @@ const nodeOptions = process.env.NODE_OPTIONS?.includes("--dns-result-order=")
 const expo = spawn(
   "expo",
   ["start", "--dev-client", "--host", "localhost", "--port", String(port)],
-  { stdio: "inherit", env: { ...process.env, NODE_OPTIONS: nodeOptions } },
+  { stdio: "inherit", env: { ...process.env, NODE_OPTIONS: nodeOptions, EXPO_PUBLIC_APPWRITE_TEAM_INVITE_URL: inviteUrl } },
 );
 
 function stop() {

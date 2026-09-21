@@ -797,7 +797,7 @@ export default function App() {
     const farm = farms.find((candidate) => candidate.$id === currentFarmId);
     const address = inviteEmail.trim().toLowerCase();
     const name = inviteName.trim();
-    const inviteUrl = config.teamInviteUrl?.trim();
+    const inviteUrl = (process.env.EXPO_PUBLIC_APPWRITE_TEAM_INVITE_URL || config.teamInviteUrl)?.trim();
     if (!farm || offline || farm.ownerId !== user?.$id) return;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) { setTeamError("Enter a valid email address."); return; }
     if (!inviteUrl) { setTeamError("Invitation link is missing from this app build. Restart Metro or install an updated build."); return; }

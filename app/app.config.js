@@ -24,7 +24,7 @@ const bundlePrefix = domainSuffix.split(".").reverse().join(".");
 const androidName = appName.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "app");
 const platform = `${bundlePrefix}.${androidName}`;
 const teamInviteUrl = process.env.APPWRITE_TEAM_INVITE_URL ||
-  `https://${process.env.APPWRITE_PROJECT_NAME || projectId}-${appName}.sites.${domainSuffix}/invite`;
+  `https://${appName}-${projectId.slice(0, 8)}.sites.${domainSuffix}/invite.html`;
 
 module.exports = {
   expo: {
