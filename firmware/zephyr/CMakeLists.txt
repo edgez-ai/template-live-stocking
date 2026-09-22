@@ -60,6 +60,10 @@ if(CONFIG_WIFI_MORSE OR CONFIG_WIFI_MORSE_SM)
 	get_target_property(LIBMORSE_IMPORTED libmorse IMPORTED)
 	if(LIBMORSE_IMPORTED)
 		get_target_property(MORSE_ARCHIVE libmorse IMPORTED_LOCATION)
+		# The prebuilt driver allocates only 400 words for its health thread.
+		# Full newlib logging overflows that stack during the first health check.
+		zephyr_ld_options("-Wl,--wrap=mmosal_task_create")
+		target_compile_definitions(app PRIVATE EDGEZ_MORSE_HEALTH_STACK_WRAPPER=1)
 		target_link_libraries(app PRIVATE
 			"-Wl,--push-state,--whole-archive,${MORSE_ARCHIVE},--pop-state")
 		target_compile_definitions(app PRIVATE MMOSAL_NOASSERT MMOSAL_NO_DEBUGLOG)
