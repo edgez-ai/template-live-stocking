@@ -21,7 +21,7 @@ function isNrfDevice(device: ProvisioningDevice): device is NrfProvisioningDevic
   return device instanceof NrfProvisioningDevice;
 }
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; icon?: EdgezMapIcon; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
+type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; icon?: EdgezMapIcon; markerColor?: MapMarkerColor; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
 type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
@@ -39,10 +39,11 @@ type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type VoltagePoint = { timestamp: number; value: number };
-type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string };
+type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
 type SettingsTab = "team" | "areas" | "rules";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
-const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "" };
+const defaultAreaColor = "#E88D29";
+const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
 const iconGlyphs: Record<EdgezMapIcon, React.ComponentProps<typeof MaterialCommunityIcons>["name"]> = {
   sheep: "sheep", cow: "cow", goat: "sheep", horse: "horse", dog: "dog", person: "account",
   tractor: "tractor", truck: "truck", car: "car", drone: "drone", router: "router-wireless",
@@ -50,6 +51,59 @@ const iconGlyphs: Record<EdgezMapIcon, React.ComponentProps<typeof MaterialCommu
   camera: "camera", gps: "crosshairs-gps", meter: "speedometer", pump: "water-pump",
   valve: "pipe-valve", switch: "electric-switch", battery: "battery", alarm: "bell-alert",
 };
+const mapMarkerColors = [
+  { key: "red", label: "Red", hex: "#E51B23" }, { key: "pink", label: "Pink", hex: "#FF4182" },
+  { key: "purple", label: "Purple", hex: "#9B24B2" }, { key: "deep_purple", label: "Deep purple", hex: "#6639BF" },
+  { key: "blue", label: "Blue", hex: "#0066CC" }, { key: "light_blue", label: "Light blue", hex: "#249CF2" },
+  { key: "cyan", label: "Cyan", hex: "#14BECD" }, { key: "teal", label: "Teal", hex: "#00A58C" },
+  { key: "green", label: "Green", hex: "#3C8C3C" }, { key: "lime", label: "Lime", hex: "#93BF39" },
+  { key: "yellow", label: "Yellow", hex: "#FFC800" }, { key: "orange", label: "Orange", hex: "#FF9600" },
+  { key: "deep_orange", label: "Deep orange", hex: "#F06432" }, { key: "brown", label: "Brown", hex: "#804633" },
+  { key: "gray", label: "Gray", hex: "#737373" }, { key: "blue_gray", label: "Blue gray", hex: "#597380" },
+] as const;
+type MapMarkerColor = (typeof mapMarkerColors)[number]["key"];
+const areaColors = [{ key: "orange", label: "Orange", hex: defaultAreaColor }, ...mapMarkerColors.filter(({ key }) => key !== "orange")];
+
+function areaColor(value: unknown): string {
+  return areaColors.find(({ hex }) => hex === value)?.hex || defaultAreaColor;
+}
+
+function colorForDevice(device: Device): MapMarkerColor {
+  const saved = device.metadata?.markerColor;
+  return mapMarkerColors.some(({ key }) => key === saved) ? saved as MapMarkerColor : device.enabled ? "blue" : "gray";
+}
+
+function MapAppearancePicker({ icon, color, onIconChange, onColorChange }: { icon: EdgezMapIcon; color: MapMarkerColor; onIconChange: (icon: EdgezMapIcon) => void; onColorChange: (color: MapMarkerColor) => void }) {
+  const selectedHex = mapMarkerColors.find(({ key }) => key === color)?.hex || "#0066CC";
+  return <>
+    <Text style={styles.fieldLabel}>MAP ICON</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {edgezMapIcons.map((choice) => <Pressable key={choice} style={[styles.iconChoice, icon === choice && styles.farmRowSelected]} onPress={() => onIconChange(choice)} accessibilityRole="radio" accessibilityState={{ selected: icon === choice }} accessibilityLabel={`${choice} map icon`}>
+        <MaterialCommunityIcons name={iconGlyphs[choice]} size={24} color={icon === choice ? selectedHex : "#0a3037"} />
+        <Text style={styles.deviceNameDark}>{choice.toUpperCase()}</Text>
+      </Pressable>)}
+    </ScrollView>
+    <Text style={styles.fieldLabel}>MAP COLOR</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {mapMarkerColors.map((choice) => <Pressable key={choice.key} style={[styles.iconChoice, color === choice.key && styles.farmRowSelected]} onPress={() => onColorChange(choice.key)} accessibilityRole="radio" accessibilityState={{ selected: color === choice.key }} accessibilityLabel={`${choice.label} map color`}>
+        <MaterialCommunityIcons name={iconGlyphs[icon]} size={24} color={choice.hex} />
+        <Text style={styles.deviceNameDark}>{choice.label}</Text>
+      </Pressable>)}
+    </ScrollView>
+  </>;
+}
+
+function AreaColorPicker({ color, onChange }: { color: string; onChange: (color: string) => void }) {
+  return <>
+    <Text style={styles.fieldLabel}>AREA COLOR</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {areaColors.map((choice) => <Pressable key={choice.key} style={[styles.iconChoice, color === choice.hex && styles.farmRowSelected]} onPress={() => onChange(choice.hex)} accessibilityRole="radio" accessibilityState={{ selected: color === choice.hex }} accessibilityLabel={`${choice.label} area color`}>
+        <View style={[styles.areaColorSwatch, { backgroundColor: choice.hex }]} />
+        <Text style={styles.deviceNameDark}>{choice.label}</Text>
+      </Pressable>)}
+    </ScrollView>
+  </>;
+}
 
 function detailsFromFarm(farm?: Farm): FarmDetails {
   return farm ? { name: farm.name, country: farm.country, location: farm.location, halowChannel: String(farm.halowChannel), meshId: farm.meshId, meshPassphrase: farm.meshPassphrase } : emptyFarmDetails;
@@ -84,22 +138,23 @@ function areaGeometry(draft: AreaDraft) {
   const secondary = Number(draft.secondary);
   if (!draft.name.trim() || !center) throw new Error("Enter an area name and choose its position on the map.");
   if (draft.shape !== "polygon" && (!Number.isFinite(primary) || primary < 10 || primary > 100000)) throw new Error("Set a valid area size in meters.");
-  if (draft.shape === "circle") return JSON.stringify({ center, radiusMeters: primary });
+  const color = areaColor(draft.color);
+  if (draft.shape === "circle") return JSON.stringify({ center, radiusMeters: primary, color });
   if (draft.shape === "oval") {
     if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter both oval radii in meters.");
-    return JSON.stringify({ center, radiusXMeters: primary, radiusYMeters: secondary, rotationDegrees: 0 });
+    return JSON.stringify({ center, radiusXMeters: primary, radiusYMeters: secondary, rotationDegrees: 0, color });
   }
   if (draft.shape === "rectangle") {
     if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter rectangle width and height in meters.");
-    return JSON.stringify({ center, widthMeters: primary, heightMeters: secondary, rotationDegrees: 0 });
+    return JSON.stringify({ center, widthMeters: primary, heightMeters: secondary, rotationDegrees: 0, color });
   }
   if (new Set(vertices.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`)).size < 3) throw new Error("Add at least three distinct polygon points on the map.");
-  return JSON.stringify({ center, vertices });
+  return JSON.stringify({ center, vertices, color });
 }
 
 function geofenceLine(area: GeofenceArea): EdgezMapLine | null {
   try {
-    const geometry = JSON.parse(area.geometry) as { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[] };
+    const geometry = JSON.parse(area.geometry) as { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
     const center = geometry.center;
     if (!center || !Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return null;
     let points: { latitude: number; longitude: number }[];
@@ -118,7 +173,7 @@ function geofenceLine(area: GeofenceArea): EdgezMapLine | null {
       });
     }
     if (points.length < 3) return null;
-    return { id: area.$id, points: [...points, points[0]], color: "#e88d29" };
+    return { id: area.$id, points: [...points, points[0]], color: areaColor(geometry.color) };
   } catch { return null; }
 }
 
@@ -196,7 +251,7 @@ async function cacheSnapshot(user: CurrentUser, farms: Farm[], devices: Device[]
   const safeFarms: CachedFarm[] = farms.map(({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }) =>
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
   const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
-    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon } }));
+    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor } }));
   const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, receivedAt }) =>
     ({ $id, deviceId, serial, channel, topic, payload, receivedAt }));
   const safeUser: CurrentUser = { $id: user.$id, email: user.email, name: user.name, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
@@ -397,7 +452,7 @@ function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Dev
   const markers = useMemo<EdgezMapNode[]>(() =>
     devices.flatMap((device) => {
       const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
-      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: device.enabled ? "blue" : "gray", icon: device.metadata?.icon }] : [];
+      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.metadata?.icon }] : [];
     }), [devices, telemetry]);
 
   return <View style={styles.mapCard}>
@@ -520,6 +575,7 @@ export default function App() {
   const [bleConnected, setBleConnected] = useState(false);
   const [name, setName] = useState("");
   const [deviceIcon, setDeviceIcon] = useState<EdgezMapIcon>("tracker");
+  const [deviceColor, setDeviceColor] = useState<MapMarkerColor>("blue");
   const [deviceLocationChoice, setDeviceLocationChoice] = useState<DeviceLocationChoice>("none");
   const [deviceLocation, setDeviceLocation] = useState("");
   const [deviceLocationPickerOpen, setDeviceLocationPickerOpen] = useState(false);
@@ -532,6 +588,7 @@ export default function App() {
   const [provisioningStep, setProvisioningStep] = useState<1 | 2 | 3 | 4>(1);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
   const [detailIcon, setDetailIcon] = useState<EdgezMapIcon>("tracker");
+  const [detailColor, setDetailColor] = useState<MapMarkerColor>("blue");
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
   const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -732,7 +789,7 @@ export default function App() {
     if (!currentFarmId) { openSettings(); return; }
     setMenuOpen(false);
     selectedBleDevice?.disconnect();
-    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUseUpstreamWifi(null); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
+    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUseUpstreamWifi(null); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
     setError(""); setProvisioningStatus("Start by scanning for a device in provisioning mode.");
     setProvisioningStep(1);
     setProvisioningDialogOpen(true);
@@ -771,6 +828,7 @@ export default function App() {
     setSelectedBleDevice(device);
     const existing = devices.find((item) => item.serial === serialFromBleName(device.name));
     setDeviceIcon(existing?.metadata?.icon || (isNrfDevice(device) ? "tracker" : "gateway"));
+    setDeviceColor(existing ? colorForDevice(existing) : "blue");
     const previousLocation = telemetry.filter((row) => row.deviceId === existing?.$id)
       .map(telemetryCoordinates).find((coordinates) => coordinates !== null) ?? null;
     setDeviceLocationChoice(previousLocation ? "map" : "none");
@@ -854,11 +912,11 @@ export default function App() {
             Permission.update(Role.team(farm.teamId, "owner")),
             Permission.delete(Role.team(farm.teamId, "owner")),
           ],
-          metadata: { farmId: farm.$id, icon: deviceIcon },
+          metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor },
         });
-      } else if (appwriteDevice.metadata?.icon !== deviceIcon) {
+      } else if (appwriteDevice.metadata?.icon !== deviceIcon || colorForDevice(appwriteDevice) !== deviceColor) {
         appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
-          metadata: { ...appwriteDevice.metadata, icon: deviceIcon },
+          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor },
         });
       }
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
@@ -890,19 +948,19 @@ export default function App() {
         await selectedBleDevice.provision(upstreamSsid, upstreamPassword);
       }
       setProvisioningStatus(`Provisioned ${serial}.`);
-      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceLocationChoice("none"); setDeviceLocation("");
+      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
       setProvisioningDialogOpen(false);
       await refresh(user);
     } catch (caught) { setError(messageOf(caught)); setProvisioningStatus("Provisioning did not complete."); }
     finally { selectedBleDevice.disconnect(); setBleConnected(false); setBusy(false); }
   }
 
-  async function saveDeviceIcon() {
+  async function saveDeviceAppearance() {
     if (!detailDevice || offline) return;
     setBusy(true); setError("");
     try {
       const updated = await deviceApi<Device>(`/${encodeURIComponent(detailDevice.$id)}`, "PATCH", {
-        metadata: { ...detailDevice.metadata, icon: detailIcon },
+        metadata: { ...detailDevice.metadata, icon: detailIcon, markerColor: detailColor },
       });
       setDevices((items) => items.map((item) => item.$id === updated.$id ? updated : item));
       setDetailDevice(updated);
@@ -1160,7 +1218,7 @@ export default function App() {
       {visibleDevices.map((device) => {
         const latest = latestVoltageByDevice.get(device.$id);
         const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
-        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailIcon(device.metadata?.icon || "tracker"); setDetailDevice(device); }}>
+        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailIcon(device.metadata?.icon || "tracker"); setDetailColor(colorForDevice(device)); setDetailDevice(device); }}>
           <View style={styles.deviceCardHeader}><View><Text style={styles.deviceCardName}>{device.name}</Text><Text style={styles.deviceSerial}>{device.serial}</Text></View><View style={styles.statusBadge}><View style={[styles.statusDot, status === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.statusText}>{status.toUpperCase()}</Text></View></View>
           <View style={styles.latestRow}><View><Text style={styles.latestLabel}>LATEST BATTERY VOLTAGE</Text><Text style={styles.latestValue}>{latest ? `${latest.value.toFixed(2)} V` : "—"}</Text></View><Text style={styles.cardArrow}>›</Text></View>
           <Text style={styles.lastSeen}>{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for battery telemetry"}</Text>
@@ -1278,8 +1336,7 @@ export default function App() {
               <Text style={styles.fieldLabel}>NAME</Text>
               <TextInput style={styles.inputLight} value={name} onChangeText={setName} placeholder="Device name" maxLength={128} />
               <Text style={styles.fieldHint}>Optional. The serial is used when no name is entered.</Text>
-              <Text style={styles.fieldLabel}>MAP ICON</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>{edgezMapIcons.map((icon) => <Pressable key={icon} style={[styles.iconChoice, deviceIcon === icon && styles.farmRowSelected]} onPress={() => setDeviceIcon(icon)} accessibilityRole="radio" accessibilityState={{ selected: deviceIcon === icon }}><MaterialCommunityIcons name={iconGlyphs[icon]} size={24} color="#0a3037" /><Text style={styles.deviceNameDark}>{icon.toUpperCase()}</Text></Pressable>)}</ScrollView>
+              <MapAppearancePicker icon={deviceIcon} color={deviceColor} onIconChange={setDeviceIcon} onColorChange={setDeviceColor} />
               <Text style={styles.fieldLabel}>LOCATION · OPTIONAL</Text>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
@@ -1319,9 +1376,8 @@ export default function App() {
           <View style={styles.detailHeader}><Pressable onPress={() => setDetailDevice(null)}><Text style={styles.detailBack}>‹ DEVICES</Text></Pressable><Text style={styles.detailSerial}>{detailDevice.serial}</Text></View>
           <ScrollView contentContainerStyle={styles.detailContent}>
             <View style={styles.detailTitleRow}><View><Text style={styles.detailEyebrow}>DEVICE</Text><Text style={styles.detailTitle}>{detailDevice.name}</Text></View><View style={styles.detailStatus}><View style={[styles.statusDot, detailStatus === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.detailStatusText}>{detailStatus.toUpperCase()}</Text></View></View>
-            <Text style={styles.fieldLabel}>MAP ICON</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>{edgezMapIcons.map((icon) => <Pressable key={icon} style={[styles.iconChoice, detailIcon === icon && styles.farmRowSelected]} onPress={() => setDetailIcon(icon)} accessibilityRole="radio" accessibilityState={{ selected: detailIcon === icon }}><MaterialCommunityIcons name={iconGlyphs[icon]} size={24} color="#0a3037" /><Text style={styles.deviceNameDark}>{icon.toUpperCase()}</Text></Pressable>)}</ScrollView>
-            <Pressable style={[styles.primary, (offline || busy || detailIcon === detailDevice.metadata?.icon) && styles.disabledButton]} onPress={() => void saveDeviceIcon()} disabled={offline || busy || detailIcon === detailDevice.metadata?.icon}><Text style={styles.primaryText}>SAVE MAP ICON</Text></Pressable>
+            <MapAppearancePicker icon={detailIcon} color={detailColor} onIconChange={setDetailIcon} onColorChange={setDetailColor} />
+            <Pressable style={[styles.primary, (offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))) && styles.disabledButton]} onPress={() => void saveDeviceAppearance()} disabled={offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))}><Text style={styles.primaryText}>SAVE MAP APPEARANCE</Text></Pressable>
             {error ? <Text style={styles.dialogError}>{error}</Text> : null}
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>
