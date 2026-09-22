@@ -991,8 +991,7 @@ export default function App() {
           <Pressable style={styles.menuButton} onPress={() => setMenuOpen((open) => !open)} accessibilityRole="button" accessibilityLabel="Open menu" accessibilityState={{ expanded: menuOpen }}><Text style={styles.menuButtonText}>MENU ⌄</Text></Pressable>
         </View>
         {menuOpen && <View style={styles.dropdownMenu}>
-          <Pressable style={styles.menuItem} onPress={() => { setDashboardView("map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={[styles.menuItemText, dashboardView === "map" && styles.menuItemActive]}>Map view</Text></Pressable>
-          <Pressable style={styles.menuItem} onPress={() => { setDashboardView("list"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={[styles.menuItemText, dashboardView === "list" && styles.menuItemActive]}>List view</Text></Pressable>
+          <Pressable style={styles.menuItem} onPress={() => { setDashboardView(dashboardView === "map" ? "list" : "map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>{dashboardView === "map" ? "List view" : "Map view"}</Text></Pressable>
           <Pressable style={styles.menuItem} onPress={openSettings} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Settings · Farms</Text></Pressable>
           <View style={styles.menuDivider} />
           <Pressable style={styles.menuItem} onPress={() => void signOut().catch((caught) => setError(messageOf(caught)))} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Sign out</Text></Pressable>

@@ -2,7 +2,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#include <atomic>
 
 #include "cJSON.h"
 #include "esp_adc/adc_cali.h"
@@ -36,8 +35,7 @@ constexpr char kHalowNamespace[] = "halow";
 constexpr char kLocationNamespace[] = "location";
 constexpr char kMqttEndpoint[] = "mqtt-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
-constexpr TickType_t kBatteryPublishInterval = pdMS_TO_TICKS(30000);
-constexpr size_t kBatchRecordCount = 5;
+constexpr TickType_t kGatewayTelemetryInterval = pdMS_TO_TICKS(30000);
 constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
 constexpr adc_channel_t kBatteryAdcChannel = ADC_CHANNEL_0;  // GPIO1 / ADC_IN
 constexpr EventBits_t kNetworkConnected = BIT0;
@@ -92,12 +90,8 @@ char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
 bool halow_connect_started = false;
-std::atomic<int> halow_connect_result{-9999};
 QueueHandle_t beacon_queue;
 QueueHandle_t telemetry_queue;
-std::atomic<uint32_t> beacon_frames_seen{0};
-std::atomic<uint32_t> beacon_frames_decoded{0};
-std::atomic<uint32_t> beacon_frames_dropped{0};
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
@@ -250,12 +244,10 @@ void load_device_location() {
 
 void enqueue_beacon(const uint8_t *data, size_t length) {
   if (!beacon_queue || !data || length == 0 || length > sizeof(BeaconFrame::data)) return;
-  beacon_frames_seen.fetch_add(1, std::memory_order_relaxed);
   BeaconFrame frame{};
   frame.length = length;
   std::memcpy(frame.data, data, length);
   if (xQueueSend(beacon_queue, &frame, 0) != pdTRUE) {
-    beacon_frames_dropped.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGW(kTag, "Raw HaLow beacon queue full; record dropped");
   }
 }
@@ -265,7 +257,6 @@ void decode_remote_beacon(const BeaconFrame &frame) {
   pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.length);
   if (!pb_decode(&stream, ai_edgez_halow_Beacon_fields, &beacon) ||
       (beacon.user_id_high == 0 && beacon.user_id_low == 0)) return;
-  beacon_frames_decoded.fetch_add(1, std::memory_order_relaxed);
 
   RemoteBeacon reading{};
   std::snprintf(reading.client_id, sizeof(reading.client_id),
@@ -315,7 +306,6 @@ void decode_remote_beacon(const BeaconFrame &frame) {
   }
 
   if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE) {
-    beacon_frames_dropped.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGW(kTag, "Remote telemetry queue full; beacon record dropped");
   }
 }
@@ -430,7 +420,6 @@ void connect_halow_task(void *) {
       halow_config.mesh_id, halow_config.passphrase,
       halow_config.country, halow_config.channel,
       halow_config.wifi_upstream, halow_ready);
-  halow_connect_result.store(result, std::memory_order_relaxed);
   if (result != ESP_OK) {
     show_device_status("HALOW FAILED", esp_err_to_name(result));
     ESP_LOGE(kTag, "HaLow connect failed: %s", esp_err_to_name(result));
@@ -524,65 +513,58 @@ esp_err_t read_battery_millivolts(int *battery_mv) {
   return result;
 }
 
-void battery_telemetry_task(void *) {
-  RemoteBeacon pending[kBatchRecordCount]{};
-  size_t pending_count = 0;
-  TickType_t last_publish_at = xTaskGetTickCount();
+void enqueue_gateway_telemetry() {
+  if (!(xEventGroupGetBits(state_events) & kMqttConfigured)) return;
+
+  RemoteBeacon reading{};
+  strlcpy(reading.client_id, mqtt_config.client_id, sizeof(reading.client_id));
+  int battery_mv = 0;
+  const esp_err_t result = read_battery_millivolts(&battery_mv);
+  if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
+    auto &battery = reading.sensor_data[reading.sensor_data_count++];
+    battery.type = ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE;
+    battery.which_value = ai_edgez_halow_SensorData_float_value_tag;
+    battery.value.float_value = battery_mv / 1000.0f;
+  } else if (result != ESP_OK) {
+    ESP_LOGW(kTag, "Battery ADC read failed: %s", esp_err_to_name(result));
+  } else {
+    ESP_LOGW(kTag, "Battery voltage %d mV outside expected range; skipping telemetry", battery_mv);
+  }
+  if (device_location.has_location && reading.sensor_data_count + 2 <= 9) {
+    auto &latitude = reading.sensor_data[reading.sensor_data_count++];
+    latitude.type = ai_edgez_halow_SensorType_SENSOR_LATITUDE;
+    latitude.which_value = ai_edgez_halow_SensorData_float_value_tag;
+    latitude.value.float_value = device_location.latitude_e6 / 1000000.0f;
+    auto &longitude = reading.sensor_data[reading.sensor_data_count++];
+    longitude.type = ai_edgez_halow_SensorType_SENSOR_LONGITUDE;
+    longitude.which_value = ai_edgez_halow_SensorData_float_value_tag;
+    longitude.value.float_value = device_location.longitude_e6 / 1000000.0f;
+  }
+  if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
+    ESP_LOGW(kTag, "Gateway telemetry queue full; record dropped");
+}
+
+void gateway_telemetry_task(void *) {
+  while (true) {
+    enqueue_gateway_telemetry();
+    vTaskDelay(kGatewayTelemetryInterval);
+  }
+}
+
+void telemetry_publish_task(void *) {
   while (true) {
     xEventGroupWaitBits(state_events, kMqttConnected, pdFALSE, pdTRUE, portMAX_DELAY);
-    const TickType_t elapsed = xTaskGetTickCount() - last_publish_at;
-    const TickType_t remaining = elapsed < kBatteryPublishInterval
-                                     ? kBatteryPublishInterval - elapsed : 0;
-    if (pending_count < kBatchRecordCount &&
-        xQueueReceive(telemetry_queue, &pending[pending_count], remaining) == pdTRUE) {
-      ++pending_count;
-      if (pending_count < kBatchRecordCount) continue;
-    }
+    RemoteBeacon remote{};
+    if (xQueueReceive(telemetry_queue, &remote, portMAX_DELAY) != pdTRUE) continue;
     if (!(xEventGroupGetBits(state_events) & kMqttConnected)) continue;
 
-    int battery_mv = 0;
-    const esp_err_t result = read_battery_millivolts(&battery_mv);
     cJSON *batch = cJSON_CreateArray();
-    cJSON *self = cJSON_CreateObject();
-    if (!batch || !self) {
+    if (!batch) {
       cJSON_Delete(batch);
-      cJSON_Delete(self);
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
-    cJSON_AddStringToObject(self, "clientId", mqtt_config.client_id);
-    cJSON_AddStringToObject(self, "status", "online");
-    cJSON_AddNumberToObject(self, "halowConnectResult",
-                            halow_connect_result.load(std::memory_order_relaxed));
-    cJSON_AddNumberToObject(self, "halowChannel", halow_config.channel);
-    cJSON_AddStringToObject(self, "halowCountry", halow_config.country);
-    cJSON_AddBoolToObject(self, "halowConnectStarted", halow_connect_started);
-    cJSON_AddNumberToObject(self, "halowBeaconFramesSeen",
-                            beacon_frames_seen.load(std::memory_order_relaxed));
-    cJSON_AddNumberToObject(self, "halowBeaconFramesDecoded",
-                            beacon_frames_decoded.load(std::memory_order_relaxed));
-    cJSON_AddNumberToObject(self, "halowBeaconFramesDropped",
-                            beacon_frames_dropped.load(std::memory_order_relaxed));
-    const HalowBeaconDebugStats halow_debug = halow_beacon_debug_stats();
-    cJSON_AddNumberToObject(self, "halowScanResults", halow_debug.scan_results);
-    cJSON_AddNumberToObject(self, "halowScanEdgezIes", halow_debug.scan_edgez_ies);
-    cJSON_AddNumberToObject(self, "halowVendorCallbacks", halow_debug.vendor_callbacks);
-    cJSON_AddNumberToObject(self, "halowStartupStage", halow_debug.startup_stage);
-    cJSON_AddNumberToObject(self, "halowLibraryStatus", halow_debug.library_status);
-    if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
-      cJSON_AddNumberToObject(self, "batteryVoltageMv", battery_mv);
-      cJSON_AddStringToObject(self, "unit", "millivolt");
-    } else if (result != ESP_OK) {
-      ESP_LOGW(kTag, "Battery ADC read failed: %s", esp_err_to_name(result));
-    } else if (battery_mv < 2500 || battery_mv > 5000) {
-      ESP_LOGW(kTag, "Battery voltage %d mV outside expected range; skipping telemetry", battery_mv);
-    }
-    if (device_location.has_location) {
-      cJSON_AddNumberToObject(self, "latitude", device_location.latitude_e6 / 1000000.0);
-      cJSON_AddNumberToObject(self, "longitude", device_location.longitude_e6 / 1000000.0);
-    }
-    cJSON_AddItemToArray(batch, self);
-    append_remote_telemetry(batch, pending, pending_count);
+    append_remote_telemetry(batch, &remote, 1);
     char *payload = cJSON_PrintUnformatted(batch);
     int message_id = -1;
     if (payload && (xEventGroupGetBits(state_events) & kMqttConnected)) {
@@ -592,15 +574,11 @@ void battery_telemetry_task(void *) {
                     mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
       message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
       if (message_id >= 0)
-        ESP_LOGI(kTag, "Telemetry batch published to %s (%d): %u remote records",
-                 topic, message_id, static_cast<unsigned>(pending_count));
+        ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
     }
     cJSON_free(payload);
     cJSON_Delete(batch);
-    if (message_id >= 0) {
-      pending_count = 0;
-      last_publish_at = xTaskGetTickCount();
-    } else vTaskDelay(pdMS_TO_TICKS(1000));
+    if (message_id < 0) vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -778,9 +756,12 @@ extern "C" void app_main() {
   calibration_config.atten = ADC_ATTEN_DB_12;
   calibration_config.bitwidth = ADC_BITWIDTH_DEFAULT;
   ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&calibration_config, &battery_calibration));
-  const BaseType_t task_created = xTaskCreate(
-      battery_telemetry_task, "battery_telemetry", 4096, nullptr, 5, nullptr);
-  ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+  const BaseType_t gateway_task_created = xTaskCreate(
+      gateway_telemetry_task, "gateway_telemetry", 4096, nullptr, 5, nullptr);
+  const BaseType_t publish_task_created = xTaskCreate(
+      telemetry_publish_task, "telemetry_publish", 4096, nullptr, 5, nullptr);
+  ESP_ERROR_CHECK(gateway_task_created == pdPASS && publish_task_created == pdPASS
+                      ? ESP_OK : ESP_ERR_NO_MEM);
 
   ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, nullptr));
