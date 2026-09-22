@@ -16,6 +16,7 @@
 #include <errno.h>
 
 #include "meshtastic_ble.h"
+#include "livestocking_config.h"
 #include "meshtastic_phone_api.h"
 #include "edgez_config.h"
 #include "edgez_gps.h"
@@ -1044,7 +1045,7 @@ static void publish_heartbeat(void)
 	       halow_power_ready, halow_state_name(state),
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "mesh" : "sta",
 	       iface_state, iface_status_rc, connect_stage, net_mgmt_rc,
-	       wifi_event_status, profile.mesh_id, HALOW_WIFI_REGION,
+	       wifi_event_status, profile.mesh_id, livestock_config_country(),
 	       profile.mesh_frequency_khz, profile.mesh_bandwidth_mhz,
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "open" : "WPA3-SAE",
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? 0U :
@@ -1091,6 +1092,10 @@ static void poll_button(void)
 #if defined(CONFIG_WIFI_MORSE_TEST)
 		start_halow_manual_boot();
 #endif
+		if (!meshtastic_ble_is_enabled() && !meshtastic_ble_is_connected()) {
+			int rc = meshtastic_ble_start();
+			LOG_INF("KEY re-enabled BLE provisioning rc=%d", rc);
+		}
 	}
 
 	was_pressed = pressed != 0;
@@ -1192,7 +1197,7 @@ static void wifi_connect_thread(void *arg1, void *arg2, void *arg3)
 		profile.mesh_id,
 		IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "mesh" : "sta",
 		params.security == WIFI_SECURITY_TYPE_NONE ? "open" : "WPA3-SAE",
-		HALOW_WIFI_REGION,
+		livestock_config_country(),
 		(unsigned int)params.psk_length);
 #if defined(CONFIG_WIFI_MORSE_SM)
 	meshtastic_phone_api_register_halow_rx();
@@ -1561,7 +1566,7 @@ static int connect_morse_sdk_sta(void)
 		IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "mesh" : "sta",
 		sta_args.security_type == MMWLAN_OPEN ? "open" : "SAE",
 		sta_args.pmf_mode,
-		HALOW_WIFI_REGION,
+		livestock_config_country(),
 		(unsigned int)sta_args.mesh_frequency_khz,
 		(unsigned int)sta_args.mesh_bandwidth_mhz,
 		(unsigned int)sta_args.passphrase_len, sta_args.scan_interval_base_s,
@@ -1665,9 +1670,9 @@ static int boot_morse_transceiver(void)
 
 	mmwlan_init();
 
-	channel_list = mmwlan_lookup_regulatory_domain(reg_db, CONFIG_WIFI_MORSE_REGION);
+	channel_list = mmwlan_lookup_regulatory_domain(reg_db, livestock_config_country());
 	if (!channel_list) {
-		LOG_ERR("Could not find regulatory domain matching country code %s", CONFIG_WIFI_MORSE_REGION);
+		LOG_ERR("Could not find regulatory domain matching country code %s", livestock_config_country());
 		return -EINVAL;
 	}
 
@@ -1787,11 +1792,16 @@ int main(void)
 	}
 
 	edgez_config_init(HALOW_WIFI_SSID, HALOW_WIFI_PSK);
-	int ble_rc = meshtastic_ble_start();
-	if (ble_rc) {
-		LOG_ERR("EdgeZ BLE provisioning failed to start: %d", ble_rc);
+	livestock_config_init();
+	if (livestock_config_is_provisioned()) {
+		LOG_INF("BLE provisioning disabled after setup; press KEY to enable it");
 	} else {
-		publish_status_message("EdgeZ BLE provisioning ready");
+		int ble_rc = meshtastic_ble_start();
+		if (ble_rc) {
+			LOG_ERR("EdgeZ BLE provisioning failed to start: %d", ble_rc);
+		} else {
+			publish_status_message("EdgeZ BLE provisioning ready");
+		}
 	}
 
 #if defined(CONFIG_WIFI_MORSE_TEST)

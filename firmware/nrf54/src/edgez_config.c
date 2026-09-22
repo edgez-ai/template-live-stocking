@@ -320,6 +320,37 @@ void edgez_config_get_profile(struct edgez_halow_profile *profile)
 	k_mutex_unlock(&config_lock);
 }
 
+int edgez_config_apply_provisioning(const char *mesh_id, const char *passphrase,
+				   uint32_t frequency_khz, bool has_location,
+				   float latitude, float longitude)
+{
+	int rc;
+
+	if (!mesh_id || !passphrase || strlen(mesh_id) >= sizeof(settings.mesh_id) ||
+	    strlen(passphrase) >= sizeof(settings.passphrase) || frequency_khz == 0) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&config_lock, K_FOREVER);
+	copy_string(settings.mesh_id, sizeof(settings.mesh_id), mesh_id);
+	copy_string(settings.passphrase, sizeof(settings.passphrase), passphrase);
+	settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
+	settings.share_location = has_location;
+	settings.latitude = has_location ? latitude : 0;
+	settings.longitude = has_location ? longitude : 0;
+	mesh_frequency_khz = frequency_khz;
+	mesh_bandwidth_mhz = 1;
+	settings.mesh_frequency_khz = frequency_khz;
+	settings.mesh_bandwidth_mhz = 1;
+	normalize_settings(&settings);
+	config_generation++;
+	rc = save_persisted_profile_locked();
+	if (rc == 0) {
+		runtime_start_not_before_ms = 0;
+	}
+	k_mutex_unlock(&config_lock);
+	return rc;
+}
+
 uint32_t edgez_config_generation(void)
 {
 	uint32_t generation;

@@ -1,7 +1,7 @@
 # Mobile companion
 
-The Expo app is the only device-onboarding client. It scans `PROV_` BLE
-advertisements and derives the serial. After the operator selects a device,
+The Expo app is the only device-onboarding client. It scans `PROV_` ESP32 and
+`NRF_` nRF54 BLE advertisements and derives the serial. For ESP32, after the operator selects a device,
 the example proof of possession (PoP) `abcd1234` is prefilled to match the
 firmware and the value shown on its OLED. The app establishes an ESP-IDF
 Security 1 session. The operator chooses whether the device has regular Wi-Fi
@@ -28,12 +28,17 @@ launch. The map and list show devices assigned to that farm; the list heading
 uses its name. New devices receive the farm ID in their metadata and team-based
 permissions. Existing devices without a farm ID remain unassigned.
 
-The `+ ADD` button opens a four-step flow: choose the BLE device, confirm its
+The `+ ADD` button opens a four-step ESP32 flow: choose the BLE device, confirm its
 name and PoP, choose whether to use upstream Wi-Fi, then confirm the farm mesh
 settings. The Wi-Fi branch scans nearby networks and accepts SSID/password.
 Provisioning sends optional device coordinates through the existing BLE
 `mqtt-config` endpoint. The device stores them and reports them in unified status telemetry;
 the app uses the latest telemetry coordinates for map markers.
+For nRF54 the flow has three steps. The app connects over BLE without a PoP or
+pairing code, skips upstream Wi-Fi selection, and writes the same configuration
+to its encrypted `mqtt-config` GATT characteristic. The nRF54 stores the MQTT
+credential and HaLow profile; MQTT telemetry publishing is not yet implemented
+on that target.
 
 The signed-in home screen opens with a full-screen Organic Maps view from
 `@edgez/react-native-sdk`. The top-right menu switches between map and list

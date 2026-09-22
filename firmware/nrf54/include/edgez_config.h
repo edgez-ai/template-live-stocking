@@ -19,6 +19,9 @@ struct edgez_halow_profile {
 };
 
 void edgez_config_init(const char *mesh_id, const char *passphrase);
+int edgez_config_apply_provisioning(const char *mesh_id, const char *passphrase,
+				   uint32_t frequency_khz, bool has_location,
+				   float latitude, float longitude);
 void edgez_config_get_profile(struct edgez_halow_profile *profile);
 uint32_t edgez_config_generation(void);
 void edgez_config_set_halow_ready(bool ready);

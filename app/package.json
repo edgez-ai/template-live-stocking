@@ -13,6 +13,7 @@
     "@expo/vector-icons": "^15.0.2",
     "@orbital-systems/react-native-esp-idf-provisioning": "^0.5.5",
     "@react-native-async-storage/async-storage": "^2.2.0",
+    "base64-js": "^1.5.1",
     "expo": "~57.0.24",
     "expo-constants": "~57.0.19",
     "expo-file-system": "~57.0.7",
@@ -21,6 +22,7 @@
     "react": "19.2.3",
     "react-native": "0.86.3",
     "react-native-appwrite": "^0.20.0",
+    "react-native-ble-plx": "^3.5.1",
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {

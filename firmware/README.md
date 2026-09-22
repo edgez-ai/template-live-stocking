@@ -12,10 +12,15 @@ This target uses the prebuilt Morse Micro Zephyr package in
 `modules/mm-iot-zephyr-prebuilt` and the nRF54 application port in `nrf54/`.
 The package contains `libmorse.a`, public headers, radio firmware, and the
 KeepTeen board calibration file; it contains no Morse implementation source.
-The nRF54 application currently follows `edge-device-nrf54` and uses its
-Zephyr BLE/Meshtastic provisioning protocol. The Live Stocking MQTT
-provisioning and telemetry behavior described below applies to the ESP32-S3
-target until it is ported to nRF54.
+The nRF54 keeps its Meshtastic BLE service and also advertises a `NRF_` name
+with its 12-character serial. Its separate encrypted GATT service accepts
+`mqtt-config` directly, without ESP-IDF BLE provisioning, Wi-Fi setup, PoP, or
+pairing code. The app sends the farm country, 1 MHz channel frequency, mesh ID,
+passphrase, optional device location, and MQTT credential. The firmware saves
+these settings and reboots into the selected HaLow profile. MQTT telemetry
+publishing has not yet been ported to the nRF54 target. BLE provisioning stays
+off on subsequent boots. Press the USER button to enable BLE provisioning again;
+after the next successful configuration it turns off again.
 
 ## Heltec HT-HC33
 

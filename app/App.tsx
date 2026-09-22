@@ -13,6 +13,12 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import { centerChannelForCountry, channelsForCountry, halowCountries } from "./halowChannels";
+import { NrfProvisioningDevice, scanNrfProvisioningDevices } from "./nrfProvisioning";
+
+type ProvisioningDevice = ESPDevice | NrfProvisioningDevice;
+function isNrfDevice(device: ProvisioningDevice): device is NrfProvisioningDevice {
+  return device instanceof NrfProvisioningDevice;
+}
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
@@ -292,7 +298,7 @@ function OfflineMap({ devices, telemetry, location }: { devices: Device[]; telem
 }
 
 function serialFromBleName(name: string) {
-  const serial = name.startsWith("PROV_") ? name.slice(5).toUpperCase() : "";
+  const serial = /^(PROV_|NRF_)/i.test(name) ? name.slice(name.indexOf("_") + 1).toUpperCase() : "";
   if (!/^[A-F0-9]{12}$/.test(serial)) throw new Error(`Invalid provisioning name: ${name}`);
   return serial;
 }
@@ -350,8 +356,8 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [bleDevices, setBleDevices] = useState<ESPDevice[]>([]);
-  const [selectedBleDevice, setSelectedBleDevice] = useState<ESPDevice | null>(null);
+  const [bleDevices, setBleDevices] = useState<ProvisioningDevice[]>([]);
+  const [selectedBleDevice, setSelectedBleDevice] = useState<ProvisioningDevice | null>(null);
   const [proofOfPossession, setProofOfPossession] = useState(provisioningPop);
   const [bleConnected, setBleConnected] = useState(false);
   const [name, setName] = useState("");
@@ -536,13 +542,19 @@ export default function App() {
   }
 
   async function scanBleDevices() {
-    setBusy(true); setError(""); setProvisioningStatus("Scanning for PROV_ devices…");
+    setBusy(true); setError(""); setProvisioningStatus("Scanning for ESP32 and nRF54 devices…");
     try {
       selectedBleDevice?.disconnect();
       setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false);
       await requestBlePermissions();
-      const found = await ESPProvisionManager.searchESPDevices("PROV_", ESPTransport.ble, ESPSecurity.secure);
-      const valid = found.filter((device) => /^PROV_[A-F0-9]{12}$/i.test(device.name));
+      const [espResult, nrfResult] = await Promise.allSettled([
+        ESPProvisionManager.searchESPDevices("PROV_", ESPTransport.ble, ESPSecurity.secure),
+        scanNrfProvisioningDevices(),
+      ]);
+      const esp = espResult.status === "fulfilled" ? espResult.value.filter((device) => /^PROV_[A-F0-9]{12}$/i.test(device.name)) : [];
+      const nrf = nrfResult.status === "fulfilled" ? nrfResult.value : [];
+      if (espResult.status === "rejected" && nrfResult.status === "rejected") throw espResult.reason;
+      const valid: ProvisioningDevice[] = [...esp, ...nrf];
       setBleDevices(valid);
       setProvisioningStatus(valid.length ? "Select a device to provision." : "No provisioning devices found.");
     } catch (caught) { setError(messageOf(caught)); }
@@ -569,7 +581,12 @@ export default function App() {
   }
 
   function previousProvisioningStep() {
-    if (provisioningStep === 4) { setProvisioningStep(3); return; }
+    if (provisioningStep === 4) {
+      if (selectedBleDevice && isNrfDevice(selectedBleDevice)) {
+        selectedBleDevice.disconnect(); setBleConnected(false); setProvisioningStep(2);
+      } else setProvisioningStep(3);
+      return;
+    }
     if (provisioningStep === 3) {
       selectedBleDevice?.disconnect();
       setBleConnected(false);
@@ -582,7 +599,7 @@ export default function App() {
     setProvisioningStep(1);
   }
 
-  function selectBleDevice(device: ESPDevice) {
+  function selectBleDevice(device: ProvisioningDevice) {
     selectedBleDevice?.disconnect();
     setError("");
     setSelectedBleDevice(device);
@@ -610,26 +627,33 @@ export default function App() {
   }
 
   async function connectForProvisioning() {
-    if (!selectedBleDevice || !proofOfPossession.trim()) return;
+    if (!selectedBleDevice || (!isNrfDevice(selectedBleDevice) && !proofOfPossession.trim())) return;
     setBusy(true); setError("");
     try {
-      setProvisioningStatus(`Authenticating ${selectedBleDevice.name} with the provided PoP…`);
-      await selectedBleDevice.connect(proofOfPossession.trim());
+      setProvisioningStatus(isNrfDevice(selectedBleDevice) ? `Connecting to ${selectedBleDevice.name}…` : `Authenticating ${selectedBleDevice.name} with the provided PoP…`);
+      if (isNrfDevice(selectedBleDevice)) await selectedBleDevice.connect();
+      else await selectedBleDevice.connect(proofOfPossession.trim());
       setBleConnected(true);
-      setProvisioningStatus("Choose whether this device has an upstream Wi-Fi connection.");
-      setProvisioningStep(3);
+      if (isNrfDevice(selectedBleDevice)) {
+        setUseUpstreamWifi(false);
+        setProvisioningStatus("The nRF54 uses HaLow for its upstream connection. Confirm its farm configuration.");
+        setProvisioningStep(4);
+      } else {
+        setProvisioningStatus("Choose whether this device has an upstream Wi-Fi connection.");
+        setProvisioningStep(3);
+      }
     } catch (caught) {
       selectedBleDevice.disconnect();
       setBleConnected(false);
       setError(messageOf(caught));
-      setProvisioningStatus("BLE connection failed. Check the ESP32 and PoP, then retry.");
+      setProvisioningStatus("BLE connection failed. Check the device and retry.");
     } finally { setBusy(false); }
   }
 
   async function chooseUpstreamWifi(enabled: boolean) {
     setUseUpstreamWifi(enabled);
     setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
-    if (!enabled || !selectedBleDevice) return;
+    if (!enabled || !selectedBleDevice || isNrfDevice(selectedBleDevice)) return;
     setBusy(true); setError(""); setProvisioningStatus("Scanning nearby Wi-Fi networks…");
     try {
       const networks = await selectedBleDevice.scanWifiList();
@@ -669,7 +693,7 @@ export default function App() {
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
 
       setProvisioningStatus(`Sending ${farm.name} device configuration…`);
-      const mqttResponse = await selectedBleDevice.sendData("mqtt-config", JSON.stringify({
+      const payload = JSON.stringify({
         clientId: mqtt.clientId,
         username: mqtt.username,
         password: mqtt.password,
@@ -680,15 +704,19 @@ export default function App() {
         country: farm.country,
         halowChannel: farm.halowChannel,
         wifiUpstream: useUpstreamWifi === true,
-        ...(coordinates ?? { latitude: null, longitude: null }),
-      }));
+        ...(isNrfDevice(selectedBleDevice) ? { halowFrequencyKHz: Math.round((channelsForCountry(farm.country).find((item) => item.number === farm.halowChannel)?.frequencyMHz || 0) * 1000) } : {}),
+        ...(coordinates ?? (isNrfDevice(selectedBleDevice) ? {} : { latitude: null, longitude: null })),
+      });
+      const mqttResponse = isNrfDevice(selectedBleDevice)
+        ? await selectedBleDevice.sendMqttConfig(payload)
+        : await selectedBleDevice.sendData("mqtt-config", payload);
       const accepted = JSON.parse(mqttResponse) as { ok?: boolean; error?: string };
       if (!accepted.ok) throw new Error(accepted.error || "The device rejected its configuration.");
-      if (useUpstreamWifi) {
+      if (useUpstreamWifi && !isNrfDevice(selectedBleDevice)) {
         setProvisioningStatus("Connecting the ESP32 to upstream Wi-Fi…");
         await selectedBleDevice.provision(upstreamSsid, upstreamPassword);
       }
-      setProvisioningStatus(`Provisioned ${serial}. Waiting for battery telemetry.`);
+      setProvisioningStatus(`Provisioned ${serial}.`);
       setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceLocationChoice("none"); setDeviceLocation("");
       setProvisioningDialogOpen(false);
       await refresh(user);
@@ -1002,15 +1030,15 @@ export default function App() {
     <Modal visible={provisioningDialogOpen} animationType="slide" onRequestClose={() => deviceLocationPickerOpen ? setDeviceLocationPickerOpen(false) : closeProvisioningDialog()}>
       {deviceLocationPickerOpen ? <FarmLocationPicker device location={deviceLocation || currentFarm?.location || ""} country={currentFarm?.country || ""} onCancel={() => setDeviceLocationPickerOpen(false)} onSelect={(location) => { setDeviceLocation(location); setDeviceLocationChoice("map"); setDeviceLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
         <KeyboardAvoidingView style={styles.dialogScreen} behavior={Platform.OS === "ios" ? "padding" : undefined} accessibilityViewIsModal>
-          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {provisioningStep} OF 4</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : provisioningStep === 3 ? "Upstream Wi-Fi" : "Confirm setup"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
+          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {selectedBleDevice && isNrfDevice(selectedBleDevice) ? (provisioningStep === 4 ? 3 : provisioningStep) : provisioningStep} OF {selectedBleDevice && isNrfDevice(selectedBleDevice) ? 3 : 4}</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : provisioningStep === 3 ? "Upstream Wi-Fi" : "Confirm setup"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
           <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
             {provisioningStep === 1 && <>
-              <Text style={styles.dialogHelp}>Put the ESP32 in provisioning mode, then scan for its PROV_ Bluetooth name.</Text>
+              <Text style={styles.dialogHelp}>Put the ESP32 in provisioning mode or power on the nRF54, then scan for its Bluetooth name.</Text>
               <Pressable style={styles.primary} onPress={scanBleDevices} disabled={busy}><Text style={styles.primaryText}>{busy ? "SCANNING…" : "SCAN FOR DEVICES"}</Text></Pressable>
-              {bleDevices.map((device) => <Pressable key={device.name} style={styles.bleDevice} onPress={() => selectBleDevice(device)} disabled={busy}><Text style={styles.deviceNameDark}>{device.name}</Text><Text style={styles.muted}>Serial {device.name.slice(5).toUpperCase()}</Text></Pressable>)}
+              {bleDevices.map((device) => <Pressable key={device.name} style={styles.bleDevice} onPress={() => selectBleDevice(device)} disabled={busy}><Text style={styles.deviceNameDark}>{device.name}</Text><Text style={styles.muted}>Serial {serialFromBleName(device.name)}</Text></Pressable>)}
             </>}
             {provisioningStep === 2 && selectedBleDevice && <>
-              <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{selectedBleDevice.name}</Text><Text style={styles.muted}>Serial {selectedBleDevice.name.slice(5).toUpperCase()}</Text></View>
+              <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{selectedBleDevice.name}</Text><Text style={styles.muted}>Serial {serialFromBleName(selectedBleDevice.name)}</Text></View>
               <Text style={styles.fieldLabel}>NAME</Text>
               <TextInput style={styles.inputLight} value={name} onChangeText={setName} placeholder="Device name" maxLength={128} />
               <Text style={styles.fieldHint}>Optional. The serial is used when no name is entered.</Text>
@@ -1018,9 +1046,8 @@ export default function App() {
               <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
-              <Text style={styles.fieldLabel}>PROOF OF POSSESSION (PoP)</Text>
-              <TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder="PoP shown on the device OLED" autoCapitalize="none" autoCorrect={false} />
-              <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || !proofOfPossession.trim()}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
+              {!isNrfDevice(selectedBleDevice) && <><Text style={styles.fieldLabel}>PROOF OF POSSESSION (PoP)</Text><TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder="PoP shown on the device OLED" autoCapitalize="none" autoCorrect={false} /></>}
+              <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (!isNrfDevice(selectedBleDevice) && !proofOfPossession.trim())}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
               <Text style={styles.dialogHelp}>Will this ESP32 use regular Wi-Fi for its upstream connection? It will receive the farm mesh settings either way.</Text>
@@ -1037,7 +1064,7 @@ export default function App() {
             </>}
             {provisioningStep === 4 && selectedBleDevice && <>
               <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{currentFarm?.name}</Text><Text style={styles.muted}>{currentFarm?.location}, {currentFarm?.country} · Channel {currentFarm?.halowChannel}</Text><Text style={styles.muted}>Mesh ID: {currentFarm?.meshId}</Text><Text style={styles.muted}>Device location: {deviceLocationChoice === "none" ? "None" : deviceLocation}</Text></View>
-              <Text style={styles.dialogHelp}>{useUpstreamWifi ? `Upstream Wi-Fi: ${upstreamSsid}. ` : "No upstream Wi-Fi. "}The app will send the mesh settings and MQTT credential to the device.</Text>
+              <Text style={styles.dialogHelp}>{isNrfDevice(selectedBleDevice) ? "HaLow upstream. " : useUpstreamWifi ? `Upstream Wi-Fi: ${upstreamSsid}. ` : "No upstream Wi-Fi. "}The app will send the mesh settings and MQTT credential to the device.</Text>
               <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !bleConnected || !currentFarm}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep > 1 && <Pressable style={styles.backButton} onPress={previousProvisioningStep} disabled={busy}><Text style={styles.secondaryText}>BACK</Text></Pressable>}

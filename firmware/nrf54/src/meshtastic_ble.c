@@ -15,16 +15,30 @@
 #include <zephyr/sys/util.h>
 
 #include "edgez_config.h"
+#include "livestocking_config.h"
 #include "meshtastic_phone_api.h"
 
 LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 
-#define EDGEZ_BLE_PASSKEY 123456
 #define EDGEZ_FRAME_HEADER_LEN 4
 #define EDGEZ_FRAME_MAX_PAYLOAD 512
 #define EDGEZ_FRAME_MAX_LEN (EDGEZ_FRAME_HEADER_LEN + EDGEZ_FRAME_MAX_PAYLOAD)
 #define EDGEZ_BLE_NOTIFY_RETRY_DELAY K_MSEC(10)
 #define EDGEZ_BLE_NOTIFY_MAX_RETRIES 10
+#define MQTT_CONFIG_MAX_LEN 1024
+
+/* Direct nRF provisioning: service, mqtt-config write, result read. */
+#define LIVESTOCK_SERVICE_UUID BT_UUID_128_ENCODE(0xa3631000, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
+#define LIVESTOCK_CONFIG_UUID BT_UUID_128_ENCODE(0xa3631001, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
+#define LIVESTOCK_STATUS_UUID BT_UUID_128_ENCODE(0xa3631002, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
+
+static struct bt_uuid_128 livestock_service_uuid = BT_UUID_INIT_128(LIVESTOCK_SERVICE_UUID);
+static struct bt_uuid_128 livestock_config_uuid = BT_UUID_INIT_128(LIVESTOCK_CONFIG_UUID);
+static struct bt_uuid_128 livestock_status_uuid = BT_UUID_INIT_128(LIVESTOCK_STATUS_UUID);
+static char mqtt_config_buffer[MQTT_CONFIG_MAX_LEN + 1];
+static size_t mqtt_config_expected;
+static size_t mqtt_config_received;
+static const char *mqtt_config_status = "{\"pending\":true}";
 
 static struct bt_uuid_16 edgez_service_uuid = BT_UUID_INIT_16(0xfff0);
 static struct bt_uuid_16 edgez_rx_uuid = BT_UUID_INIT_16(0xfff1);
@@ -40,6 +54,7 @@ static uint8_t pending_response_retries;
 static uint8_t battery_level = 100;
 static bool bt_ready;
 static bool advertising;
+static bool provisioning_enabled;
 static bool tx_notify_enabled;
 static char advertised_name[20];
 
@@ -55,6 +70,7 @@ static const char *conn_addr_str(const struct bt_conn *conn, char *buf, size_t l
 }
 
 static void start_advertising(void);
+static const char *get_advertised_name(void);
 static void restart_advertising_work_handler(struct k_work *work);
 static void response_notify_work_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(restart_advertising_work, restart_advertising_work_handler);
@@ -213,6 +229,68 @@ static ssize_t read_battery(struct bt_conn *conn, const struct bt_gatt_attr *att
 				 sizeof(battery_level));
 }
 
+static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				 const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	const uint8_t *data = buf;
+	size_t header;
+	int rc;
+
+	ARG_UNUSED(attr);
+	ARG_UNUSED(flags);
+	if (offset || len < 2) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (data[0] == 1 && len >= 4) {
+		mqtt_config_expected = sys_get_le16(&data[1]);
+		mqtt_config_received = 0;
+		mqtt_config_status = "{\"pending\":true}";
+		header = 3;
+		if (!mqtt_config_expected || mqtt_config_expected > MQTT_CONFIG_MAX_LEN) {
+			mqtt_config_status = "{\"ok\":false,\"error\":\"Configuration too large\"}";
+			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+		}
+	} else if (data[0] == 2 && mqtt_config_expected) {
+		header = 1;
+	} else {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+	if (mqtt_config_received + len - header > mqtt_config_expected) {
+		mqtt_config_status = "{\"ok\":false,\"error\":\"Invalid configuration length\"}";
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	memcpy(&mqtt_config_buffer[mqtt_config_received], data + header, len - header);
+	mqtt_config_received += len - header;
+	if (mqtt_config_received == mqtt_config_expected) {
+		mqtt_config_buffer[mqtt_config_received] = '\0';
+		rc = livestock_config_apply_json(mqtt_config_buffer, mqtt_config_received,
+					      get_advertised_name() + 4);
+		mqtt_config_status = rc == 0 ? "{\"ok\":true}" :
+			"{\"ok\":false,\"error\":\"Invalid configuration or storage failed\"}";
+		if (rc == 0) provisioning_enabled = false;
+		LOG_INF("Live Stocking mqtt-config received bytes=%u result=%d",
+			(unsigned int)mqtt_config_received, rc);
+		mqtt_config_expected = 0;
+		mqtt_config_received = 0;
+	}
+	return len;
+}
+
+static ssize_t read_mqtt_config_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				       void *buf, uint16_t len, uint16_t offset)
+{
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, mqtt_config_status,
+				 strlen(mqtt_config_status));
+}
+
+BT_GATT_SERVICE_DEFINE(livestock_svc,
+	BT_GATT_PRIMARY_SERVICE(&livestock_service_uuid),
+	BT_GATT_CHARACTERISTIC(&livestock_config_uuid.uuid, BT_GATT_CHRC_WRITE,
+		BT_GATT_PERM_WRITE_ENCRYPT, NULL, write_mqtt_config, NULL),
+	BT_GATT_CUD("mqtt-config", BT_GATT_PERM_READ),
+	BT_GATT_CHARACTERISTIC(&livestock_status_uuid.uuid, BT_GATT_CHRC_READ,
+		BT_GATT_PERM_READ_ENCRYPT, read_mqtt_config_status, NULL, NULL));
+
 BT_GATT_SERVICE_DEFINE(edgez_svc,
 	BT_GATT_PRIMARY_SERVICE(&edgez_service_uuid),
 	BT_GATT_CHARACTERISTIC(&edgez_rx_uuid.uuid,
@@ -242,10 +320,11 @@ static const char *get_advertised_name(void)
 	size_t count = ARRAY_SIZE(addrs);
 	bt_id_get(addrs, &count);
 	if (count) {
-		snprintk(advertised_name, sizeof(advertised_name), "EdgeZ-%02X%02X",
-			 addrs[0].a.val[1], addrs[0].a.val[0]);
+		snprintk(advertised_name, sizeof(advertised_name), "NRF_%02X%02X%02X%02X%02X%02X",
+			 addrs[0].a.val[5], addrs[0].a.val[4], addrs[0].a.val[3],
+			 addrs[0].a.val[2], addrs[0].a.val[1], addrs[0].a.val[0]);
 	} else {
-		strcpy(advertised_name, "EdgeZ-0000");
+		strcpy(advertised_name, "NRF_000000000000");
 	}
 	return advertised_name;
 }
@@ -255,7 +334,7 @@ static void start_advertising(void)
 	const char *name;
 	struct bt_data sd[1];
 	int err;
-	if (!bt_ready || advertising || current_conn) {
+	if (!bt_ready || !provisioning_enabled || advertising || current_conn) {
 		LOG_DBG("BLE advertising skipped ready=%u advertising=%u connected=%u",
 			bt_ready, advertising, current_conn != NULL);
 		return;
@@ -297,6 +376,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	current_conn = bt_conn_ref(conn);
 	advertising = false;
 	rx_length = 0;
+	mqtt_config_expected = 0;
+	mqtt_config_received = 0;
+	mqtt_config_status = "{\"pending\":true}";
 	pending_response_len = 0;
 	tx_notify_enabled = false;
 	LOG_INF("EdgeZ BLE provisioning client connected peer=%s security=%u; waiting for pairing and FFF2 CCC",
@@ -315,6 +397,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		current_conn = NULL;
 	}
 	rx_length = 0;
+	mqtt_config_expected = 0;
+	mqtt_config_received = 0;
 	pending_response_len = 0;
 	(void)k_work_cancel_delayable(&response_notify_work);
 	tx_notify_enabled = false;
@@ -342,14 +426,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected,
 	.security_changed = security_changed,
 };
-
-static void passkey_display(struct bt_conn *conn, unsigned int passkey)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	LOG_INF("EdgeZ BLE pairing passkey peer=%s passkey=%06u",
-		conn_addr_str(conn, addr, sizeof(addr)), passkey);
-}
 
 static void pairing_confirm(struct bt_conn *conn)
 {
@@ -396,7 +472,6 @@ static void bond_deleted(uint8_t id, const bt_addr_le_t *peer)
 }
 
 static struct bt_conn_auth_cb auth_callbacks = {
-	.passkey_display = passkey_display,
 	.pairing_confirm = pairing_confirm,
 	.cancel = auth_cancel,
 };
@@ -417,8 +492,8 @@ static void bt_ready_cb(int err)
 	}
 	bt_ready = true;
 	settings_rc = settings_load_subtree("bt");
-	LOG_INF("Bluetooth initialized settings_load_rc=%d service=FFF0 rx=FFF1 tx=FFF2 passkey=%06u",
-		settings_rc, EDGEZ_BLE_PASSKEY);
+	LOG_INF("Bluetooth initialized settings_load_rc=%d service=FFF0 rx=FFF1 tx=FFF2",
+		settings_rc);
 	start_advertising();
 }
 
@@ -429,7 +504,7 @@ bool meshtastic_ble_is_connected(void)
 
 bool meshtastic_ble_is_enabled(void)
 {
-	return bt_ready;
+	return bt_ready && provisioning_enabled;
 }
 
 void meshtastic_ble_update_battery(uint8_t level)
@@ -444,11 +519,11 @@ void meshtastic_ble_update_battery(uint8_t level)
 int meshtastic_ble_start(void)
 {
 	int err;
-	int passkey_err;
 	int auth_info_err;
 
 	LOG_INF("BLE provisioning startup begin ready=%u service=FFF0 rx=FFF1 tx=FFF2 max_payload=%u",
 		bt_ready, EDGEZ_FRAME_MAX_PAYLOAD);
+	provisioning_enabled = true;
 	if (bt_ready) {
 		start_advertising();
 		return 0;
@@ -464,12 +539,6 @@ int meshtastic_ble_start(void)
 	auth_info_err = bt_conn_auth_info_cb_register(&auth_info_callbacks);
 	if (auth_info_err && auth_info_err != -EALREADY) {
 		LOG_WRN("BLE auth-info callback registration failed: %d", auth_info_err);
-	}
-	passkey_err = bt_passkey_set(EDGEZ_BLE_PASSKEY);
-	if (passkey_err) {
-		LOG_ERR("BLE fixed passkey setup failed: %d", passkey_err);
-	} else {
-		LOG_INF("BLE fixed passkey configured value=%06u", EDGEZ_BLE_PASSKEY);
 	}
 	err = bt_enable(bt_ready_cb);
 	if (err && err != -EALREADY) {
