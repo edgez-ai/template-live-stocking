@@ -67,7 +67,11 @@ export async function scanNrfProvisioningDevices(): Promise<NrfProvisioningDevic
     client.startDeviceScan(null, { allowDuplicates: false }, (error, device) => {
       if (error) { clearTimeout(timer); client.stopDeviceScan(); reject(error); return; }
       const name = device?.name || device?.localName;
-      if (device && name && /^NRF_[A-F0-9]{12}$/i.test(name)) {
+      const hasNrfService = device?.serviceUUIDs?.some((uuid) =>
+        /^(?:0000)?fff0(?:-0000-1000-8000-00805f9b34fb)?$/i.test(uuid));
+      if (device && name &&
+          (/^NRF_[A-F0-9]{12}$/i.test(name) ||
+           (/^PROV_[A-F0-9]{12}$/i.test(name) && hasNrfService))) {
         found.set(device.id, new NrfProvisioningDevice(device.id, name));
       }
     });

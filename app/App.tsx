@@ -560,13 +560,19 @@ export default function App() {
       selectedBleDevice?.disconnect();
       setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false);
       await requestBlePermissions();
-      const [espResult, nrfResult] = await Promise.allSettled([
-        ESPProvisionManager.searchESPDevices("PROV_", ESPTransport.ble, ESPSecurity.secure),
-        scanNrfProvisioningDevices(),
-      ]);
-      const esp = espResult.status === "fulfilled" ? espResult.value.filter((device) => /^PROV_[A-F0-9]{12}$/i.test(device.name)) : [];
-      const nrf = nrfResult.status === "fulfilled" ? nrfResult.value : [];
-      if (espResult.status === "rejected" && nrfResult.status === "rejected") throw espResult.reason;
+      let nrf: NrfProvisioningDevice[] = [];
+      let nrfError: unknown;
+      try { nrf = await scanNrfProvisioningDevices(); }
+      catch (caught) { nrfError = caught; }
+      let esp: ESPDevice[] = [];
+      try {
+        const candidates = await ESPProvisionManager.searchESPDevices("PROV_", ESPTransport.ble, ESPSecurity.secure);
+        const nrfNames = new Set(nrf.map((device) => device.name.toLowerCase()));
+        esp = candidates.filter((device) =>
+          /^PROV_[A-F0-9]{12}$/i.test(device.name) && !nrfNames.has(device.name.toLowerCase()));
+      } catch (caught) {
+        if (nrfError) throw nrfError;
+      }
       const valid: ProvisioningDevice[] = [...esp, ...nrf];
       setBleDevices(valid);
       setProvisioningStatus(valid.length ? "Select a device to provision." : "No provisioning devices found.");

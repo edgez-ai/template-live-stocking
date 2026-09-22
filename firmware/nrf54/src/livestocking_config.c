@@ -134,6 +134,8 @@ int livestock_config_apply_json(char *json, size_t length, const char *device_se
 	fields = json_obj_parse(json, length, provisioning_descr,
 				ARRAY_SIZE(provisioning_descr), &request);
 	if (fields < 0 || (fields & BIT_MASK(10)) != BIT_MASK(10)) {
+		LOG_ERR("MQTT provisioning JSON parse failed fields=%lld required=0x%x",
+			(long long)fields, BIT_MASK(10));
 		return -EBADMSG;
 	}
 	if (!valid_string(request.client_id, sizeof(updated.client_id)) ||

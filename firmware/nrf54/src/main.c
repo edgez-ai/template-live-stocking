@@ -13,11 +13,11 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/storage/flash_map.h>
 #include <errno.h>
 
 #include "meshtastic_ble.h"
 #include "livestocking_config.h"
-#include "meshtastic_phone_api.h"
 #include "edgez_config.h"
 #include "edgez_battery.h"
 #include "edgez_gps.h"
@@ -52,6 +52,8 @@ LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 #define HALOW_BEACON_TX_FAILURE_REBOOT_LIMIT 20
 #define HALOW_BEACON_REBOOT_DELAY_MS 250
 #define REBOOT_BLE_RECHECK_MS 500
+#define BUTTON_DEBOUNCE_MS 50
+#define BUTTON_LONG_PRESS_MS 5000
 
 static atomic_t halow_beacon_tx_failure_count;
 static atomic_t pending_reboot_reasons;
@@ -252,17 +254,9 @@ static struct k_thread halow_manual_boot_thread_data;
 K_THREAD_STACK_DEFINE(halow_manual_boot_stack, HALOW_MANUAL_BOOT_THREAD_STACK_SIZE);
 #endif
 
-static void get_halow_profile(struct meshtastic_halow_profile *profile)
+static void get_halow_profile(struct edgez_halow_profile *profile)
 {
-	struct edgez_halow_profile edgez_profile = {0};
-	edgez_config_get_profile(&edgez_profile);
-	*profile = (struct meshtastic_halow_profile){0};
-	strncpy(profile->mesh_id, edgez_profile.mesh_id, sizeof(profile->mesh_id) - 1);
-	strncpy(profile->passphrase, edgez_profile.passphrase, sizeof(profile->passphrase) - 1);
-	profile->passphrase_len = strlen(profile->passphrase);
-	profile->mesh_frequency_khz = edgez_profile.mesh_frequency_khz;
-	profile->mesh_bandwidth_mhz = edgez_profile.mesh_bandwidth_mhz;
-	profile->beacon_interval_seconds = edgez_profile.beacon_interval_seconds;
+	edgez_config_get_profile(profile);
 }
 
 #if defined(CONFIG_WIFI_MORSE_SM)
@@ -538,7 +532,7 @@ static const char *mmwlan_scan_state_name(enum mmwlan_scan_state state)
 
 static void halow_parse_scan_ie_mesh_info(const struct mmwlan_scan_result *result)
 {
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 	const uint8_t *mesh_id = NULL;
 	uint8_t mesh_id_len = 0;
 	bool has_mesh_config = false;
@@ -616,7 +610,7 @@ static void halow_mesh_scan_complete_cb(enum mmwlan_scan_state scan_state, void 
 static bool request_mesh_info_scan(void)
 {
 	struct mmwlan_scan_req req = MMWLAN_SCAN_REQ_INIT;
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 	enum mmwlan_status status;
 	uint8_t *mesh_scan_ies = sdk_mesh_scan_ies;
 	uint8_t discovery_vendor_ie[EDGEZ_VENDOR_IES_MAX_LEN] = {0};
@@ -785,7 +779,7 @@ static void halow_sdk_scan_rx_cb(const struct mmwlan_scan_result *result, void *
 		result->rssi, (unsigned int)atomic_get(&sdk_scan_count));
 
 	size_t ssid_len = result->ssid_len;
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 	if (ssid_len > MMWLAN_SSID_MAXLEN) {
 		ssid_len = MMWLAN_SSID_MAXLEN;
 	}
@@ -938,7 +932,7 @@ static void publish_heartbeat(void)
 	int net_mgmt_rc = -9999;
 	int wifi_event_status = -9999;
 	uint8_t morse_mac[6] = {0};
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 
 	get_halow_profile(&profile);
 
@@ -1050,7 +1044,7 @@ static void publish_heartbeat(void)
 	       profile.mesh_frequency_khz, profile.mesh_bandwidth_mhz,
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "open" : "WPA3-SAE",
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? 0U :
-		       (unsigned int)profile.passphrase_len,
+		       (unsigned int)strlen(profile.passphrase),
 	       ipv4_ready, wifi_last_error, meshtastic_ble_is_enabled(),
 	       meshtastic_ble_is_connected(),
 	       morse_stage, morse_sta, morse_evt, scan_count, target_scan_count,
@@ -1072,9 +1066,22 @@ static void publish_heartbeat(void)
 static void start_halow_manual_boot(void);
 #endif
 
+static int reset_nvs_storage(void)
+{
+	const struct flash_area *storage;
+	int rc = flash_area_open(FIXED_PARTITION_ID(storage_partition), &storage);
+
+	if (rc != 0) return rc;
+	LOG_WRN("Erasing NVS storage partition (%u bytes)", (unsigned int)storage->fa_size);
+	rc = flash_area_erase(storage, 0, storage->fa_size);
+	flash_area_close(storage);
+	return rc;
+}
+
 static void poll_button(void)
 {
 	static bool was_pressed;
+	static int64_t pressed_at_ms;
 
 	if (!button_ready) {
 		return;
@@ -1088,14 +1095,31 @@ static void poll_button(void)
 		return;
 	}
 
+	int64_t now_ms = k_uptime_get();
 	if (pressed && !was_pressed) {
+		pressed_at_ms = now_ms;
 		LOG_INF("KEY pressed");
+	}
+	if (!pressed && was_pressed) {
+		int64_t held_ms = now_ms - pressed_at_ms;
+
+		if (held_ms >= BUTTON_LONG_PRESS_MS) {
+			int rc = reset_nvs_storage();
+
+			if (rc == 0) {
+				LOG_WRN("NVS erased after KEY hold; rebooting unprovisioned");
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+			LOG_ERR("NVS erase failed: %d", rc);
+		} else if (held_ms >= BUTTON_DEBOUNCE_MS) {
+			LOG_INF("KEY short press");
 #if defined(CONFIG_WIFI_MORSE_TEST)
-		start_halow_manual_boot();
+			start_halow_manual_boot();
 #endif
-		if (!meshtastic_ble_is_enabled() && !meshtastic_ble_is_connected()) {
-			int rc = meshtastic_ble_start();
-			LOG_INF("KEY re-enabled BLE provisioning rc=%d", rc);
+			if (!meshtastic_ble_is_enabled() && !meshtastic_ble_is_connected()) {
+				int rc = meshtastic_ble_start();
+				LOG_INF("KEY re-enabled BLE provisioning rc=%d", rc);
+			}
 		}
 	}
 
@@ -1168,7 +1192,7 @@ static void wifi_connect_thread(void *arg1, void *arg2, void *arg3)
 	ARG_UNUSED(arg3);
 
 	struct wifi_connect_req_params params = {0};
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 
 	atomic_set(&app_connect_stage, 4);
 	printk("[MM_MESH] app wifi_connect_thread start\n");
@@ -1184,7 +1208,7 @@ static void wifi_connect_thread(void *arg1, void *arg2, void *arg3)
 	params.mfp = WIFI_MFP_DISABLE;
 #else
 	params.psk = profile.passphrase;
-	params.psk_length = profile.passphrase_len;
+	params.psk_length = strlen(profile.passphrase);
 	params.security = WIFI_SECURITY_TYPE_SAE;
 	params.mfp = WIFI_MFP_OPTIONAL;
 #endif
@@ -1201,7 +1225,6 @@ static void wifi_connect_thread(void *arg1, void *arg2, void *arg3)
 		livestock_config_country(),
 		(unsigned int)params.psk_length);
 #if defined(CONFIG_WIFI_MORSE_SM)
-	meshtastic_phone_api_register_halow_rx();
 #endif
 #if defined(CONFIG_WIFI_MORSE_MESH_MODE) && defined(CONFIG_WIFI_MORSE_SM)
 	LOG_INF("MM_MESH app using direct Morse SDK mesh start");
@@ -1253,7 +1276,7 @@ static void wifi_connect_thread(void *arg1, void *arg2, void *arg3)
 
 static void start_halow_connect(void)
 {
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 
 	get_halow_profile(&profile);
 	if (!edgez_config_is_complete()) {
@@ -1438,7 +1461,7 @@ static int connect_morse_sdk_sta(void)
 {
 	struct mmwlan_sta_args sta_args = MMWLAN_STA_ARGS_INIT;
 	struct mmwlan_scan_config scan_config = MMWLAN_SCAN_CONFIG_INIT;
-	struct meshtastic_halow_profile profile;
+	struct edgez_halow_profile profile;
 	struct mmwlan_beacon_vendor_ie_filter beacon_filter = {0};
 	uint8_t discovery_vendor_ie[EDGEZ_VENDOR_IES_MAX_LEN] = {0};
 	uint8_t current_mac[6] = {0};
@@ -1578,7 +1601,6 @@ static int connect_morse_sdk_sta(void)
 		(unsigned int)sta_args.scan_interval_base_s,
 		(unsigned int)sta_args.scan_interval_limit_s, (unsigned int)sta_args.bgscan_short_interval_s,
 		(unsigned int)sta_args.bgscan_long_interval_s);
-	meshtastic_phone_api_register_halow_rx();
 	beacon_filter.cb = halow_beacon_vendor_ie_cb;
 	beacon_filter.cb_arg = NULL;
 	beacon_filter.n_ouis = 1;
@@ -1801,9 +1823,16 @@ int main(void)
 
 	edgez_config_init(HALOW_WIFI_SSID, HALOW_WIFI_PSK);
 	livestock_config_init();
-	if (livestock_config_is_provisioned()) {
+	struct edgez_halow_profile provisioning_profile = {0};
+	edgez_config_get_profile(&provisioning_profile);
+	bool provisioning_complete = livestock_config_is_provisioned() &&
+		provisioning_profile.mesh_id[0] != '\0' &&
+		provisioning_profile.mesh_frequency_khz > 0 &&
+		provisioning_profile.mesh_bandwidth_mhz > 0;
+	if (provisioning_complete) {
 		LOG_INF("BLE provisioning disabled after setup; press KEY to enable it");
 	} else {
+		LOG_INF("BLE provisioning enabled: MQTT or HaLow profile incomplete");
 		int ble_rc = meshtastic_ble_start();
 		if (ble_rc) {
 			LOG_ERR("EdgeZ BLE provisioning failed to start: %d", ble_rc);

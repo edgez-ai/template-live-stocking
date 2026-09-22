@@ -78,10 +78,8 @@ if(CONFIG_WIFI_MORSE OR CONFIG_WIFI_MORSE_SM)
 endif()
 
 file(GLOB app_sources ../nrf54/src/*.c ../nrf54/src/nanopb/*.c)
-file(GLOB_RECURSE meshtastic_proto_sources
-	../nrf54/src/mesh/generated/*.cpp
-)
-target_sources(app PRIVATE ${app_sources} ${meshtastic_proto_sources})
+list(FILTER app_sources EXCLUDE REGEX "/meshtastic_phone_api\\.c$")
+target_sources(app PRIVATE ${app_sources})
 
 if(CONFIG_WIFI_MORSE_SM)
 	get_target_property(LIBMORSE_IMPORTED libmorse IMPORTED)

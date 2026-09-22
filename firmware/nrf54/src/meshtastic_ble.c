@@ -16,7 +16,6 @@
 
 #include "edgez_config.h"
 #include "livestocking_config.h"
-#include "meshtastic_phone_api.h"
 
 LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 
@@ -26,6 +25,7 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 #define EDGEZ_BLE_NOTIFY_RETRY_DELAY K_MSEC(10)
 #define EDGEZ_BLE_NOTIFY_MAX_RETRIES 10
 #define MQTT_CONFIG_MAX_LEN 1024
+#define PROVISIONING_NAME_PREFIX "PROV_"
 
 /* Direct nRF provisioning: service, mqtt-config write, result read. */
 #define LIVESTOCK_SERVICE_UUID BT_UUID_128_ENCODE(0xa3631000, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
@@ -264,7 +264,7 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 	if (mqtt_config_received == mqtt_config_expected) {
 		mqtt_config_buffer[mqtt_config_received] = '\0';
 		rc = livestock_config_apply_json(mqtt_config_buffer, mqtt_config_received,
-					      get_advertised_name() + 4);
+					      get_advertised_name() + sizeof(PROVISIONING_NAME_PREFIX) - 1);
 		mqtt_config_status = rc == 0 ? "{\"ok\":true}" :
 			"{\"ok\":false,\"error\":\"Invalid configuration or storage failed\"}";
 		if (rc == 0) provisioning_enabled = false;
@@ -286,21 +286,21 @@ static ssize_t read_mqtt_config_status(struct bt_conn *conn, const struct bt_gat
 BT_GATT_SERVICE_DEFINE(livestock_svc,
 	BT_GATT_PRIMARY_SERVICE(&livestock_service_uuid),
 	BT_GATT_CHARACTERISTIC(&livestock_config_uuid.uuid, BT_GATT_CHRC_WRITE,
-		BT_GATT_PERM_WRITE_ENCRYPT, NULL, write_mqtt_config, NULL),
+		BT_GATT_PERM_WRITE, NULL, write_mqtt_config, NULL),
 	BT_GATT_CUD("mqtt-config", BT_GATT_PERM_READ),
 	BT_GATT_CHARACTERISTIC(&livestock_status_uuid.uuid, BT_GATT_CHRC_READ,
-		BT_GATT_PERM_READ_ENCRYPT, read_mqtt_config_status, NULL, NULL));
+		BT_GATT_PERM_READ, read_mqtt_config_status, NULL, NULL));
 
 BT_GATT_SERVICE_DEFINE(edgez_svc,
 	BT_GATT_PRIMARY_SERVICE(&edgez_service_uuid),
 	BT_GATT_CHARACTERISTIC(&edgez_rx_uuid.uuid,
 		BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-		BT_GATT_PERM_WRITE_ENCRYPT,
+		BT_GATT_PERM_WRITE,
 		NULL, write_control, NULL),
 	BT_GATT_CHARACTERISTIC(&edgez_tx_uuid.uuid, BT_GATT_CHRC_NOTIFY,
 		BT_GATT_PERM_NONE, NULL, NULL, NULL),
 	BT_GATT_CCC(tx_ccc_changed,
-		BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT));
+		BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
 
 BT_GATT_SERVICE_DEFINE(battery_svc,
 	BT_GATT_PRIMARY_SERVICE(BT_UUID_BAS),
@@ -320,11 +320,11 @@ static const char *get_advertised_name(void)
 	size_t count = ARRAY_SIZE(addrs);
 	bt_id_get(addrs, &count);
 	if (count) {
-		snprintk(advertised_name, sizeof(advertised_name), "NRF_%02X%02X%02X%02X%02X%02X",
+		snprintk(advertised_name, sizeof(advertised_name), PROVISIONING_NAME_PREFIX "%02X%02X%02X%02X%02X%02X",
 			 addrs[0].a.val[5], addrs[0].a.val[4], addrs[0].a.val[3],
 			 addrs[0].a.val[2], addrs[0].a.val[1], addrs[0].a.val[0]);
 	} else {
-		strcpy(advertised_name, "NRF_000000000000");
+		strcpy(advertised_name, PROVISIONING_NAME_PREFIX "000000000000");
 	}
 	return advertised_name;
 }
@@ -381,8 +381,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	mqtt_config_status = "{\"pending\":true}";
 	pending_response_len = 0;
 	tx_notify_enabled = false;
-	LOG_INF("EdgeZ BLE provisioning client connected peer=%s security=%u; waiting for pairing and FFF2 CCC",
-		conn_addr_str(conn, addr, sizeof(addr)), bt_conn_get_security(conn));
+	LOG_INF("EdgeZ BLE provisioning client connected peer=%s; no pairing required",
+		conn_addr_str(conn, addr, sizeof(addr)));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -406,80 +406,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	(void)k_work_reschedule(&restart_advertising_work, K_MSEC(500));
 }
 
-static void security_changed(struct bt_conn *conn, bt_security_t level,
-			     enum bt_security_err err)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	if (err) {
-		LOG_WRN("EdgeZ BLE security failed peer=%s level=%u err=%u (%s)",
-			conn_addr_str(conn, addr, sizeof(addr)), level, err,
-			bt_security_err_to_str(err));
-	} else {
-		LOG_INF("EdgeZ BLE secured peer=%s level=%u",
-			conn_addr_str(conn, addr, sizeof(addr)), level);
-	}
-}
-
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
-	.security_changed = security_changed,
-};
-
-static void pairing_confirm(struct bt_conn *conn)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-	int err = bt_conn_auth_pairing_confirm(conn);
-
-	LOG_INF("EdgeZ BLE pairing confirmation peer=%s rc=%d",
-		conn_addr_str(conn, addr, sizeof(addr)), err);
-}
-
-static void auth_cancel(struct bt_conn *conn)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	LOG_WRN("EdgeZ BLE pairing interaction canceled peer=%s",
-		conn_addr_str(conn, addr, sizeof(addr)));
-}
-
-static void pairing_complete(struct bt_conn *conn, bool bonded)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	LOG_INF("EdgeZ BLE pairing complete peer=%s bonded=%u security=%u",
-		conn_addr_str(conn, addr, sizeof(addr)), bonded, bt_conn_get_security(conn));
-}
-
-static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	LOG_ERR("EdgeZ BLE pairing failed peer=%s reason=%u (%s)",
-		conn_addr_str(conn, addr, sizeof(addr)), reason,
-		bt_security_err_to_str(reason));
-}
-
-static void bond_deleted(uint8_t id, const bt_addr_le_t *peer)
-{
-	char addr[BT_ADDR_LE_STR_LEN];
-
-	if (bt_addr_le_to_str(peer, addr, sizeof(addr)) < 0) {
-		strcpy(addr, "unknown");
-	}
-	LOG_WRN("EdgeZ BLE bond deleted identity=%u peer=%s", id, addr);
-}
-
-static struct bt_conn_auth_cb auth_callbacks = {
-	.pairing_confirm = pairing_confirm,
-	.cancel = auth_cancel,
-};
-
-static struct bt_conn_auth_info_cb auth_info_callbacks = {
-	.pairing_complete = pairing_complete,
-	.pairing_failed = pairing_failed,
-	.bond_deleted = bond_deleted,
 };
 
 static void bt_ready_cb(int err)
@@ -519,7 +448,6 @@ void meshtastic_ble_update_battery(uint8_t level)
 int meshtastic_ble_start(void)
 {
 	int err;
-	int auth_info_err;
 
 	LOG_INF("BLE provisioning startup begin ready=%u service=FFF0 rx=FFF1 tx=FFF2 max_payload=%u",
 		bt_ready, EDGEZ_FRAME_MAX_PAYLOAD);
@@ -527,18 +455,6 @@ int meshtastic_ble_start(void)
 	if (bt_ready) {
 		start_advertising();
 		return 0;
-	}
-	/* Keep the existing raw HaLow packet API initialized; BLE no longer exposes it. */
-	meshtastic_phone_api_init(0);
-	err = bt_conn_auth_cb_register(&auth_callbacks);
-	if (err && err != -EALREADY) {
-		LOG_ERR("BLE auth callback registration failed: %d; pairing cannot work", err);
-	} else {
-		LOG_INF("BLE auth callbacks registered rc=%d", err);
-	}
-	auth_info_err = bt_conn_auth_info_cb_register(&auth_info_callbacks);
-	if (auth_info_err && auth_info_err != -EALREADY) {
-		LOG_WRN("BLE auth-info callback registration failed: %d", auth_info_err);
 	}
 	err = bt_enable(bt_ready_cb);
 	if (err && err != -EALREADY) {

@@ -1,7 +1,8 @@
 # Mobile companion
 
 The Expo app is the only device-onboarding client. It scans `PROV_` ESP32 and
-`NRF_` nRF54 BLE advertisements and derives the serial. For ESP32, after the operator selects a device,
+nRF54 BLE advertisements and derives the serial. The nRF54 advertises service
+`FFF0` so the app can route it to the direct `mqtt-config` endpoint. For ESP32, after the operator selects a device,
 the example proof of possession (PoP) `abcd1234` is prefilled to match the
 firmware and the value shown on its OLED. The app establishes an ESP-IDF
 Security 1 session. The operator chooses whether the device has regular Wi-Fi
