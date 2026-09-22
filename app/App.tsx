@@ -7,9 +7,10 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, Teams } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
-import { EdgezOrganicMap } from "@edgez/react-native-sdk";
-import type { EdgezMapCamera, EdgezMapDownloadUpdate, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
+import { EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
+import type { EdgezMapCamera, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import { centerChannelForCountry, channelsForCountry, halowCountries } from "./halowChannels";
@@ -20,7 +21,7 @@ function isNrfDevice(device: ProvisioningDevice): device is NrfProvisioningDevic
   return device instanceof NrfProvisioningDevice;
 }
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
+type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; icon?: EdgezMapIcon; markerColor?: MapMarkerColor; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
 type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
@@ -38,10 +39,76 @@ type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type VoltagePoint = { timestamp: number; value: number };
-type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string };
+type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
 type SettingsTab = "team" | "areas" | "rules";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
-const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "" };
+const defaultAreaColor = "#E88D29";
+const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
+const iconGlyphs: Record<EdgezMapIcon, React.ComponentProps<typeof MaterialCommunityIcons>["name"]> = {
+  sheep: "sheep", cow: "cow", goat: "sheep", horse: "horse", dog: "dog", person: "account",
+  tractor: "tractor", truck: "truck", car: "car", drone: "drone", router: "router-wireless",
+  gateway: "lan-connect", beacon: "broadcast", tracker: "crosshairs-gps", sensor: "motion-sensor",
+  camera: "camera", gps: "crosshairs-gps", meter: "speedometer", pump: "water-pump",
+  valve: "pipe-valve", switch: "electric-switch", battery: "battery", alarm: "bell-alert",
+};
+const mapMarkerColors = [
+  { key: "red", label: "Red", hex: "#E51B23" }, { key: "pink", label: "Pink", hex: "#FF4182" },
+  { key: "purple", label: "Purple", hex: "#9B24B2" }, { key: "deep_purple", label: "Deep purple", hex: "#6639BF" },
+  { key: "blue", label: "Blue", hex: "#0066CC" }, { key: "light_blue", label: "Light blue", hex: "#249CF2" },
+  { key: "cyan", label: "Cyan", hex: "#14BECD" }, { key: "teal", label: "Teal", hex: "#00A58C" },
+  { key: "green", label: "Green", hex: "#3C8C3C" }, { key: "lime", label: "Lime", hex: "#93BF39" },
+  { key: "yellow", label: "Yellow", hex: "#FFC800" }, { key: "orange", label: "Orange", hex: "#FF9600" },
+  { key: "deep_orange", label: "Deep orange", hex: "#F06432" }, { key: "brown", label: "Brown", hex: "#804633" },
+  { key: "gray", label: "Gray", hex: "#737373" }, { key: "blue_gray", label: "Blue gray", hex: "#597380" },
+] as const;
+type MapMarkerColor = (typeof mapMarkerColors)[number]["key"];
+const areaColors = [{ key: "orange", label: "Orange", hex: defaultAreaColor }, ...mapMarkerColors.filter(({ key }) => key !== "orange")];
+
+function areaColor(value: unknown): string {
+  return areaColors.find(({ hex }) => hex === value)?.hex || defaultAreaColor;
+}
+
+function savedAreaColor(area: GeofenceArea): string {
+  try { return areaColor(JSON.parse(area.geometry).color); }
+  catch { return defaultAreaColor; }
+}
+
+function colorForDevice(device: Device): MapMarkerColor {
+  const saved = device.metadata?.markerColor;
+  return mapMarkerColors.some(({ key }) => key === saved) ? saved as MapMarkerColor : device.enabled ? "blue" : "gray";
+}
+
+function MapAppearancePicker({ icon, color, onIconChange, onColorChange }: { icon: EdgezMapIcon; color: MapMarkerColor; onIconChange: (icon: EdgezMapIcon) => void; onColorChange: (color: MapMarkerColor) => void }) {
+  const selectedHex = mapMarkerColors.find(({ key }) => key === color)?.hex || "#0066CC";
+  return <>
+    <Text style={styles.fieldLabel}>MAP ICON</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {edgezMapIcons.map((choice) => <Pressable key={choice} style={[styles.iconChoice, icon === choice && styles.farmRowSelected]} onPress={() => onIconChange(choice)} accessibilityRole="radio" accessibilityState={{ selected: icon === choice }} accessibilityLabel={`${choice} map icon`}>
+        <MaterialCommunityIcons name={iconGlyphs[choice]} size={24} color={icon === choice ? selectedHex : "#0a3037"} />
+        <Text style={styles.deviceNameDark}>{choice.toUpperCase()}</Text>
+      </Pressable>)}
+    </ScrollView>
+    <Text style={styles.fieldLabel}>MAP COLOR</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {mapMarkerColors.map((choice) => <Pressable key={choice.key} style={[styles.iconChoice, color === choice.key && styles.farmRowSelected]} onPress={() => onColorChange(choice.key)} accessibilityRole="radio" accessibilityState={{ selected: color === choice.key }} accessibilityLabel={`${choice.label} map color`}>
+        <MaterialCommunityIcons name={iconGlyphs[icon]} size={24} color={choice.hex} />
+        <Text style={styles.deviceNameDark}>{choice.label}</Text>
+      </Pressable>)}
+    </ScrollView>
+  </>;
+}
+
+function AreaColorPicker({ color, onChange }: { color: string; onChange: (color: string) => void }) {
+  return <>
+    <Text style={styles.fieldLabel}>AREA COLOR</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.iconChoices}>
+      {areaColors.map((choice) => <Pressable key={choice.key} style={[styles.iconChoice, color === choice.hex && styles.farmRowSelected]} onPress={() => onChange(choice.hex)} accessibilityRole="radio" accessibilityState={{ selected: color === choice.hex }} accessibilityLabel={`${choice.label} area color`}>
+        <View style={[styles.areaColorSwatch, { backgroundColor: choice.hex }]} />
+        <Text style={styles.deviceNameDark}>{choice.label}</Text>
+      </Pressable>)}
+    </ScrollView>
+  </>;
+}
 
 function detailsFromFarm(farm?: Farm): FarmDetails {
   return farm ? { name: farm.name, country: farm.country, location: farm.location, halowChannel: String(farm.halowChannel), meshId: farm.meshId, meshPassphrase: farm.meshPassphrase } : emptyFarmDetails;
@@ -76,17 +143,43 @@ function areaGeometry(draft: AreaDraft) {
   const secondary = Number(draft.secondary);
   if (!draft.name.trim() || !center) throw new Error("Enter an area name and choose its position on the map.");
   if (draft.shape !== "polygon" && (!Number.isFinite(primary) || primary < 10 || primary > 100000)) throw new Error("Set a valid area size in meters.");
-  if (draft.shape === "circle") return JSON.stringify({ center, radiusMeters: primary });
+  const color = areaColor(draft.color);
+  if (draft.shape === "circle") return JSON.stringify({ center, radiusMeters: primary, color });
   if (draft.shape === "oval") {
     if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter both oval radii in meters.");
-    return JSON.stringify({ center, radiusXMeters: primary, radiusYMeters: secondary, rotationDegrees: 0 });
+    return JSON.stringify({ center, radiusXMeters: primary, radiusYMeters: secondary, rotationDegrees: 0, color });
   }
   if (draft.shape === "rectangle") {
     if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter rectangle width and height in meters.");
-    return JSON.stringify({ center, widthMeters: primary, heightMeters: secondary, rotationDegrees: 0 });
+    return JSON.stringify({ center, widthMeters: primary, heightMeters: secondary, rotationDegrees: 0, color });
   }
   if (new Set(vertices.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`)).size < 3) throw new Error("Add at least three distinct polygon points on the map.");
-  return JSON.stringify({ center, vertices });
+  return JSON.stringify({ center, vertices, color });
+}
+
+function geofenceLine(area: GeofenceArea): EdgezMapLine | null {
+  try {
+    const geometry = JSON.parse(area.geometry) as { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
+    const center = geometry.center;
+    if (!center || !Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return null;
+    let points: { latitude: number; longitude: number }[];
+    if (area.shape === "polygon") {
+      points = (geometry.vertices || []).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Math.abs(point.latitude) <= 90 && Math.abs(point.longitude) <= 180);
+    } else {
+      const radiusX = area.shape === "circle" ? Number(geometry.radiusMeters) : area.shape === "oval" ? Number(geometry.radiusXMeters) : Number(geometry.widthMeters) / 2;
+      const radiusY = area.shape === "circle" ? radiusX : area.shape === "oval" ? Number(geometry.radiusYMeters) : Number(geometry.heightMeters) / 2;
+      if (!Number.isFinite(radiusX) || !Number.isFinite(radiusY) || radiusX <= 0 || radiusY <= 0) return null;
+      const rotation = (Number(geometry.rotationDegrees) || 0) * Math.PI / 180;
+      const corners = area.shape === "rectangle" ? [[-radiusX, -radiusY], [radiusX, -radiusY], [radiusX, radiusY], [-radiusX, radiusY]] : Array.from({ length: 48 }, (_, index) => { const angle = index * Math.PI / 24; return [radiusX * Math.cos(angle), radiusY * Math.sin(angle)]; });
+      points = corners.map(([east, north]) => {
+        const rotatedEast = east * Math.cos(rotation) - north * Math.sin(rotation);
+        const rotatedNorth = east * Math.sin(rotation) + north * Math.cos(rotation);
+        return { latitude: center.latitude + rotatedNorth / 111320, longitude: center.longitude + rotatedEast / (111320 * Math.max(0.01, Math.cos(center.latitude * Math.PI / 180))) };
+      });
+    }
+    if (points.length < 3) return null;
+    return { id: area.$id, points: [...points, points[0]], color: areaColor(geometry.color) };
+  } catch { return null; }
 }
 
 function polygonScreenPoint(point: { latitude: number; longitude: number }, camera: EdgezMapCamera, width: number, height: number) {
@@ -119,7 +212,12 @@ function telemetryCoordinates(row?: Telemetry) {
 
 const appConfig = Constants.expoConfig?.extra as AppConfig | undefined;
 if (!appConfig) throw new Error("Expo Appwrite configuration is missing");
-const config: AppConfig = appConfig;
+const config: AppConfig = {
+  ...appConfig,
+  geofenceAreaTableId: appConfig.geofenceAreaTableId || "geofence-areas",
+  geofenceRuleTableId: appConfig.geofenceRuleTableId || "geofence-rules",
+  geofenceAlarmTableId: appConfig.geofenceAlarmTableId || "geofence-alarms",
+};
 const endpoint = config.appwriteEndpoint.replace(/\/+$/, "");
 const cachePrefix = `live-stocking:${config.appwriteProjectId}:`;
 const lastUserCacheKey = `${cachePrefix}last-user`;
@@ -158,7 +256,7 @@ async function cacheSnapshot(user: CurrentUser, farms: Farm[], devices: Device[]
   const safeFarms: CachedFarm[] = farms.map(({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }) =>
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
   const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
-    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId } }));
+    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor } }));
   const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, receivedAt }) =>
     ({ $id, deviceId, serial, channel, topic, payload, receivedAt }));
   const safeUser: CurrentUser = { $id: user.$id, email: user.email, name: user.name, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
@@ -332,12 +430,12 @@ function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft;
         ? <View pointerEvents="none" style={StyleSheet.absoluteFill}>
             {polygonEdges.map(({ start, end }, index) => {
               const length = Math.hypot(end.x - start.x, end.y - start.y);
-              return <View key={`edge-${index}`} style={[styles.polygonEdge, { left: (start.x + end.x - length) / 2, top: (start.y + end.y) / 2 - 2, width: length, transform: [{ rotate: `${Math.atan2(end.y - start.y, end.x - start.x)}rad` }] }]} />;
+              return <View key={`edge-${index}`} style={[styles.polygonEdge, { backgroundColor: draft.color, left: (start.x + end.x - length) / 2, top: (start.y + end.y) / 2 - 2, width: length, transform: [{ rotate: `${Math.atan2(end.y - start.y, end.x - start.x)}rad` }] }]} />;
             })}
-            {polygonPoints.map((point, index) => <View key={`point-${index}`} style={[styles.polygonVertex, { left: point.x - 13, top: point.y - 13 }]}><Text style={styles.polygonVertexText}>{index + 1}</Text></View>)}
+            {polygonPoints.map((point, index) => <View key={`point-${index}`} style={[styles.polygonVertex, { backgroundColor: draft.color, left: point.x - 13, top: point.y - 13 }]}><Text style={styles.polygonVertexText}>{index + 1}</Text></View>)}
             <View style={styles.mapCrosshair}><Text style={styles.mapCrosshairText}>＋</Text></View>
           </View>
-        : <View pointerEvents="none" style={[styles.areaPreview, { width, height, marginLeft: -width / 2, marginTop: -height / 2 }, draft.shape === "circle" && styles.areaCircle, draft.shape === "oval" && styles.areaOval, draft.shape === "rectangle" && styles.areaRectangle]} />}
+        : <View pointerEvents="none" style={[styles.areaPreview, { width, height, marginLeft: -width / 2, marginTop: -height / 2, borderColor: draft.color, backgroundColor: `${draft.color}2e` }, draft.shape === "circle" && styles.areaCircle, draft.shape === "oval" && styles.areaOval, draft.shape === "rectangle" && styles.areaRectangle]} />}
       <View style={styles.areaMapControls}>
         {draft.shape === "circle" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>RADIUS · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
         {draft.shape === "oval" && <><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>HORIZONTAL · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>VERTICAL · {secondary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View></>}
@@ -355,23 +453,18 @@ function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Dev
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
   const farmCenter = coordinatesFromLocation(location ?? "");
-  const markers = useMemo<EdgezMapNode[]>(() => [
-    ...devices.flatMap((device) => {
+  const lines = useMemo<EdgezMapLine[]>(() => areas.map(geofenceLine).filter((line): line is EdgezMapLine => line !== null), [areas]);
+  const markers = useMemo<EdgezMapNode[]>(() =>
+    devices.flatMap((device) => {
       const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
-      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: device.enabled ? "blue" : "gray" }] : [];
-    }),
-    ...areas.flatMap((area) => {
-      try {
-        const center = JSON.parse(area.geometry).center;
-        return center ? [{ id: `area-${area.$id}`, label: `${area.name} · ${area.shape}`, latitude: center.latitude, longitude: center.longitude, marker: "orange" }] : [];
-      } catch { return []; }
-    }),
-  ], [devices, telemetry, areas]);
+      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.metadata?.icon }] : [];
+    }), [devices, telemetry]);
 
   return <View style={styles.mapCard}>
     <EdgezOrganicMap
       ref={map}
       nodes={markers}
+      lines={lines}
       centerLatitude={farmCenter?.latitude ?? 59.3293}
       centerLongitude={farmCenter?.longitude ?? 18.0686}
       zoom={farmCenter ? 12 : 9}
@@ -391,7 +484,7 @@ function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Dev
     </View> : null}
     {download && !download.finished ? <View style={styles.mapNotice}><Text style={styles.mapNoticeText}>{download.status}{download.progress === undefined ? "" : ` · ${Math.round(download.progress)}%`}</Text></View> : null}
     {mapError ? <View style={[styles.mapNotice, styles.mapError]}><Text style={styles.mapNoticeText}>{mapError}</Text></View> : null}
-    <Text style={styles.mapAttribution}>{markers.length ? `${markers.length} located devices` : "Pan or zoom to choose an offline region"} · © OpenStreetMap contributors</Text>
+    <Text style={styles.mapAttribution}>{markers.length} located devices · {areas.length} areas · © OpenStreetMap contributors</Text>
   </View>;
 }
 
@@ -486,6 +579,8 @@ export default function App() {
   const [proofOfPossession, setProofOfPossession] = useState(provisioningPop);
   const [bleConnected, setBleConnected] = useState(false);
   const [name, setName] = useState("");
+  const [deviceIcon, setDeviceIcon] = useState<EdgezMapIcon>("tracker");
+  const [deviceColor, setDeviceColor] = useState<MapMarkerColor>("blue");
   const [deviceLocationChoice, setDeviceLocationChoice] = useState<DeviceLocationChoice>("none");
   const [deviceLocation, setDeviceLocation] = useState("");
   const [deviceLocationPickerOpen, setDeviceLocationPickerOpen] = useState(false);
@@ -497,6 +592,8 @@ export default function App() {
   const [provisioningDialogOpen, setProvisioningDialogOpen] = useState(false);
   const [provisioningStep, setProvisioningStep] = useState<1 | 2 | 3 | 4>(1);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
+  const [detailIcon, setDetailIcon] = useState<EdgezMapIcon>("tracker");
+  const [detailColor, setDetailColor] = useState<MapMarkerColor>("blue");
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
   const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -697,7 +794,7 @@ export default function App() {
     if (!currentFarmId) { openSettings(); return; }
     setMenuOpen(false);
     selectedBleDevice?.disconnect();
-    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUseUpstreamWifi(null); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
+    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUseUpstreamWifi(null); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
     setError(""); setProvisioningStatus("Start by scanning for a device in provisioning mode.");
     setProvisioningStep(1);
     setProvisioningDialogOpen(true);
@@ -735,6 +832,8 @@ export default function App() {
     setError("");
     setSelectedBleDevice(device);
     const existing = devices.find((item) => item.serial === serialFromBleName(device.name));
+    setDeviceIcon(existing?.metadata?.icon || (isNrfDevice(device) ? "tracker" : "gateway"));
+    setDeviceColor(existing ? colorForDevice(existing) : "blue");
     const previousLocation = telemetry.filter((row) => row.deviceId === existing?.$id)
       .map(telemetryCoordinates).find((coordinates) => coordinates !== null) ?? null;
     setDeviceLocationChoice(previousLocation ? "map" : "none");
@@ -818,7 +917,11 @@ export default function App() {
             Permission.update(Role.team(farm.teamId, "owner")),
             Permission.delete(Role.team(farm.teamId, "owner")),
           ],
-          metadata: { farmId: farm.$id },
+          metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor },
+        });
+      } else if (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor) {
+        appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
+          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor },
         });
       }
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
@@ -850,11 +953,26 @@ export default function App() {
         await selectedBleDevice.provision(upstreamSsid, upstreamPassword);
       }
       setProvisioningStatus(`Provisioned ${serial}.`);
-      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceLocationChoice("none"); setDeviceLocation("");
+      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
       setProvisioningDialogOpen(false);
       await refresh(user);
     } catch (caught) { setError(messageOf(caught)); setProvisioningStatus("Provisioning did not complete."); }
     finally { selectedBleDevice.disconnect(); setBleConnected(false); setBusy(false); }
+  }
+
+  async function saveDeviceAppearance() {
+    if (!detailDevice || offline) return;
+    setBusy(true); setError("");
+    try {
+      const updated = await deviceApi<Device>(`/${encodeURIComponent(detailDevice.$id)}`, "PATCH", {
+        metadata: { ...detailDevice.metadata, icon: detailIcon, markerColor: detailColor },
+      });
+      devicesRef.current = devicesRef.current.map((item) => item.$id === updated.$id ? updated : item);
+      setDevices(devicesRef.current);
+      setDetailDevice(updated);
+      if (user) await cacheSnapshot(user, farmsRef.current, devicesRef.current, telemetryRef.current);
+    } catch (caught) { setError(messageOf(caught)); }
+    finally { setBusy(false); }
   }
 
   async function signOut() {
@@ -1075,11 +1193,18 @@ export default function App() {
       setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); return;
     }
     let active = true;
-    Promise.all([
+    setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]);
+    Promise.allSettled([
       tables.listRows<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
       tables.listRows<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
       tables.listRows<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, queries: [Query.equal("farmId", currentFarmId), Query.equal("active", true), Query.limit(100)] }),
-    ]).then(([areas, rules, alarms]) => { if (active) { setGeofenceAreas(areas.rows); setGeofenceRules(rules.rows); setGeofenceAlarms(alarms.rows); } }).catch((caught) => { if (active) setTeamError(messageOf(caught)); });
+    ]).then(([areas, rules, alarms]) => {
+      if (!active) return;
+      if (areas.status === "fulfilled") setGeofenceAreas(areas.value.rows);
+      else setError(`Could not load geofence areas: ${messageOf(areas.reason)}`);
+      if (rules.status === "fulfilled") setGeofenceRules(rules.value.rows);
+      if (alarms.status === "fulfilled") setGeofenceAlarms(alarms.value.rows);
+    });
     return () => { active = false; };
   }, [currentFarmId, offline]);
   const visibleDevices = devices.filter((device) => Boolean(currentFarmId) && device.metadata?.farmId === currentFarmId);
@@ -1100,7 +1225,7 @@ export default function App() {
       {visibleDevices.map((device) => {
         const latest = latestVoltageByDevice.get(device.$id);
         const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
-        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailDevice(device); }}>
+        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailIcon(device.metadata?.icon || "tracker"); setDetailColor(colorForDevice(device)); setDetailDevice(device); }}>
           <View style={styles.deviceCardHeader}><View><Text style={styles.deviceCardName}>{device.name}</Text><Text style={styles.deviceSerial}>{device.serial}</Text></View><View style={styles.statusBadge}><View style={[styles.statusDot, status === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.statusText}>{status.toUpperCase()}</Text></View></View>
           <View style={styles.latestRow}><View><Text style={styles.latestLabel}>LATEST BATTERY VOLTAGE</Text><Text style={styles.latestValue}>{latest ? `${latest.value.toFixed(2)} V` : "—"}</Text></View><Text style={styles.cardArrow}>›</Text></View>
           <Text style={styles.lastSeen}>{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for battery telemetry"}</Text>
@@ -1180,12 +1305,13 @@ export default function App() {
           {currentFarm && settingsTab === "areas" && <>
             <Text style={styles.sectionLabel}>GEOFENCE AREAS</Text>
             <Text style={styles.dialogHelp}>Areas are stored as a circle, oval, rectangle, or polygon. Rules are managed separately below.</Text>
-            {geofenceAreas.map((area) => <View key={area.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}</Text></View>{currentFarm.ownerId === user?.$id && <Pressable onPress={() => { setTeamError(""); let geometry: { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; vertices?: { latitude: number; longitude: number }[] } = {}; try { geometry = JSON.parse(area.geometry); } catch {} setAreaEditingId(area.$id); setAreaDraft({ name: area.name, shape: area.shape, location: geometry.center ? `${geometry.center.latitude}, ${geometry.center.longitude}` : "", primary: String(geometry.radiusMeters ?? geometry.radiusXMeters ?? geometry.widthMeters ?? 100), secondary: String(geometry.radiusYMeters ?? geometry.heightMeters ?? 100), vertices: (geometry.vertices || []).map((point) => `${point.latitude},${point.longitude}`).join(";") }); }}><Text style={styles.removeMemberText}>EDIT</Text></Pressable>}</View>)}
+            {geofenceAreas.map((area) => <View key={area.$id} style={styles.memberRow}><View style={[styles.areaColorSwatch, { backgroundColor: savedAreaColor(area) }]} /><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}</Text></View>{currentFarm.ownerId === user?.$id && <Pressable onPress={() => { setTeamError(""); let geometry: { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; vertices?: { latitude: number; longitude: number }[]; color?: string } = {}; try { geometry = JSON.parse(area.geometry); } catch {} setAreaEditingId(area.$id); setAreaDraft({ name: area.name, shape: area.shape, location: geometry.center ? `${geometry.center.latitude}, ${geometry.center.longitude}` : "", primary: String(geometry.radiusMeters ?? geometry.radiusXMeters ?? geometry.widthMeters ?? 100), secondary: String(geometry.radiusYMeters ?? geometry.heightMeters ?? 100), vertices: (geometry.vertices || []).map((point) => `${point.latitude},${point.longitude}`).join(";"), color: areaColor(geometry.color) }); }}><Text style={styles.removeMemberText}>EDIT</Text></Pressable>}</View>)}
             {currentFarm.ownerId === user?.$id && <>
               <Pressable style={styles.outlineButton} onPress={() => { setTeamError(""); setAreaEditingId("new"); setAreaDraft({ ...emptyAreaDraft, location: currentFarm.location }); }}><Text style={styles.outlineButtonText}>ADD AREA</Text></Pressable>
               {areaEditingId && <View style={styles.geofenceForm}>
                 <TextInput style={styles.inputLight} value={areaDraft.name} onChangeText={(name) => setAreaDraft({ ...areaDraft, name })} placeholder="Area name" />
                 <View style={styles.settingsActions}>{(["circle", "oval", "rectangle", "polygon"] as GeofenceShape[]).map((shape) => <Pressable key={shape} style={[styles.smallOption, areaDraft.shape === shape && styles.farmRowSelected]} onPress={() => setAreaDraft({ ...areaDraft, shape })}><Text style={styles.deviceNameDark}>{shape.toUpperCase()}</Text></Pressable>)}</View>
+                <AreaColorPicker color={areaDraft.color} onChange={(color) => setAreaDraft((draft) => ({ ...draft, color }))} />
                 <Pressable style={styles.farmRow} onPress={() => setAreaPickerOpen(true)}><Text style={styles.deviceNameDark}>{areaDraft.shape === "polygon" ? "EDIT POINTS ON MAP" : "CENTER ON MAP"}</Text><Text style={styles.muted}>{areaDraft.shape === "polygon" ? `${areaDraft.vertices.split(";").filter(Boolean).length} points` : areaDraft.location || "Choose center"}</Text></Pressable>
                 {areaDraft.shape !== "polygon" && <View style={styles.settingsActions}><TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.primary} onChangeText={(primary) => setAreaDraft({ ...areaDraft, primary })} placeholder={areaDraft.shape === "circle" ? "Radius m" : "Width/radius m"} keyboardType="decimal-pad" />{areaDraft.shape !== "circle" && <TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.secondary} onChangeText={(secondary) => setAreaDraft({ ...areaDraft, secondary })} placeholder="Height/radius m" keyboardType="decimal-pad" />}</View>}
                 <Pressable style={styles.primary} onPress={() => void (async () => { setTeamError(""); try { const geometry = areaGeometry(areaDraft); const data = { farmId: currentFarm.$id, name: areaDraft.name.trim(), shape: areaDraft.shape, geometry }; const permissions = [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))]; const area = areaEditingId === "new" ? await tables.createRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: ID.unique(), data, permissions }) : await tables.updateRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: areaEditingId, data }); setGeofenceAreas((items) => areaEditingId === "new" ? [...items, area] : items.map((item) => item.$id === area.$id ? area : item)); setAreaEditingId(null); } catch (caught) { setTeamError(messageOf(caught)); } })()}><Text style={styles.primaryText}>SAVE AREA</Text></Pressable>
@@ -1218,6 +1344,7 @@ export default function App() {
               <Text style={styles.fieldLabel}>NAME</Text>
               <TextInput style={styles.inputLight} value={name} onChangeText={setName} placeholder="Device name" maxLength={128} />
               <Text style={styles.fieldHint}>Optional. The serial is used when no name is entered.</Text>
+              <MapAppearancePicker icon={deviceIcon} color={deviceColor} onIconChange={setDeviceIcon} onColorChange={setDeviceColor} />
               <Text style={styles.fieldLabel}>LOCATION · OPTIONAL</Text>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
@@ -1257,6 +1384,9 @@ export default function App() {
           <View style={styles.detailHeader}><Pressable onPress={() => setDetailDevice(null)}><Text style={styles.detailBack}>‹ DEVICES</Text></Pressable><Text style={styles.detailSerial}>{detailDevice.serial}</Text></View>
           <ScrollView contentContainerStyle={styles.detailContent}>
             <View style={styles.detailTitleRow}><View><Text style={styles.detailEyebrow}>DEVICE</Text><Text style={styles.detailTitle}>{detailDevice.name}</Text></View><View style={styles.detailStatus}><View style={[styles.statusDot, detailStatus === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.detailStatusText}>{detailStatus.toUpperCase()}</Text></View></View>
+            <MapAppearancePicker icon={detailIcon} color={detailColor} onIconChange={setDetailIcon} onColorChange={setDetailColor} />
+            <Pressable style={[styles.primary, (offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))) && styles.disabledButton]} onPress={() => void saveDeviceAppearance()} disabled={offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))}><Text style={styles.primaryText}>SAVE MAP APPEARANCE</Text></Pressable>
+            {error ? <Text style={styles.dialogError}>{error}</Text> : null}
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>
             <View style={styles.rangeSelector}>{historyRanges.map((range) => <Pressable key={range.key} style={[styles.rangeButton, historyRange === range.key && styles.rangeButtonActive]} onPress={() => setHistoryRange(range.key)} disabled={historyLoading}><Text style={[styles.rangeButtonText, historyRange === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
@@ -1283,6 +1413,7 @@ const styles = StyleSheet.create({
   farmRow: { padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", gap: 4 }, currentFarmCard: { padding: 16, borderRadius: 14, backgroundColor: "#e9f7f5", gap: 8 }, settingsTabs: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, settingsTab: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, settingsTabActive: { backgroundColor: "#0a8c87" }, settingsTabText: { color: "#59716f", fontSize: 9, fontWeight: "900", letterSpacing: .5 }, settingsTabTextActive: { color: "white" }, farmRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" },
   geofenceForm: { gap: 10, padding: 12, borderRadius: 12, backgroundColor: "#e9f2f0" }, smallOption: { flex: 1, minHeight: 42, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", alignItems: "center", justifyContent: "center" }, dimensionInput: { flex: 1 },
   settingsActions: { flexDirection: "row", gap: 10 }, settingsAction: { flex: 1 }, outlineButton: { minHeight: 54, borderRadius: 14, borderWidth: 1, borderColor: "#0a8c87", alignItems: "center", justifyContent: "center", marginTop: 5 }, outlineButtonText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, memberRow: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 }, memberInfo: { flex: 1, gap: 4 }, removeMemberText: { color: "#b9472f", fontSize: 10, fontWeight: "900" },
+  iconChoices: { gap: 8, paddingVertical: 4 }, iconChoice: { minHeight: 58, minWidth: 72, gap: 3, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", alignItems: "center", justifyContent: "center" }, areaColorSwatch: { width: 24, height: 24, borderRadius: 12, borderWidth: 1, borderColor: "#0a303744" },
   selectField: { minHeight: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }, selectText: { color: "#0a3037", fontSize: 14 }, optionList: { borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", overflow: "hidden" }, optionRow: { minHeight: 46, paddingHorizontal: 15, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
   passphraseField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passphraseInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037" }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
   locationMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, mapCrosshair: { position: "absolute", left: "50%", top: "50%", marginLeft: -18, marginTop: -26, width: 36, height: 52, alignItems: "center", justifyContent: "center" }, mapCrosshairText: { color: "#0a8c87", fontSize: 42, fontWeight: "900", textShadowColor: "white", textShadowRadius: 4 }, locationFooter: { paddingHorizontal: 22, paddingVertical: 12, gap: 5, backgroundColor: "#f7faf9" },
