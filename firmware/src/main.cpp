@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <atomic>
 
 #include "cJSON.h"
 #include "esp_adc/adc_cali.h"
@@ -91,8 +92,12 @@ char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
 bool halow_connect_started = false;
+std::atomic<int> halow_connect_result{-9999};
 QueueHandle_t beacon_queue;
 QueueHandle_t telemetry_queue;
+std::atomic<uint32_t> beacon_frames_seen{0};
+std::atomic<uint32_t> beacon_frames_decoded{0};
+std::atomic<uint32_t> beacon_frames_dropped{0};
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
@@ -245,10 +250,12 @@ void load_device_location() {
 
 void enqueue_beacon(const uint8_t *data, size_t length) {
   if (!beacon_queue || !data || length == 0 || length > sizeof(BeaconFrame::data)) return;
+  beacon_frames_seen.fetch_add(1, std::memory_order_relaxed);
   BeaconFrame frame{};
   frame.length = length;
   std::memcpy(frame.data, data, length);
   if (xQueueSend(beacon_queue, &frame, 0) != pdTRUE) {
+    beacon_frames_dropped.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGW(kTag, "Raw HaLow beacon queue full; record dropped");
   }
 }
@@ -258,6 +265,7 @@ void decode_remote_beacon(const BeaconFrame &frame) {
   pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.length);
   if (!pb_decode(&stream, ai_edgez_halow_Beacon_fields, &beacon) ||
       (beacon.user_id_high == 0 && beacon.user_id_low == 0)) return;
+  beacon_frames_decoded.fetch_add(1, std::memory_order_relaxed);
 
   RemoteBeacon reading{};
   std::snprintf(reading.client_id, sizeof(reading.client_id),
@@ -306,8 +314,10 @@ void decode_remote_beacon(const BeaconFrame &frame) {
     reading.sensor_data[reading.sensor_data_count++] = sensor;
   }
 
-  if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
+  if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE) {
+    beacon_frames_dropped.fetch_add(1, std::memory_order_relaxed);
     ESP_LOGW(kTag, "Remote telemetry queue full; beacon record dropped");
+  }
 }
 
 void remote_beacon_task(void *) {
@@ -418,7 +428,9 @@ void connect_halow_task(void *) {
   show_device_status("HALOW STATUS", "CONNECTING");
   const esp_err_t result = halow_connect(
       halow_config.mesh_id, halow_config.passphrase,
-      halow_config.country, halow_config.channel, halow_ready);
+      halow_config.country, halow_config.channel,
+      halow_config.wifi_upstream, halow_ready);
+  halow_connect_result.store(result, std::memory_order_relaxed);
   if (result != ESP_OK) {
     show_device_status("HALOW FAILED", esp_err_to_name(result));
     ESP_LOGE(kTag, "HaLow connect failed: %s", esp_err_to_name(result));
@@ -540,6 +552,23 @@ void battery_telemetry_task(void *) {
     }
     cJSON_AddStringToObject(self, "clientId", mqtt_config.client_id);
     cJSON_AddStringToObject(self, "status", "online");
+    cJSON_AddNumberToObject(self, "halowConnectResult",
+                            halow_connect_result.load(std::memory_order_relaxed));
+    cJSON_AddNumberToObject(self, "halowChannel", halow_config.channel);
+    cJSON_AddStringToObject(self, "halowCountry", halow_config.country);
+    cJSON_AddBoolToObject(self, "halowConnectStarted", halow_connect_started);
+    cJSON_AddNumberToObject(self, "halowBeaconFramesSeen",
+                            beacon_frames_seen.load(std::memory_order_relaxed));
+    cJSON_AddNumberToObject(self, "halowBeaconFramesDecoded",
+                            beacon_frames_decoded.load(std::memory_order_relaxed));
+    cJSON_AddNumberToObject(self, "halowBeaconFramesDropped",
+                            beacon_frames_dropped.load(std::memory_order_relaxed));
+    const HalowBeaconDebugStats halow_debug = halow_beacon_debug_stats();
+    cJSON_AddNumberToObject(self, "halowScanResults", halow_debug.scan_results);
+    cJSON_AddNumberToObject(self, "halowScanEdgezIes", halow_debug.scan_edgez_ies);
+    cJSON_AddNumberToObject(self, "halowVendorCallbacks", halow_debug.vendor_callbacks);
+    cJSON_AddNumberToObject(self, "halowStartupStage", halow_debug.startup_stage);
+    cJSON_AddNumberToObject(self, "halowLibraryStatus", halow_debug.library_status);
     if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
       cJSON_AddNumberToObject(self, "batteryVoltageMv", battery_mv);
       cJSON_AddStringToObject(self, "unit", "millivolt");
