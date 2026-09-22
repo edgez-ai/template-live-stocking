@@ -26,17 +26,7 @@ jobs:
         run: pio run --project-dir firmware
       - name: Package firmware
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/firmware
-          build_dir=firmware/.pio/build/heltec-hc33
-          cp "$build_dir/firmware.bin" dist/firmware/live-stocking-ota.bin
-          python -m esptool --chip esp32s3 merge-bin \
-            --output dist/firmware/live-stocking-flash.bin \
-            --flash-mode dio --flash-freq 80m --flash-size 16MB \
-            0x0 "$build_dir/bootloader.bin" \
-            0x8000 "$build_dir/partitions.bin" \
-            0x10000 "$build_dir/firmware.bin"
+        run: bash firmware/scripts/package_esp32_release.sh
       - uses: actions/upload-artifact@v6
         with:
           name: live-stocking-firmware
