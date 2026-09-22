@@ -10,11 +10,15 @@ const appwriteConfig = JSON.parse(
 );
 const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
 const farmTable = appwriteConfig.tables?.find((table) => table.$id === "farms");
+const geofenceAreaTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas");
+const geofenceRuleTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules");
+const geofenceAlarmTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-alarms");
 const database = appwriteConfig.tablesDB?.find(
   (candidate) => candidate.$id === telemetryTable?.databaseId,
 );
-if (!database || !telemetryTable || !farmTable || farmTable.databaseId !== database.$id) {
-  throw new Error("appwrite.config.json must define the farm and telemetry tables in the same database");
+if (!database || !telemetryTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+    [farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
+  throw new Error("appwrite.config.json must define the farm, telemetry, and geofence tables in the same database");
 }
 
 const cli = path.join(infraDir, "node_modules", ".bin", "appwrite");
@@ -52,6 +56,9 @@ export const config = {
   databaseId: database.$id,
   telemetryTableId: telemetryTable.$id,
   farmTableId: farmTable.$id,
+  geofenceAreaTableId: geofenceAreaTable.$id,
+  geofenceRuleTableId: geofenceRuleTable.$id,
+  geofenceAlarmTableId: geofenceAlarmTable.$id,
 };
 export const domainPrefix = `${config.projectName}-${config.name}`;
 export const webDomain = `${domainPrefix}.sites.${config.domainSuffix}`;

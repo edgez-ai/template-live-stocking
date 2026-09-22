@@ -1,7 +1,80 @@
-import { Client, ID, TablesDB } from "node-appwrite";
+import { Client, ID, Query, TablesDB } from "node-appwrite";
 
 const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABASE_ID;
 const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
+const GEOFENCE_AREA_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID;
+const GEOFENCE_RULE_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID;
+const GEOFENCE_ALARM_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID;
+
+function locationOf(payload) {
+  return typeof payload?.latitude === "number" && Number.isFinite(payload.latitude) &&
+    typeof payload?.longitude === "number" && Number.isFinite(payload.longitude)
+    ? { latitude: payload.latitude, longitude: payload.longitude } : null;
+}
+
+function localMeters(point, center, rotation = 0) {
+  const latitude = (point.latitude - center.latitude) * 111320;
+  const longitude = (point.longitude - center.longitude) * 111320 * Math.cos(center.latitude * Math.PI / 180);
+  const radians = -rotation * Math.PI / 180;
+  return { x: longitude * Math.cos(radians) - latitude * Math.sin(radians), y: longitude * Math.sin(radians) + latitude * Math.cos(radians) };
+}
+
+function containsArea(area, point) {
+  let geometry;
+  try { geometry = JSON.parse(area.geometry); } catch { return false; }
+  const center = geometry.center;
+  if (!center || !Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return false;
+  if (area.shape === "polygon") {
+    const vertices = geometry.vertices;
+    if (!Array.isArray(vertices) || vertices.length < 3) return false;
+    let inside = false;
+    for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
+      const a = vertices[i], b = vertices[j];
+      if (((a.latitude > point.latitude) !== (b.latitude > point.latitude)) &&
+          point.longitude < (b.longitude - a.longitude) * (point.latitude - a.latitude) /
+            (b.latitude - a.latitude) + a.longitude) inside = !inside;
+    }
+    return inside;
+  }
+  const { x, y } = localMeters(point, center, geometry.rotationDegrees || 0);
+  if (area.shape === "circle") return x * x + y * y <= geometry.radiusMeters ** 2;
+  if (area.shape === "oval") return (x / geometry.radiusXMeters) ** 2 + (y / geometry.radiusYMeters) ** 2 <= 1;
+  if (area.shape === "rectangle") return Math.abs(x) <= geometry.widthMeters / 2 && Math.abs(y) <= geometry.heightMeters / 2;
+  return false;
+}
+
+async function evaluateGeofences(tables, target, entry, readPermissions, receivedAt) {
+  if (!GEOFENCE_AREA_TABLE_ID || !GEOFENCE_RULE_TABLE_ID || !GEOFENCE_ALARM_TABLE_ID) return;
+  const point = locationOf(entry);
+  const farmId = target.metadata?.farmId;
+  if (!point || !farmId) return;
+  const [areasResult, rulesResult, alarmsResult] = await Promise.all([
+    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_AREA_TABLE_ID, queries: [Query.equal("farmId", farmId), Query.limit(100)] }),
+    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_RULE_TABLE_ID, queries: [Query.equal("farmId", farmId), Query.limit(100)] }),
+    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_ALARM_TABLE_ID, queries: [Query.equal("deviceId", target.$id), Query.limit(100)] }),
+  ]);
+  const areas = new Map((areasResult.rows || []).map((area) => [area.$id, area]));
+  const alarms = new Map((alarmsResult.rows || []).map((alarm) => [`${alarm.ruleId}:${alarm.event}`, alarm]));
+  for (const rule of rulesResult.rows || []) {
+    const area = areas.get(rule.areaId);
+    if (!area || (Array.isArray(rule.deviceIds) && rule.deviceIds.length && !rule.deviceIds.includes(target.$id))) continue;
+    const isInside = containsArea(area, point);
+    for (const [event, matches] of [["enter", Boolean(rule.enterAlert) && isInside], ["exit", Boolean(rule.exitAlert) && !isInside]]) {
+      const existing = alarms.get(`${rule.$id}:${event}`);
+      const location = `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`;
+      if (matches && !existing) {
+        await tables.createRow({ databaseId: DATABASE_ID, tableId: GEOFENCE_ALARM_TABLE_ID, rowId: ID.unique(), data: {
+          farmId, areaId: area.$id, ruleId: rule.$id, deviceId: target.$id, event, active: true, acknowledged: false,
+          lastLocation: location, raisedAt: receivedAt,
+        }, permissions: readPermissions });
+      } else if (existing && existing.active !== matches) {
+        await tables.updateRow({ databaseId: DATABASE_ID, tableId: GEOFENCE_ALARM_TABLE_ID, rowId: existing.$id, data: {
+          active: matches, lastLocation: location, ...(matches ? { acknowledged: false, raisedAt: receivedAt, clearedAt: "" } : { clearedAt: receivedAt }),
+        } });
+      }
+    }
+  }
+}
 
 function json(res, payload, status = 200) {
   return res.json(payload, status, { "cache-control": "no-store" });
@@ -137,6 +210,7 @@ export default async function main({ req, res, error }) {
         },
         permissions: readPermissions,
       });
+      await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       telemetryIds.push(row.$id);
     }
     return json(res, { accepted: true, telemetryId: telemetryIds[0], telemetryIds, receivedAt }, 201);

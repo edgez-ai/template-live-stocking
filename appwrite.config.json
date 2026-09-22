@@ -75,6 +75,63 @@
         { "key": "device-id", "type": "key", "attributes": ["deviceId"] },
         { "key": "device-history", "type": "key", "attributes": ["deviceId", "receivedAt"], "orders": ["ASC", "ASC"] }
       ]
+    },
+    {
+      "$id": "geofence-areas",
+      "databaseId": "live-stocking",
+      "name": "Geofence areas",
+      "permissions": [],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
+        { "key": "shape", "type": "varchar", "size": 12, "required": true, "array": false },
+        { "key": "geometry", "type": "varchar", "size": 4000, "required": true, "array": false }
+      ]
+    },
+    {
+      "$id": "geofence-rules",
+      "databaseId": "live-stocking",
+      "name": "Geofence rules",
+      "permissions": [],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "deviceIds", "type": "varchar", "size": 36, "required": false, "array": true },
+        { "key": "enterAlert", "type": "boolean", "required": true, "array": false },
+        { "key": "exitAlert", "type": "boolean", "required": true, "array": false }
+      ],
+      "indexes": [
+        { "key": "farm-id", "type": "key", "attributes": ["farmId"] }
+      ]
+    },
+    {
+      "$id": "geofence-alarms",
+      "databaseId": "live-stocking",
+      "name": "Geofence alarms",
+      "permissions": [],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "ruleId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "event", "type": "varchar", "size": 8, "required": true, "array": false },
+        { "key": "active", "type": "boolean", "required": true, "array": false },
+        { "key": "acknowledged", "type": "boolean", "required": true, "array": false },
+        { "key": "lastLocation", "type": "varchar", "size": 128, "required": true, "array": false },
+        { "key": "raisedAt", "type": "varchar", "size": 40, "required": true, "array": false },
+        { "key": "clearedAt", "type": "varchar", "size": 40, "required": false, "array": false },
+        { "key": "acknowledgedAt", "type": "varchar", "size": 40, "required": false, "array": false }
+      ],
+      "indexes": [
+        { "key": "farm-active", "type": "key", "attributes": ["farmId", "active"], "orders": ["ASC", "ASC"] },
+        { "key": "rule-device-event", "type": "unique", "attributes": ["ruleId", "deviceId", "event"] }
+      ]
     }
   ],
   "buckets": [],
@@ -93,10 +150,13 @@
       "enabled": true,
       "logging": true,
       "runtimeSpecification": "s-1vcpu-2gb",
-      "scopes": ["devices.read", "rows.write"],
+      "scopes": ["devices.read", "rows.read", "rows.write"],
       "vars": [
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
-        { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" }
+        { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
+        { "key": "LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID", "value": "geofence-areas" },
+        { "key": "LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID", "value": "geofence-rules" },
+        { "key": "LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID", "value": "geofence-alarms" }
       ]
     }
   ],

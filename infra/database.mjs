@@ -52,4 +52,67 @@ export function installDatabase() {
   ensure("telemetry device history index",
     ["tables-db", "get-index", ...telemetry, "--key", "device-history"],
     ["tables-db", "create-index", ...telemetry, "--key", "device-history", "--type", "key", "--columns", "deviceId", "receivedAt", "--orders", "ASC", "ASC"]);
+
+  const geofenceAreas = ["--database-id", config.databaseId, "--table-id", config.geofenceAreaTableId];
+  ensure("geofence areas table",
+    ["tables-db", "get-table", ...geofenceAreas],
+    ["tables-db", "create-table", ...geofenceAreas, "--name", "Geofence areas", "--row-security", "true"]);
+  run(["tables-db", "update-table", ...geofenceAreas, "--row-security", "true"]);
+  for (const [key, size] of [["farmId", "36"], ["name", "128"], ["shape", "12"], ["geometry", "4000"]]) {
+    ensure(`geofence areas.${key} column`,
+      ["tables-db", "get-column", ...geofenceAreas, "--key", key],
+      ["tables-db", "create-string-column", ...geofenceAreas, "--key", key, "--size", size, "--required", "true"]);
+  }
+  ensure("geofence areas farm index",
+    ["tables-db", "get-index", ...geofenceAreas, "--key", "farm-id"],
+    ["tables-db", "create-index", ...geofenceAreas, "--key", "farm-id", "--type", "key", "--columns", "farmId"]);
+
+  const geofenceRules = ["--database-id", config.databaseId, "--table-id", config.geofenceRuleTableId];
+  ensure("geofence rules table",
+    ["tables-db", "get-table", ...geofenceRules],
+    ["tables-db", "create-table", ...geofenceRules, "--name", "Geofence rules", "--row-security", "true"]);
+  run(["tables-db", "update-table", ...geofenceRules, "--row-security", "true"]);
+  for (const [key, size] of [["farmId", "36"], ["areaId", "36"]]) {
+    ensure(`geofence rules.${key} column`,
+      ["tables-db", "get-column", ...geofenceRules, "--key", key],
+      ["tables-db", "create-string-column", ...geofenceRules, "--key", key, "--size", size, "--required", "true"]);
+  }
+  ensure("geofence rules.deviceIds column",
+    ["tables-db", "get-column", ...geofenceRules, "--key", "deviceIds"],
+    ["tables-db", "create-string-column", ...geofenceRules, "--key", "deviceIds", "--size", "36", "--array"]);
+  for (const key of ["enterAlert", "exitAlert"]) {
+    ensure(`geofence rules.${key} column`,
+      ["tables-db", "get-column", ...geofenceRules, "--key", key],
+      ["tables-db", "create-boolean-column", ...geofenceRules, "--key", key, "--required", "true"]);
+  }
+  ensure("geofence rules farm index",
+    ["tables-db", "get-index", ...geofenceRules, "--key", "farm-id"],
+    ["tables-db", "create-index", ...geofenceRules, "--key", "farm-id", "--type", "key", "--columns", "farmId"]);
+
+  const alarms = ["--database-id", config.databaseId, "--table-id", config.geofenceAlarmTableId];
+  ensure("geofence alarms table",
+    ["tables-db", "get-table", ...alarms],
+    ["tables-db", "create-table", ...alarms, "--name", "Geofence alarms", "--row-security", "true"]);
+  run(["tables-db", "update-table", ...alarms, "--row-security", "true"]);
+  for (const [key, size] of [["farmId", "36"], ["areaId", "36"], ["ruleId", "36"], ["deviceId", "36"], ["event", "8"], ["lastLocation", "128"], ["raisedAt", "40"]]) {
+    ensure(`geofence alarms.${key} column`,
+      ["tables-db", "get-column", ...alarms, "--key", key],
+      ["tables-db", "create-string-column", ...alarms, "--key", key, "--size", size, "--required", "true"]);
+  }
+  for (const key of ["active", "acknowledged"]) {
+    ensure(`geofence alarms.${key} column`,
+      ["tables-db", "get-column", ...alarms, "--key", key],
+      ["tables-db", "create-boolean-column", ...alarms, "--key", key, "--required", "true"]);
+  }
+  for (const key of ["clearedAt", "acknowledgedAt"]) {
+    ensure(`geofence alarms.${key} column`,
+      ["tables-db", "get-column", ...alarms, "--key", key],
+      ["tables-db", "create-string-column", ...alarms, "--key", key, "--size", "40"]);
+  }
+  ensure("geofence alarms farm index",
+    ["tables-db", "get-index", ...alarms, "--key", "farm-active"],
+    ["tables-db", "create-index", ...alarms, "--key", "farm-active", "--type", "key", "--columns", "farmId", "active"]);
+  ensure("geofence alarms rule device event index",
+    ["tables-db", "get-index", ...alarms, "--key", "rule-device-event"],
+    ["tables-db", "create-index", ...alarms, "--key", "rule-device-event", "--type", "unique", "--columns", "ruleId", "deviceId", "event"]);
 }
