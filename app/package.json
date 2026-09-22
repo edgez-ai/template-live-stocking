@@ -23,8 +23,7 @@
     "react-native": "0.86.3",
     "react-native-appwrite": "^0.20.0",
     "react-native-ble-plx": "^3.5.1",
-    "react-native-safe-area-context": "~5.7.0",
-    "react-native-svg": "^15.12.1"
+    "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",

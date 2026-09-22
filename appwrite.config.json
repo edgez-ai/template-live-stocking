@@ -80,7 +80,7 @@
       "$id": "geofence-areas",
       "databaseId": "live-stocking",
       "name": "Geofence areas",
-      "permissions": [],
+      "permissions": ["create(\"users\")"],
       "rowSecurity": true,
       "enabled": true,
       "columns": [
@@ -94,11 +94,12 @@
       "$id": "geofence-rules",
       "databaseId": "live-stocking",
       "name": "Geofence rules",
-      "permissions": [],
+      "permissions": ["create(\"users\")"],
       "rowSecurity": true,
       "enabled": true,
       "columns": [
         { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
         { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "deviceIds", "type": "varchar", "size": 36, "required": false, "array": true },
         { "key": "enterAlert", "type": "boolean", "required": true, "array": false },

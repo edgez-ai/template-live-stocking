@@ -56,8 +56,8 @@ export function installDatabase() {
   const geofenceAreas = ["--database-id", config.databaseId, "--table-id", config.geofenceAreaTableId];
   ensure("geofence areas table",
     ["tables-db", "get-table", ...geofenceAreas],
-    ["tables-db", "create-table", ...geofenceAreas, "--name", "Geofence areas", "--row-security", "true"]);
-  run(["tables-db", "update-table", ...geofenceAreas, "--row-security", "true"]);
+    ["tables-db", "create-table", ...geofenceAreas, "--name", "Geofence areas", "--permissions", 'create("users")', "--row-security", "true"]);
+  run(["tables-db", "update-table", ...geofenceAreas, "--permissions", 'create("users")', "--row-security", "true"]);
   for (const [key, size] of [["farmId", "36"], ["name", "128"], ["shape", "12"], ["geometry", "4000"]]) {
     ensure(`geofence areas.${key} column`,
       ["tables-db", "get-column", ...geofenceAreas, "--key", key],
@@ -70,9 +70,9 @@ export function installDatabase() {
   const geofenceRules = ["--database-id", config.databaseId, "--table-id", config.geofenceRuleTableId];
   ensure("geofence rules table",
     ["tables-db", "get-table", ...geofenceRules],
-    ["tables-db", "create-table", ...geofenceRules, "--name", "Geofence rules", "--row-security", "true"]);
-  run(["tables-db", "update-table", ...geofenceRules, "--row-security", "true"]);
-  for (const [key, size] of [["farmId", "36"], ["areaId", "36"]]) {
+    ["tables-db", "create-table", ...geofenceRules, "--name", "Geofence rules", "--permissions", 'create("users")', "--row-security", "true"]);
+  run(["tables-db", "update-table", ...geofenceRules, "--permissions", 'create("users")', "--row-security", "true"]);
+  for (const [key, size] of [["farmId", "36"], ["name", "128"], ["areaId", "36"]]) {
     ensure(`geofence rules.${key} column`,
       ["tables-db", "get-column", ...geofenceRules, "--key", key],
       ["tables-db", "create-string-column", ...geofenceRules, "--key", key, "--size", size, "--required", "true"]);

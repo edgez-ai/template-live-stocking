@@ -5,11 +5,24 @@ const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || proce
 const GEOFENCE_AREA_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID;
+const SENSOR_BATTERY_VOLTAGE = 12;
+const SENSOR_LATITUDE = 3;
+const SENSOR_LONGITUDE = 4;
+const SENSOR_ACCELEROMETER = [6, 7, 8];
+const SENSOR_GYROSCOPE = [9, 10, 11];
+const SENSOR_TYPE_MAX = 12;
+
+function sensorValue(payload, type) {
+  if (!Array.isArray(payload?.sensors)) return null;
+  const sensor = payload.sensors.find((candidate) => candidate?.type === type);
+  return typeof sensor?.value === "number" && Number.isFinite(sensor.value) ? sensor.value : null;
+}
 
 function locationOf(payload) {
-  return typeof payload?.latitude === "number" && Number.isFinite(payload.latitude) &&
-    typeof payload?.longitude === "number" && Number.isFinite(payload.longitude)
-    ? { latitude: payload.latitude, longitude: payload.longitude } : null;
+  const latitude = sensorValue(payload, SENSOR_LATITUDE);
+  const longitude = sensorValue(payload, SENSOR_LONGITUDE);
+  return latitude !== null && longitude !== null && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+    ? { latitude, longitude } : null;
 }
 
 function localMeters(point, center, rotation = 0) {
@@ -149,19 +162,27 @@ export default async function main({ req, res, error }) {
     if (entry.clientId !== undefined && typeof entry.clientId !== "string") {
       return json(res, { error: "Telemetry clientId must be a string" }, 400);
     }
-    if ((route.channel === "status" || route.channel === "battery") &&
-        entry.batteryVoltageMv !== undefined &&
-        (!Number.isInteger(entry.batteryVoltageMv) || entry.batteryVoltageMv < 2500 ||
-         entry.batteryVoltageMv > 5000 || entry.unit !== "millivolt")) {
-      return json(res, { error: "Battery telemetry must contain a valid batteryVoltageMv and millivolt unit" }, 400);
+    if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
+        !sensor || typeof sensor !== "object" || !Number.isInteger(sensor.type) || sensor.type < 1 || sensor.type > SENSOR_TYPE_MAX ||
+        typeof sensor.value !== "number" || !Number.isFinite(sensor.value)))) {
+      return json(res, { error: "Telemetry sensors must contain supported numeric type and value fields" }, 400);
     }
-    if (entry.latitude !== undefined || entry.longitude !== undefined) {
-      if (typeof entry.latitude !== "number" || !Number.isFinite(entry.latitude) ||
-          entry.latitude < -90 || entry.latitude > 90 ||
-          typeof entry.longitude !== "number" || !Number.isFinite(entry.longitude) ||
-          entry.longitude < -180 || entry.longitude > 180) {
-        return json(res, { error: "Telemetry location must contain valid latitude and longitude" }, 400);
+    const sensorTypes = new Set((entry.sensors || []).map((sensor) => sensor.type));
+    for (const [name, axes] of [["accelerometer", SENSOR_ACCELEROMETER], ["gyroscope", SENSOR_GYROSCOPE]]) {
+      if (axes.some((type) => sensorTypes.has(type)) && !axes.every((type) => sensorTypes.has(type))) {
+        return json(res, { error: `IMU ${name} data must include X, Y, and Z axes` }, 400);
       }
+    }
+    const batteryVoltage = sensorValue(entry, SENSOR_BATTERY_VOLTAGE);
+    if ((route.channel === "status" || route.channel === "battery") && batteryVoltage !== null &&
+        (batteryVoltage < 2.5 || batteryVoltage > 5.0)) {
+      return json(res, { error: "Battery sensor voltage must be between 2.5 and 5.0 volts" }, 400);
+    }
+    const latitude = sensorValue(entry, SENSOR_LATITUDE);
+    const longitude = sensorValue(entry, SENSOR_LONGITUDE);
+    if ((latitude === null) !== (longitude === null) ||
+        (latitude !== null && (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180))) {
+      return json(res, { error: "Location sensors must include valid latitude and longitude" }, 400);
     }
   }
 

@@ -319,9 +319,6 @@ void remote_beacon_task(void *) {
 }
 
 void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t count) {
-  static constexpr const char *kFields[] = {
-      nullptr, "temperature", "humidity", "latitude", "longitude", "length",
-      "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", nullptr};
   for (size_t record_index = 0; record_index < count; ++record_index) {
     const auto &reading = records[record_index];
     cJSON *entry = cJSON_CreateObject();
@@ -355,19 +352,6 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
           cJSON_AddItemToArray(sensors, record);
         } else cJSON_Delete(value);
       } else cJSON_Delete(value);
-      if (sensor.which_value != ai_edgez_halow_SensorData_float_value_tag ||
-          !std::isfinite(sensor.value.float_value)) continue;
-      if (sensor.type == ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE) {
-        const int millivolts = static_cast<int>(std::lround(sensor.value.float_value * 1000.0f));
-        if (millivolts >= 2500 && millivolts <= 5000) {
-          cJSON_AddNumberToObject(entry, "batteryVoltageMv", millivolts);
-          cJSON_AddStringToObject(entry, "unit", "millivolt");
-        }
-      } else if (sensor.type >= ai_edgez_halow_SensorType_SENSOR_TEMPERATURE &&
-                 sensor.type <= ai_edgez_halow_SensorType_SENSOR_GYRO_Z &&
-                 kFields[sensor.type]) {
-        cJSON_AddNumberToObject(entry, kFields[sensor.type], sensor.value.float_value);
-      }
     }
     cJSON_AddItemToArray(batch, entry);
   }

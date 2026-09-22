@@ -8,7 +8,7 @@ import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, 
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
 import { EdgezOrganicMap } from "@edgez/react-native-sdk";
-import type { EdgezMapDownloadUpdate, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
+import type { EdgezMapCamera, EdgezMapDownloadUpdate, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
@@ -28,13 +28,20 @@ type CachedSnapshot = { version: 1; user: CurrentUser; farms: CachedFarm[]; devi
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
+type GeofenceShape = "circle" | "oval" | "rectangle" | "polygon";
+type GeofenceArea = Models.Row & { farmId: string; name: string; shape: GeofenceShape; geometry: string };
+type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
+type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "receivedAt">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; farmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type VoltagePoint = { timestamp: number; value: number };
+type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string };
+type SettingsTab = "team" | "areas" | "rules";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
+const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "" };
 
 function detailsFromFarm(farm?: Farm): FarmDetails {
   return farm ? { name: farm.name, country: farm.country, location: farm.location, halowChannel: String(farm.halowChannel), meshId: farm.meshId, meshPassphrase: farm.meshPassphrase } : emptyFarmDetails;
@@ -60,14 +67,53 @@ function coordinatesFromLocation(location: string) {
   return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 ? { latitude, longitude } : null;
 }
 
+function areaGeometry(draft: AreaDraft) {
+  const vertices = draft.vertices.split(";").map((value) => coordinatesFromLocation(value)).filter((value): value is { latitude: number; longitude: number } => Boolean(value));
+  const center = draft.shape === "polygon" && vertices.length
+    ? { latitude: vertices.reduce((sum, point) => sum + point.latitude, 0) / vertices.length, longitude: vertices.reduce((sum, point) => sum + point.longitude, 0) / vertices.length }
+    : coordinatesFromLocation(draft.location);
+  const primary = Number(draft.primary);
+  const secondary = Number(draft.secondary);
+  if (!draft.name.trim() || !center) throw new Error("Enter an area name and choose its position on the map.");
+  if (draft.shape !== "polygon" && (!Number.isFinite(primary) || primary < 10 || primary > 100000)) throw new Error("Set a valid area size in meters.");
+  if (draft.shape === "circle") return JSON.stringify({ center, radiusMeters: primary });
+  if (draft.shape === "oval") {
+    if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter both oval radii in meters.");
+    return JSON.stringify({ center, radiusXMeters: primary, radiusYMeters: secondary, rotationDegrees: 0 });
+  }
+  if (draft.shape === "rectangle") {
+    if (!Number.isFinite(secondary) || secondary < 10 || secondary > 100000) throw new Error("Enter rectangle width and height in meters.");
+    return JSON.stringify({ center, widthMeters: primary, heightMeters: secondary, rotationDegrees: 0 });
+  }
+  if (new Set(vertices.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`)).size < 3) throw new Error("Add at least three distinct polygon points on the map.");
+  return JSON.stringify({ center, vertices });
+}
+
+function polygonScreenPoint(point: { latitude: number; longitude: number }, camera: EdgezMapCamera, width: number, height: number) {
+  const mercatorY = (latitude: number) => {
+    const radians = Math.max(-85.051128, Math.min(85.051128, latitude)) * Math.PI / 180;
+    return (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2;
+  };
+  const pixels = 256 * 2 ** camera.zoom;
+  const longitudeDelta = ((point.longitude - camera.longitude + 540) % 360) - 180;
+  return { x: width / 2 + longitudeDelta / 360 * pixels, y: height / 2 + (mercatorY(point.latitude) - mercatorY(camera.latitude)) * pixels };
+}
+
+const sensorType = { latitude: 3, longitude: 4, batteryVoltage: 12 } as const;
+type SensorPayload = { sensors?: { type?: unknown; value?: unknown }[] };
+
+function sensorValue(payload: SensorPayload, type: number) {
+  const value = payload.sensors?.find((sensor) => sensor?.type === type)?.value;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function telemetryCoordinates(row?: Telemetry) {
   if (!row) return null;
-  let payload: { latitude?: unknown; longitude?: unknown };
+  let payload: SensorPayload;
   try { payload = JSON.parse(row.payload); } catch { return null; }
-  const latitude = payload.latitude;
-  const longitude = payload.longitude;
-  return typeof latitude === "number" && typeof longitude === "number" &&
-    Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+  const latitude = sensorValue(payload, sensorType.latitude);
+  const longitude = sensorValue(payload, sensorType.longitude);
+  return latitude !== null && longitude !== null && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
     ? { latitude, longitude } : null;
 }
 
@@ -138,8 +184,8 @@ function messageOf(error: unknown) { return error instanceof Error ? error.messa
 
 function voltageOf(row: Telemetry) {
   try {
-    const value = Number((JSON.parse(row.payload) as { batteryVoltageMv?: unknown }).batteryVoltageMv);
-    return (row.channel === "status" || row.channel === "battery") && Number.isInteger(value) && value >= 2500 && value <= 5000 ? value / 1000 : null;
+    const value = sensorValue(JSON.parse(row.payload) as SensorPayload, sensorType.batteryVoltage);
+    return (row.channel === "status" || row.channel === "battery") && value !== null && value >= 2.5 && value <= 5.0 ? value : null;
   } catch { return null; }
 }
 
@@ -259,16 +305,68 @@ function FarmLocationPicker({ location, country, device = false, onCancel, onSel
   </SafeAreaView>;
 }
 
-function OfflineMap({ devices, telemetry, location }: { devices: Device[]; telemetry: Telemetry[]; location?: string }) {
+function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft; country: string; onCancel: () => void; onSave: (draft: AreaDraft) => void }) {
+  const map = useRef<EdgezOrganicMapRef>(null);
+  const initial = useMemo(() => coordinatesFromLocation(draft.location) ?? countryMapCenters[country] ?? { latitude: 59.3293, longitude: 18.0686 }, [draft.location, country]);
+  const [center, setCenter] = useState(initial);
+  const [primary, setPrimary] = useState(Number(draft.primary) || 100);
+  const [secondary, setSecondary] = useState(Number(draft.secondary) || 100);
+  const [vertices, setVertices] = useState(draft.vertices);
+  const [camera, setCamera] = useState<EdgezMapCamera>({ ...initial, zoom: 16 });
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
+  const resize = (setter: React.Dispatch<React.SetStateAction<number>>, amount: number) => setter((value) => Math.max(10, Math.min(100000, value + amount)));
+  const polygonVertices = vertices.split(";").map((vertex) => coordinatesFromLocation(vertex)).filter((vertex): vertex is { latitude: number; longitude: number } => Boolean(vertex));
+  const vertexCount = polygonVertices.length;
+  const distinctVertexCount = new Set(polygonVertices.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`)).size;
+  const polygonPoints = polygonVertices.map((point) => polygonScreenPoint(point, camera, mapSize.width, mapSize.height));
+  const polygonEdges = polygonPoints.length >= 2 ? polygonPoints.map((point, index) => ({ start: point, end: polygonPoints[(index + 1) % polygonPoints.length] })).filter((_, index) => polygonPoints.length >= 3 || index === 0) : [];
+  const addVertex = () => setVertices((value) => [...value.split(";").filter(Boolean), `${center.latitude.toFixed(6)},${center.longitude.toFixed(6)}`].join(";"));
+  const removeVertex = () => setVertices((value) => value.split(";").filter(Boolean).slice(0, -1).join(";"));
+  const width = Math.max(56, Math.min(220, primary / 2));
+  const height = draft.shape === "circle" ? width : Math.max(56, Math.min(220, secondary / 2));
+  return <SafeAreaView style={styles.dialogPage}>
+    <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>EDIT AREA ON MAP</Text><Text style={styles.dialogTitle}>{draft.name || "New area"}</Text></View><Pressable onPress={onCancel}><Text style={styles.close}>BACK</Text></Pressable></View>
+    <View style={styles.locationMap} onLayout={(event) => setMapSize({ width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height })}>
+      <EdgezOrganicMap ref={map} nodes={[]} centerLatitude={initial.latitude} centerLongitude={initial.longitude} zoom={16} enableMapDownloads style={styles.map} onMapReady={() => map.current?.getCamera()} onCameraChanged={(nextCamera) => { setCenter({ latitude: nextCamera.latitude, longitude: nextCamera.longitude }); setCamera(nextCamera); }} />
+      {draft.shape === "polygon"
+        ? <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            {polygonEdges.map(({ start, end }, index) => {
+              const length = Math.hypot(end.x - start.x, end.y - start.y);
+              return <View key={`edge-${index}`} style={[styles.polygonEdge, { left: (start.x + end.x - length) / 2, top: (start.y + end.y) / 2 - 2, width: length, transform: [{ rotate: `${Math.atan2(end.y - start.y, end.x - start.x)}rad` }] }]} />;
+            })}
+            {polygonPoints.map((point, index) => <View key={`point-${index}`} style={[styles.polygonVertex, { left: point.x - 13, top: point.y - 13 }]}><Text style={styles.polygonVertexText}>{index + 1}</Text></View>)}
+            <View style={styles.mapCrosshair}><Text style={styles.mapCrosshairText}>＋</Text></View>
+          </View>
+        : <View pointerEvents="none" style={[styles.areaPreview, { width, height, marginLeft: -width / 2, marginTop: -height / 2 }, draft.shape === "circle" && styles.areaCircle, draft.shape === "oval" && styles.areaOval, draft.shape === "rectangle" && styles.areaRectangle]} />}
+      <View style={styles.areaMapControls}>
+        {draft.shape === "circle" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>RADIUS · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
+        {draft.shape === "oval" && <><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>HORIZONTAL · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>VERTICAL · {secondary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View></>}
+        {draft.shape === "rectangle" && <><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>WIDTH · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>HEIGHT · {secondary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View></>}
+        {draft.shape === "polygon" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>POINTS · {vertexCount}</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={removeVertex} disabled={!vertexCount} accessibilityLabel="Undo last point"><Text style={styles.areaControlText}>↶</Text></Pressable><Pressable style={styles.areaControl} onPress={addVertex} accessibilityLabel="Add point at crosshair"><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
+      </View>
+    </View>
+    <View style={styles.locationFooter}><Text style={styles.dialogHelp}>{draft.shape === "polygon" ? "Pan until the crosshair marks a corner, then tap +. Add at least three corners; ↶ removes the last one." : "Pan the map to position the area and use the controls to set its dimensions."}</Text><Text style={styles.muted}>{center.latitude.toFixed(6)}, {center.longitude.toFixed(6)}</Text>{draft.shape === "polygon" && <Text style={styles.muted}>{vertexCount} polygon points</Text>}<Pressable style={[styles.primary, draft.shape === "polygon" && distinctVertexCount < 3 && styles.disabledButton]} disabled={draft.shape === "polygon" && distinctVertexCount < 3} onPress={() => onSave({ ...draft, location: `${center.latitude.toFixed(6)}, ${center.longitude.toFixed(6)}`, primary: String(primary), secondary: String(secondary), vertices })}><Text style={styles.primaryText}>USE AREA POSITION</Text></Pressable></View>
+  </SafeAreaView>;
+}
+
+function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Device[]; telemetry: Telemetry[]; location?: string; areas?: GeofenceArea[] }) {
   const map = useRef<EdgezOrganicMapRef>(null);
   const [region, setRegion] = useState("");
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
   const farmCenter = coordinatesFromLocation(location ?? "");
-  const markers = useMemo<EdgezMapNode[]>(() => devices.flatMap((device) => {
-    const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
-    return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: device.enabled ? "blue" : "gray" }] : [];
-  }), [devices, telemetry]);
+  const markers = useMemo<EdgezMapNode[]>(() => [
+    ...devices.flatMap((device) => {
+      const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
+      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: device.enabled ? "blue" : "gray" }] : [];
+    }),
+    ...areas.flatMap((area) => {
+      try {
+        const center = JSON.parse(area.geometry).center;
+        return center ? [{ id: `area-${area.$id}`, label: `${area.name} · ${area.shape}`, latitude: center.latitude, longitude: center.longitude, marker: "orange" }] : [];
+      } catch { return []; }
+    }),
+  ], [devices, telemetry, areas]);
 
   return <View style={styles.mapCard}>
     <EdgezOrganicMap
@@ -357,6 +455,9 @@ export default function App() {
   const [farms, setFarms] = useState<Farm[]>([]);
   const [currentFarmId, setCurrentFarmId] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [farmManagerOpen, setFarmManagerOpen] = useState(false);
+  const [alarmsOpen, setAlarmsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("team");
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
   const [farmFormMode, setFarmFormMode] = useState<"create" | "edit" | null>(null);
   const [farmDraft, setFarmDraft] = useState<FarmDetails>(emptyFarmDetails);
@@ -367,6 +468,17 @@ export default function App() {
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
+  const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
+  const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
+  const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
+  const [areaDraft, setAreaDraft] = useState<AreaDraft>(emptyAreaDraft);
+  const [areaEditingId, setAreaEditingId] = useState<string | null>(null);
+  const [areaPickerOpen, setAreaPickerOpen] = useState(false);
+  const [ruleName, setRuleName] = useState("");
+  const [ruleAreaId, setRuleAreaId] = useState("");
+  const [ruleDeviceIds, setRuleDeviceIds] = useState<string[]>([]);
+  const [ruleEnter, setRuleEnter] = useState(true);
+  const [ruleExit, setRuleExit] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [bleDevices, setBleDevices] = useState<ProvisioningDevice[]>([]);
@@ -767,6 +879,8 @@ export default function App() {
   function openSettings() {
     setMenuOpen(false);
     setLocationPickerOpen(false);
+    setFarmManagerOpen(false);
+    setSettingsTab("team");
     setFarmFormMode(null);
     setTeamError("");
     setProfileName(user?.name || "");
@@ -956,6 +1070,18 @@ export default function App() {
       .finally(() => { if (active) setMembersLoading(false); });
     return () => { active = false; };
   }, [settingsOpen, activeTeamId, offline, user?.$id]);
+  useEffect(() => {
+    if (!currentFarmId || offline || !config.geofenceAreaTableId || !config.geofenceRuleTableId || !config.geofenceAlarmTableId) {
+      setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); return;
+    }
+    let active = true;
+    Promise.all([
+      tables.listRows<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
+      tables.listRows<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
+      tables.listRows<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, queries: [Query.equal("farmId", currentFarmId), Query.equal("active", true), Query.limit(100)] }),
+    ]).then(([areas, rules, alarms]) => { if (active) { setGeofenceAreas(areas.rows); setGeofenceRules(rules.rows); setGeofenceAlarms(alarms.rows); } }).catch((caught) => { if (active) setTeamError(messageOf(caught)); });
+    return () => { active = false; };
+  }, [currentFarmId, offline]);
   const visibleDevices = devices.filter((device) => Boolean(currentFarmId) && device.metadata?.farmId === currentFarmId);
   if (busy && !user) return <SafeAreaProvider><SafeAreaView style={styles.safe}><ActivityIndicator style={styles.loader} color="#62d8cf" size="large" /></SafeAreaView></SafeAreaProvider>;
 
@@ -969,7 +1095,7 @@ export default function App() {
       <Pressable style={styles.primary} onPress={() => authenticate(false)} disabled={busy}><Text style={styles.primaryText}>SIGN IN</Text></Pressable>
       <Pressable style={styles.secondary} onPress={() => authenticate(true)} disabled={busy}><Text style={styles.secondaryText}>CREATE ACCOUNT</Text></Pressable>
     </View></> : <View style={styles.dashboard}>
-      {dashboardView === "map" ? <OfflineMap key={`${currentFarm?.$id ?? "none"}:${currentFarm?.location ?? ""}`} devices={visibleDevices} telemetry={telemetry} location={currentFarm?.location} /> : <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
+      {dashboardView === "map" ? <OfflineMap key={`${currentFarm?.$id ?? "none"}:${currentFarm?.location ?? ""}`} devices={visibleDevices} telemetry={telemetry} location={currentFarm?.location} areas={geofenceAreas} /> : <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
       <Text style={styles.sectionLabel}>{visibleDevices.length} DEVICES</Text>
       {visibleDevices.map((device) => {
         const latest = latestVoltageByDevice.get(device.$id);
@@ -992,33 +1118,41 @@ export default function App() {
         </View>
         {menuOpen && <View style={styles.dropdownMenu}>
           <Pressable style={styles.menuItem} onPress={() => { setDashboardView(dashboardView === "map" ? "list" : "map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>{dashboardView === "map" ? "List view" : "Map view"}</Text></Pressable>
+          <Pressable style={styles.menuItem} onPress={() => { setAlarmsOpen(true); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Alarms{geofenceAlarms.filter((alarm) => !alarm.acknowledged).length ? ` · ${geofenceAlarms.filter((alarm) => !alarm.acknowledged).length}` : ""}</Text></Pressable>
           <Pressable style={styles.menuItem} onPress={openSettings} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Settings · Farms</Text></Pressable>
           <View style={styles.menuDivider} />
           <Pressable style={styles.menuItem} onPress={() => void signOut().catch((caught) => setError(messageOf(caught)))} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Sign out</Text></Pressable>
         </View>}
       </View>
     </View>}
-    <Modal visible={settingsOpen && Boolean(user)} animationType="slide" onRequestClose={() => locationPickerOpen ? setLocationPickerOpen(false) : setSettingsOpen(false)}>
-      {locationPickerOpen ? <FarmLocationPicker location={farmDraft.location} country={farmDraft.country} onCancel={() => setLocationPickerOpen(false)} onSelect={(location) => { setFarmDraft({ ...farmDraft, location }); setLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
-        <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>SETTINGS</Text><Text style={styles.dialogTitle}>Farms</Text></View><Pressable onPress={() => setSettingsOpen(false)}><Text style={styles.close}>CLOSE</Text></Pressable></View>
+    <Modal visible={alarmsOpen && Boolean(user)} animationType="slide" onRequestClose={() => setAlarmsOpen(false)}><SafeAreaView style={styles.dialogPage}><View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>FARM SAFETY</Text><Text style={styles.dialogTitle}>Alarms</Text></View><Pressable onPress={() => setAlarmsOpen(false)}><Text style={styles.close}>CLOSE</Text></Pressable></View><ScrollView contentContainerStyle={styles.dialogContent}>{geofenceAlarms.length ? geofenceAlarms.map((alarm) => <View key={alarm.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{visibleDevices.find((device) => device.$id === alarm.deviceId)?.name || alarm.deviceId} · {alarm.event.toUpperCase()}</Text><Text style={styles.muted}>{geofenceAreas.find((area) => area.$id === alarm.areaId)?.name || "Area"} · {alarm.acknowledged ? "ACKNOWLEDGED" : "ACTIVE"}</Text><Text style={styles.muted}>{new Date(alarm.raisedAt).toLocaleString()}</Text></View>{!alarm.acknowledged && <Pressable onPress={() => void tables.updateRow<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, rowId: alarm.$id, data: { acknowledged: true, acknowledgedAt: new Date().toISOString() } }).then((updated) => setGeofenceAlarms((alarms) => alarms.map((item) => item.$id === updated.$id ? updated : item))).catch((caught) => setError(messageOf(caught)))}><Text style={styles.removeMemberText}>ACK</Text></Pressable>}</View>) : <Text style={styles.empty}>No active alarms.</Text>}</ScrollView></SafeAreaView></Modal>
+    <Modal visible={settingsOpen && Boolean(user)} animationType="slide" onRequestClose={() => locationPickerOpen ? setLocationPickerOpen(false) : farmManagerOpen ? setFarmManagerOpen(false) : setSettingsOpen(false)}>
+      {areaPickerOpen ? <AreaMapEditor draft={areaDraft} country={currentFarm?.country || ""} onCancel={() => setAreaPickerOpen(false)} onSave={(draft) => { setAreaDraft(draft); setAreaPickerOpen(false); }} /> : locationPickerOpen ? <FarmLocationPicker location={farmDraft.location} country={farmDraft.country} onCancel={() => setLocationPickerOpen(false)} onSelect={(location) => { setFarmDraft({ ...farmDraft, location }); setLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
+        <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>SETTINGS</Text><Text style={styles.dialogTitle}>{farmManagerOpen ? "Farm management" : "Farm settings"}</Text></View><Pressable onPress={() => farmManagerOpen ? setFarmManagerOpen(false) : setSettingsOpen(false)}><Text style={styles.close}>{farmManagerOpen ? "BACK" : "CLOSE"}</Text></Pressable></View>
         <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
-          <Text style={styles.dialogHelp}>Choose the farm for this app. The selected farm is saved to your account and opens next time.</Text>
-          {offline && <Text style={styles.dialogHelp}>Offline: cached farms can be viewed and switched. Connect to edit or create a farm.</Text>}
-          {farms.map((farm) => <Pressable key={farm.$id} style={[styles.farmRow, farm.$id === currentFarmId && styles.farmRowSelected]} onPress={() => void selectFarm(farm)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: farm.$id === currentFarmId }}><Text style={styles.deviceNameDark}>{farm.name}</Text><Text style={styles.muted}>{farm.$id === currentFarmId ? "CURRENT FARM" : "TAP TO SWITCH"}</Text></Pressable>)}
-          {!farms.length && <Text style={styles.muted}>No farms yet. Create your first farm.</Text>}
-          <View style={styles.settingsActions}>
-            <Pressable style={[styles.primary, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(emptyFarmDetails); setFarmFormMode("create"); setError(""); }} disabled={busy || offline}><Text style={styles.primaryText}>CREATE FARM</Text></Pressable>
-            {currentFarm?.ownerId === user?.$id && <Pressable style={[styles.outlineButton, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(detailsFromFarm(currentFarm)); setFarmFormMode("edit"); setError(""); }} disabled={busy || offline}><Text style={styles.outlineButtonText}>EDIT FARM</Text></Pressable>}
-          </View>
-          {farmFormMode && <>
-            <Text style={styles.fieldLabel}>{farmFormMode === "create" ? "CREATE FARM" : `EDIT ${currentFarm?.name || "FARM"}`}</Text>
-            <FarmFields value={farmDraft} onChange={setFarmDraft} onPickLocation={() => setLocationPickerOpen(true)} />
+          {farmManagerOpen ? <>
+            <Text style={styles.dialogHelp}>Switch farms or create and edit farms here. The selected farm opens automatically next time.</Text>
+            {offline && <Text style={styles.dialogHelp}>Offline: cached farms can be viewed and switched. Connect to edit or create a farm.</Text>}
+            {farms.map((farm) => <Pressable key={farm.$id} style={[styles.farmRow, farm.$id === currentFarmId && styles.farmRowSelected]} onPress={() => void selectFarm(farm).then(() => setFarmManagerOpen(false))} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: farm.$id === currentFarmId }}><Text style={styles.deviceNameDark}>{farm.name}</Text><Text style={styles.muted}>{farm.$id === currentFarmId ? "CURRENT FARM" : "TAP TO SWITCH"}</Text></Pressable>)}
+            {!farms.length && <Text style={styles.muted}>No farms yet. Create your first farm.</Text>}
             <View style={styles.settingsActions}>
-              <Pressable style={[styles.primary, styles.settingsAction]} onPress={() => void (farmFormMode === "create" ? createFarm() : saveFarm())} disabled={busy}><Text style={styles.primaryText}>{farmFormMode === "create" ? "CREATE FARM & TEAM" : "SAVE FARM"}</Text></Pressable>
-              <Pressable style={[styles.outlineButton, styles.settingsAction]} onPress={() => { setFarmFormMode(null); setError(""); }} disabled={busy}><Text style={styles.outlineButtonText}>CANCEL</Text></Pressable>
+              <Pressable style={[styles.primary, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(emptyFarmDetails); setFarmFormMode("create"); setError(""); }} disabled={busy || offline}><Text style={styles.primaryText}>CREATE FARM</Text></Pressable>
+              {currentFarm?.ownerId === user?.$id && <Pressable style={[styles.outlineButton, styles.settingsAction, offline && styles.disabledButton]} onPress={() => { setFarmDraft(detailsFromFarm(currentFarm)); setFarmFormMode("edit"); setError(""); }} disabled={busy || offline}><Text style={styles.outlineButtonText}>EDIT FARM</Text></Pressable>}
             </View>
+            {farmFormMode && <>
+              <Text style={styles.fieldLabel}>{farmFormMode === "create" ? "CREATE FARM" : `EDIT ${currentFarm?.name || "FARM"}`}</Text>
+              <FarmFields value={farmDraft} onChange={setFarmDraft} onPickLocation={() => setLocationPickerOpen(true)} />
+              <View style={styles.settingsActions}>
+                <Pressable style={[styles.primary, styles.settingsAction]} onPress={() => void (farmFormMode === "create" ? createFarm() : saveFarm())} disabled={busy}><Text style={styles.primaryText}>{farmFormMode === "create" ? "CREATE FARM & TEAM" : "SAVE FARM"}</Text></Pressable>
+                <Pressable style={[styles.outlineButton, styles.settingsAction]} onPress={() => { setFarmFormMode(null); setError(""); }} disabled={busy}><Text style={styles.outlineButtonText}>CANCEL</Text></Pressable>
+              </View>
+            </>}
+          </> : <>
+            <Text style={styles.dialogHelp}>Manage the team, geofence areas, and rules for the current farm.</Text>
+            {currentFarm ? <><View style={styles.currentFarmCard}><Text style={styles.deviceNameDark}>{currentFarm.name}</Text><Text style={styles.muted}>{currentFarm.location}, {currentFarm.country} · Channel {currentFarm.halowChannel}</Text><Pressable style={styles.outlineButton} onPress={() => { setFarmFormMode(null); setFarmManagerOpen(true); }}><Text style={styles.outlineButtonText}>MANAGE FARMS</Text></Pressable></View><View style={styles.settingsTabs}>{(["team", "areas", "rules"] as SettingsTab[]).map((tab) => <Pressable key={tab} style={[styles.settingsTab, settingsTab === tab && styles.settingsTabActive]} onPress={() => { setTeamError(""); setSettingsTab(tab); }} accessibilityRole="tab" accessibilityState={{ selected: settingsTab === tab }}><Text style={[styles.settingsTabText, settingsTab === tab && styles.settingsTabTextActive]}>{tab.toUpperCase()}</Text></Pressable>)}</View></> : <Pressable style={styles.primary} onPress={() => setFarmManagerOpen(true)}><Text style={styles.primaryText}>MANAGE FARMS</Text></Pressable>}
           </>}
-          {currentFarm && <>
+          {!farmManagerOpen && <>
+          {currentFarm && settingsTab === "team" && <>
             <Text style={styles.sectionLabel}>FARM TEAM</Text>
             <Text style={styles.dialogHelp}>Team members can view this farm, its devices, and their readings.</Text>
             {offline ? <Text style={styles.muted}>Connect to view and manage team members.</Text> : membersLoading ? <ActivityIndicator color="#0a8c87" /> : members.length ? members.map((member) => {
@@ -1042,6 +1176,28 @@ export default function App() {
               <Pressable style={styles.primary} onPress={() => void inviteMember()} disabled={busy || !inviteEmail.trim()}><Text style={styles.primaryText}>SEND INVITATION</Text></Pressable>
             </>}
             {teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}
+          </>}
+          {currentFarm && settingsTab === "areas" && <>
+            <Text style={styles.sectionLabel}>GEOFENCE AREAS</Text>
+            <Text style={styles.dialogHelp}>Areas are stored as a circle, oval, rectangle, or polygon. Rules are managed separately below.</Text>
+            {geofenceAreas.map((area) => <View key={area.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}</Text></View>{currentFarm.ownerId === user?.$id && <Pressable onPress={() => { setTeamError(""); let geometry: { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; vertices?: { latitude: number; longitude: number }[] } = {}; try { geometry = JSON.parse(area.geometry); } catch {} setAreaEditingId(area.$id); setAreaDraft({ name: area.name, shape: area.shape, location: geometry.center ? `${geometry.center.latitude}, ${geometry.center.longitude}` : "", primary: String(geometry.radiusMeters ?? geometry.radiusXMeters ?? geometry.widthMeters ?? 100), secondary: String(geometry.radiusYMeters ?? geometry.heightMeters ?? 100), vertices: (geometry.vertices || []).map((point) => `${point.latitude},${point.longitude}`).join(";") }); }}><Text style={styles.removeMemberText}>EDIT</Text></Pressable>}</View>)}
+            {currentFarm.ownerId === user?.$id && <>
+              <Pressable style={styles.outlineButton} onPress={() => { setTeamError(""); setAreaEditingId("new"); setAreaDraft({ ...emptyAreaDraft, location: currentFarm.location }); }}><Text style={styles.outlineButtonText}>ADD AREA</Text></Pressable>
+              {areaEditingId && <View style={styles.geofenceForm}>
+                <TextInput style={styles.inputLight} value={areaDraft.name} onChangeText={(name) => setAreaDraft({ ...areaDraft, name })} placeholder="Area name" />
+                <View style={styles.settingsActions}>{(["circle", "oval", "rectangle", "polygon"] as GeofenceShape[]).map((shape) => <Pressable key={shape} style={[styles.smallOption, areaDraft.shape === shape && styles.farmRowSelected]} onPress={() => setAreaDraft({ ...areaDraft, shape })}><Text style={styles.deviceNameDark}>{shape.toUpperCase()}</Text></Pressable>)}</View>
+                <Pressable style={styles.farmRow} onPress={() => setAreaPickerOpen(true)}><Text style={styles.deviceNameDark}>{areaDraft.shape === "polygon" ? "EDIT POINTS ON MAP" : "CENTER ON MAP"}</Text><Text style={styles.muted}>{areaDraft.shape === "polygon" ? `${areaDraft.vertices.split(";").filter(Boolean).length} points` : areaDraft.location || "Choose center"}</Text></Pressable>
+                {areaDraft.shape !== "polygon" && <View style={styles.settingsActions}><TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.primary} onChangeText={(primary) => setAreaDraft({ ...areaDraft, primary })} placeholder={areaDraft.shape === "circle" ? "Radius m" : "Width/radius m"} keyboardType="decimal-pad" />{areaDraft.shape !== "circle" && <TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.secondary} onChangeText={(secondary) => setAreaDraft({ ...areaDraft, secondary })} placeholder="Height/radius m" keyboardType="decimal-pad" />}</View>}
+                <Pressable style={styles.primary} onPress={() => void (async () => { setTeamError(""); try { const geometry = areaGeometry(areaDraft); const data = { farmId: currentFarm.$id, name: areaDraft.name.trim(), shape: areaDraft.shape, geometry }; const permissions = [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))]; const area = areaEditingId === "new" ? await tables.createRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: ID.unique(), data, permissions }) : await tables.updateRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: areaEditingId, data }); setGeofenceAreas((items) => areaEditingId === "new" ? [...items, area] : items.map((item) => item.$id === area.$id ? area : item)); setAreaEditingId(null); } catch (caught) { setTeamError(messageOf(caught)); } })()}><Text style={styles.primaryText}>SAVE AREA</Text></Pressable>
+                {teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}
+              </View>}
+            </>}
+          </>}
+          {currentFarm && settingsTab === "rules" && <>
+            <Text style={styles.sectionLabel}>GEOFENCE RULES</Text>
+            {geofenceRules.map((rule) => <View key={rule.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{rule.name || "Unnamed rule"}</Text><Text style={styles.muted}>{geofenceAreas.find((area) => area.$id === rule.areaId)?.name || "Deleted area"} · {rule.enterAlert ? "ENTER" : ""}{rule.enterAlert && rule.exitAlert ? " + " : ""}{rule.exitAlert ? "LEAVE" : ""} · {rule.deviceIds?.length || "All"} devices</Text></View></View>)}
+            {currentFarm.ownerId === user?.$id && <View style={styles.geofenceForm}><Text style={styles.dialogHelp}>Name the rule, select its area, and choose the devices it applies to. Leave device selection empty for every farm device.</Text><Text style={styles.fieldLabel}>RULE NAME</Text><TextInput style={styles.inputLight} value={ruleName} onChangeText={setRuleName} placeholder="For example: Cattle leave north pasture" maxLength={128} /><Text style={styles.fieldLabel}>AREA</Text>{geofenceAreas.length ? geofenceAreas.map((area) => <Pressable key={area.$id} style={[styles.farmRow, ruleAreaId === area.$id && styles.farmRowSelected]} onPress={() => setRuleAreaId(area.$id)} accessibilityRole="radio" accessibilityState={{ selected: ruleAreaId === area.$id }}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}{ruleAreaId === area.$id ? " · SELECTED" : ""}</Text></Pressable>) : <Text style={styles.muted}>Create an area before adding a rule.</Text>}<Text style={styles.fieldLabel}>DEVICES</Text>{visibleDevices.map((device) => <Pressable key={device.$id} style={[styles.farmRow, ruleDeviceIds.includes(device.$id) && styles.farmRowSelected]} onPress={() => setRuleDeviceIds((ids) => ids.includes(device.$id) ? ids.filter((id) => id !== device.$id) : [...ids, device.$id])}><Text style={styles.deviceNameDark}>{device.name}</Text></Pressable>)}<View style={styles.settingsActions}><Pressable style={[styles.smallOption, ruleEnter && styles.farmRowSelected]} onPress={() => setRuleEnter((value) => !value)}><Text style={styles.deviceNameDark}>ENTER</Text></Pressable><Pressable style={[styles.smallOption, ruleExit && styles.farmRowSelected]} onPress={() => setRuleExit((value) => !value)}><Text style={styles.deviceNameDark}>LEAVE</Text></Pressable></View><Pressable style={[styles.primary, (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) && styles.disabledButton]} onPress={() => void (async () => { if (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) { setTeamError("Enter a rule name, choose an area, and select at least one alarm condition."); return; } setTeamError(""); try { const rule = await tables.createRow<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, rowId: ID.unique(), data: { farmId: currentFarm.$id, name: ruleName.trim(), areaId: ruleAreaId, deviceIds: ruleDeviceIds, enterAlert: ruleEnter, exitAlert: ruleExit }, permissions: [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))] }); setGeofenceRules((rules) => [...rules, rule]); setRuleName(""); setRuleAreaId(""); setRuleDeviceIds([]); } catch (caught) { setTeamError(messageOf(caught)); } })()} disabled={!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)}><Text style={styles.primaryText}>SAVE RULE</Text></Pressable>{teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}</View>}
+          </>}
           </>}
           {error ? <Text style={styles.dialogError}>{error}</Text> : null}
         </ScrollView>
@@ -1124,11 +1280,13 @@ const styles = StyleSheet.create({
   input: { height: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, color: "white", fontSize: 16 }, primary: { minHeight: 54, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87", marginTop: 5 }, primaryText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, secondary: { minHeight: 52, alignItems: "center", justifyContent: "center" }, secondaryText: { color: "#69cfc7", fontSize: 11, fontWeight: "900", letterSpacing: 1 },
   listScroll: { flex: 1 }, listContent: { paddingHorizontal: 22, paddingTop: 94, paddingBottom: 30, gap: 12 }, inputLight: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, color: "#0a3037", backgroundColor: "white" }, muted: { color: "#59716f", fontSize: 11 },
   mapCard: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, map: { ...StyleSheet.absoluteFill }, mapPrompt: { position: "absolute", left: 12, right: 12, bottom: 28, padding: 14, borderRadius: 14, backgroundColor: "#092e35f2" }, mapPromptTitle: { color: "white", fontSize: 14, fontWeight: "900" }, mapPromptText: { color: "#b8cdca", fontSize: 11, lineHeight: 16, marginTop: 3 }, mapPromptActions: { flexDirection: "row", gap: 8, marginTop: 10 }, mapDownloadButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13, borderRadius: 9, backgroundColor: "#0a8c87" }, mapDownloadText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapLaterButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13 }, mapLaterText: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapNotice: { position: "absolute", left: 12, right: 90, top: 68, borderRadius: 9, padding: 9, backgroundColor: "#092e35e8" }, mapError: { backgroundColor: "#8f3422e8" }, mapNoticeText: { color: "white", fontSize: 10, fontWeight: "700" }, mapAttribution: { position: "absolute", left: 10, right: 10, bottom: 5, color: "#173e43", fontSize: 9, textShadowColor: "white", textShadowRadius: 4 },
-  farmRow: { padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", gap: 4 }, farmRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" },
+  farmRow: { padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", gap: 4 }, currentFarmCard: { padding: 16, borderRadius: 14, backgroundColor: "#e9f7f5", gap: 8 }, settingsTabs: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, settingsTab: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, settingsTabActive: { backgroundColor: "#0a8c87" }, settingsTabText: { color: "#59716f", fontSize: 9, fontWeight: "900", letterSpacing: .5 }, settingsTabTextActive: { color: "white" }, farmRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" },
+  geofenceForm: { gap: 10, padding: 12, borderRadius: 12, backgroundColor: "#e9f2f0" }, smallOption: { flex: 1, minHeight: 42, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", alignItems: "center", justifyContent: "center" }, dimensionInput: { flex: 1 },
   settingsActions: { flexDirection: "row", gap: 10 }, settingsAction: { flex: 1 }, outlineButton: { minHeight: 54, borderRadius: 14, borderWidth: 1, borderColor: "#0a8c87", alignItems: "center", justifyContent: "center", marginTop: 5 }, outlineButtonText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, memberRow: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 }, memberInfo: { flex: 1, gap: 4 }, removeMemberText: { color: "#b9472f", fontSize: 10, fontWeight: "900" },
   selectField: { minHeight: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }, selectText: { color: "#0a3037", fontSize: 14 }, optionList: { borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", overflow: "hidden" }, optionRow: { minHeight: 46, paddingHorizontal: 15, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
   passphraseField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passphraseInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037" }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
   locationMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, mapCrosshair: { position: "absolute", left: "50%", top: "50%", marginLeft: -18, marginTop: -26, width: 36, height: 52, alignItems: "center", justifyContent: "center" }, mapCrosshairText: { color: "#0a8c87", fontSize: 42, fontWeight: "900", textShadowColor: "white", textShadowRadius: 4 }, locationFooter: { paddingHorizontal: 22, paddingVertical: 12, gap: 5, backgroundColor: "#f7faf9" },
+  areaPreview: { position: "absolute", left: "50%", top: "50%", borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "#0a8c872e" }, areaCircle: { borderRadius: 999 }, areaOval: { borderRadius: 999 }, areaRectangle: { borderRadius: 3 }, polygonEdge: { position: "absolute", height: 4, borderRadius: 2, backgroundColor: "#0a8c87" }, polygonVertex: { position: "absolute", width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: "white", backgroundColor: "#0a8c87", alignItems: "center", justifyContent: "center" }, polygonVertexText: { color: "white", fontSize: 11, fontWeight: "900" }, areaMapControls: { position: "absolute", right: 16, bottom: 20, gap: 8, alignItems: "flex-end" }, areaDimension: { gap: 4, alignItems: "flex-end" }, areaControlButtons: { flexDirection: "row", gap: 6 }, areaControl: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, areaControlText: { color: "white", fontSize: 28, fontWeight: "600" }, areaControlLabel: { color: "white", fontSize: 10, fontWeight: "800", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: "#092e35e8" },
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },
   wifiHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, rescan: { color: "#0a8c87", fontSize: 10, fontWeight: "900" }, wifiNetwork: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, wifiNetworkSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" }, signal: { color: "#59716f", fontSize: 10, fontWeight: "700" },
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },

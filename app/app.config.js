@@ -7,14 +7,14 @@ const telemetryTableId = telemetryTable?.$id;
 const farmTableId = appwriteConfig.tables?.find((table) => table.$id === "farms")?.$id;
 const geofenceAreaTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas")?.$id;
 const geofenceRuleTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules")?.$id;
-const geofenceAlertTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-alerts")?.$id;
+const geofenceAlarmTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-alarms")?.$id;
 const appName = process.env.APP_NAME || edgezProject.name;
 const domainSuffix = process.env.DOMAIN_SUFFIX;
 const configuredEndpoint =
   process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT || appwriteConfig.endpoint;
 const projectId = process.env.APPWRITE_PROJECT_ID;
 
-if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlertTableId) {
+if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlarmTableId) {
   throw new Error("Appwrite project and telemetry table environment is incomplete");
 }
 
@@ -56,7 +56,7 @@ module.exports = {
       farmTableId,
       geofenceAreaTableId,
       geofenceRuleTableId,
-      geofenceAlertTableId,
+      geofenceAlarmTableId,
     },
   },
 };
