@@ -9,6 +9,8 @@
  *   IMU_SDA        -> P0.03 (TWIM30 SDA)
  *   GPS_RXD        -> P1.11 (MCU UART TX) [temporary swapped-pin test]
  *   GPS_TXD        -> P1.12 (MCU UART RX) [temporary swapped-pin test]
+ *   ADC_VBAT       -> P1.13 (AIN6, 100k/100k divider)
+ *   ADC_VBAT_EN    -> P1.14 (active-high divider enable)
  */
 
 / {
@@ -30,6 +32,8 @@
 	zephyr,user {
 		halow-power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
 		key-gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		battery-enable-gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;
+		io-channels = <&adc 6>;
 	};
 };
 

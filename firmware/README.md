@@ -16,8 +16,13 @@ The nRF54 keeps its Meshtastic BLE service and also advertises a `NRF_` name
 with its 12-character serial. Its separate encrypted GATT service accepts
 `mqtt-config` directly, without ESP-IDF BLE provisioning, Wi-Fi setup, PoP, or
 pairing code. The app sends the farm country, 1 MHz channel frequency, mesh ID,
-passphrase, optional device location, and MQTT credential. The firmware saves
-these settings and reboots into the selected HaLow profile. MQTT telemetry
+passphrase, optional device location or device GPS selection, and MQTT credential.
+The firmware saves these settings and reboots into the selected HaLow profile.
+Its sensor beacon uses the MQTT `clientId`/Appwrite Device UUID as its user ID,
+with IMU, GPS, and battery voltage sensor values. The KeepTeen board's
+`ADC_VBAT` on P1.13 uses SAADC channel 6 and a 100 kΩ + 100 kΩ divider;
+P1.14 (`ADC_VBAT_EN`) powers the divider only while sampling. Battery voltage
+is reported in volts in the HaLow beacon. MQTT telemetry
 publishing has not yet been ported to the nRF54 target. BLE provisioning stays
 off on subsequent boots. Press the USER button to enable BLE provisioning again;
 after the next successful configuration it turns off again.

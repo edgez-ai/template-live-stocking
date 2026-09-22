@@ -11,6 +11,7 @@
 
 #include "nanopb/pb_decode.h"
 #include "nanopb/pb_encode.h"
+#include "edgez_battery.h"
 #include "edgez_gps.h"
 #include "edgez_imu.h"
 #include "edgez_reboot.h"
@@ -321,19 +322,28 @@ void edgez_config_get_profile(struct edgez_halow_profile *profile)
 }
 
 int edgez_config_apply_provisioning(const char *mesh_id, const char *passphrase,
-				   uint32_t frequency_khz, bool has_location,
-				   float latitude, float longitude)
+				   uint32_t frequency_khz, uint64_t user_id_high,
+				   uint64_t user_id_low, const char *user_name,
+				   bool has_location, float latitude, float longitude,
+				   bool use_device_gps)
 {
 	int rc;
 
-	if (!mesh_id || !passphrase || strlen(mesh_id) >= sizeof(settings.mesh_id) ||
-	    strlen(passphrase) >= sizeof(settings.passphrase) || frequency_khz == 0) {
+	if (!mesh_id || !passphrase || !user_name || !user_name[0] ||
+	    strlen(mesh_id) >= sizeof(settings.mesh_id) ||
+	    strlen(passphrase) >= sizeof(settings.passphrase) ||
+	    strlen(user_name) >= sizeof(settings.user_name) ||
+	    (user_id_high == 0 && user_id_low == 0) || frequency_khz == 0) {
 		return -EINVAL;
 	}
 	k_mutex_lock(&config_lock, K_FOREVER);
 	copy_string(settings.mesh_id, sizeof(settings.mesh_id), mesh_id);
 	copy_string(settings.passphrase, sizeof(settings.passphrase), passphrase);
-	settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
+	settings.user_id_high = user_id_high;
+	settings.user_id_low = user_id_low;
+	copy_string(settings.user_name, sizeof(settings.user_name), user_name);
+	settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+	settings.device_gps_enabled = use_device_gps;
 	settings.share_location = has_location;
 	settings.latitude = has_location ? latitude : 0;
 	settings.longitude = has_location ? longitude : 0;
@@ -632,6 +642,7 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 	ai_edgez_halow_Beacon beacon = ai_edgez_halow_Beacon_init_zero;
 	struct edgez_gps_fix gps_fix;
 	struct edgez_imu_sample imu_sample;
+	int32_t battery_mv;
 	pb_ostream_t stream;
 	size_t off = 2U + EDGEZ_VENDOR_LEN;
 
@@ -686,6 +697,15 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 		longitude->type = ai_edgez_halow_SensorType_SENSOR_LONGITUDE;
 		longitude->which_value = ai_edgez_halow_SensorData_float_value_tag;
 		longitude->value.float_value = longitude_value;
+	}
+	if (edgez_battery_read_mv(&battery_mv) == 0 &&
+	    beacon.sensor_data_count < ARRAY_SIZE(beacon.sensor_data)) {
+		ai_edgez_halow_SensorData *battery =
+			&beacon.sensor_data[beacon.sensor_data_count++];
+
+		battery->type = ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE;
+		battery->which_value = ai_edgez_halow_SensorData_float_value_tag;
+		battery->value.float_value = battery_mv / 1000.0f;
 	}
 	if ((snapshot.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
 	     snapshot.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR) &&

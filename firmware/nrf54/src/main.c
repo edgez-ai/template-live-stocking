@@ -19,6 +19,7 @@
 #include "livestocking_config.h"
 #include "meshtastic_phone_api.h"
 #include "edgez_config.h"
+#include "edgez_battery.h"
 #include "edgez_gps.h"
 #include "edgez_imu.h"
 #include "edgez_reboot.h"
@@ -1788,6 +1789,13 @@ int main(void)
 			LOG_ERR("Failed to configure KEY pin: %d", rc);
 		} else {
 			button_ready = true;
+		}
+	}
+	{
+		int battery_rc = edgez_battery_init();
+
+		if (battery_rc < 0) {
+			LOG_WRN("Battery voltage sensing unavailable: %d", battery_rc);
 		}
 	}
 

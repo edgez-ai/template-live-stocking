@@ -150,6 +150,7 @@ enum SensorType {
   SENSOR_GYRO_X = 9;   // angular velocity in rad/s
   SENSOR_GYRO_Y = 10;  // angular velocity in rad/s
   SENSOR_GYRO_Z = 11;  // angular velocity in rad/s
+  SENSOR_BATTERY_VOLTAGE = 12;  // volts
 }
 
 message SensorData {

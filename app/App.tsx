@@ -32,7 +32,7 @@ type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel"
 type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; farmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
-type DeviceLocationChoice = "none" | "current" | "map";
+type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type VoltagePoint = { timestamp: number; value: number };
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 
@@ -301,6 +301,19 @@ function serialFromBleName(name: string) {
   const serial = /^(PROV_|NRF_)/i.test(name) ? name.slice(name.indexOf("_") + 1).toUpperCase() : "";
   if (!/^[A-F0-9]{12}$/.test(serial)) throw new Error(`Invalid provisioning name: ${name}`);
   return serial;
+}
+
+function beaconName(value: string) {
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const encoded = encodeURIComponent(character);
+    const width = encoded.startsWith("%") ? encoded.length / 3 : 1;
+    if (bytes + width > 64) break;
+    result += character;
+    bytes += width;
+  }
+  return result;
 }
 
 async function requestBlePermissions() {
@@ -675,8 +688,8 @@ export default function App() {
       if (appwriteDevice && appwriteDevice.metadata?.farmId !== farm.$id) {
         throw new Error("This device is already assigned to another farm. Open Settings to select that farm.");
       }
-      const coordinates = deviceLocationChoice === "none" ? null : coordinatesFromLocation(deviceLocation);
-      if (deviceLocationChoice !== "none" && !coordinates) throw new Error("Choose a valid device location before provisioning.");
+      const coordinates = deviceLocationChoice === "none" || deviceLocationChoice === "gps" ? null : coordinatesFromLocation(deviceLocation);
+      if (deviceLocationChoice !== "none" && deviceLocationChoice !== "gps" && !coordinates) throw new Error("Choose a valid device location before provisioning.");
       if (!appwriteDevice) {
         appwriteDevice = await deviceApi<Device>("", "POST", {
           serial,
@@ -705,6 +718,8 @@ export default function App() {
         halowChannel: farm.halowChannel,
         wifiUpstream: useUpstreamWifi === true,
         ...(isNrfDevice(selectedBleDevice) ? { halowFrequencyKHz: Math.round((channelsForCountry(farm.country).find((item) => item.number === farm.halowChannel)?.frequencyMHz || 0) * 1000) } : {}),
+        ...(isNrfDevice(selectedBleDevice) ? { deviceName: beaconName(name.trim() || serial) } : {}),
+        ...(isNrfDevice(selectedBleDevice) ? { useDeviceGps: deviceLocationChoice === "gps" } : {}),
         ...(coordinates ?? (isNrfDevice(selectedBleDevice) ? {} : { latitude: null, longitude: null })),
       });
       const mqttResponse = isNrfDevice(selectedBleDevice)
@@ -1046,6 +1061,7 @@ export default function App() {
               <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
+              {isNrfDevice(selectedBleDevice) && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this nRF54</Text></Pressable>}
               {!isNrfDevice(selectedBleDevice) && <><Text style={styles.fieldLabel}>PROOF OF POSSESSION (PoP)</Text><TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder="PoP shown on the device OLED" autoCapitalize="none" autoCorrect={false} /></>}
               <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (!isNrfDevice(selectedBleDevice) && !proofOfPossession.trim())}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
@@ -1063,7 +1079,7 @@ export default function App() {
               </>}
             </>}
             {provisioningStep === 4 && selectedBleDevice && <>
-              <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{currentFarm?.name}</Text><Text style={styles.muted}>{currentFarm?.location}, {currentFarm?.country} · Channel {currentFarm?.halowChannel}</Text><Text style={styles.muted}>Mesh ID: {currentFarm?.meshId}</Text><Text style={styles.muted}>Device location: {deviceLocationChoice === "none" ? "None" : deviceLocation}</Text></View>
+              <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{currentFarm?.name}</Text><Text style={styles.muted}>{currentFarm?.location}, {currentFarm?.country} · Channel {currentFarm?.halowChannel}</Text><Text style={styles.muted}>Mesh ID: {currentFarm?.meshId}</Text><Text style={styles.muted}>Device location: {deviceLocationChoice === "none" ? "None" : deviceLocationChoice === "gps" ? "Device GPS" : deviceLocation}</Text></View>
               <Text style={styles.dialogHelp}>{isNrfDevice(selectedBleDevice) ? "HaLow upstream. " : useUpstreamWifi ? `Upstream Wi-Fi: ${upstreamSsid}. ` : "No upstream Wi-Fi. "}The app will send the mesh settings and MQTT credential to the device.</Text>
               <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !bleConnected || !currentFarm}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
             </>}
