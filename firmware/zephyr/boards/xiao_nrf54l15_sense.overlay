@@ -1,0 +1,67 @@
+/*
+ * Seeed XIAO nRF54L15 Sense with the Seeed FGH100M HaLow shield.
+ *
+ * XIAO board pins:
+ *   USER_LED -> P2.00, active-low
+ *   USER_KEY -> P0.00, active-low with pull-up
+ *   IMU_SDA  -> P0.04 (TWIM30 SDA)
+ *   IMU_SCL  -> P0.03 (TWIM30 SCL)
+ *   GPS_RXD  -> D6 / P2.08 (disabled in this logging build)
+ *   GPS_TXD  -> D7 / P2.07 (disabled in this logging build)
+ *
+ * The board DTS already defines the LED, key, onboard LSM6DS3TR-C, and their
+ * pinctrl entries. This overlay only adds the application aliases and the
+ * external peripherals.
+ */
+
+/ {
+	aliases {
+		/delete-property/ gps0;
+	};
+
+	zephyr,user {
+		key-gpios = <&gpio0 0 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+};
+
+/* Reserve UART20 for the onboard debugger's PlatformIO VCOM console. */
+&uart20 {
+	status = "okay";
+};
+
+&xiao_serial {
+	status = "disabled";
+};
+
+&lsm6ds3tr_c {
+	status = "okay";
+	zephyr,deferred-init;
+};
+
+/*
+ * Seeed FGH100M shield:
+ *   D3  -> P1.07 (CS)
+ *   D8  -> P2.01 (SCK)
+ *   D9  -> P2.04 (MISO)
+ *   D10 -> P2.02 (MOSI)
+ *   D2  -> P1.06 (IRQ)
+ *   D4  -> P1.10 (BUSY)
+ *   D1  -> P1.05 (WAKE)
+ *   D0  -> P1.04 (RESETn)
+ */
+&xiao_spi {
+	status = "okay";
+	cs-gpios = <&xiao_d 3 GPIO_ACTIVE_LOW>;
+
+	morse_wifi: morse@0 {
+		status = "okay";
+		compatible = "morse,mm6108";
+		spi-max-frequency = <12000000>;
+		reg = <0>;
+
+		spi-irq-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&xiao_d 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		wakeup-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
+		resetn-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>;
+	};
+};

@@ -1,0 +1,5 @@
+config WIFI_MORSE_FS
+	bool "Use the upstream Morse binary driver"
+	default n
+
+rsource "drivers/wifi/morse_sm/Kconfig.morse_sm"

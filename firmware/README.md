@@ -1,5 +1,24 @@
 # Device firmware
 
+## KeepTeen nRF54L15
+
+Build the nRF54L15/MM6108 target with:
+
+```sh
+pio run -e keepteen-nrf54l15
+```
+
+This target uses the prebuilt Morse Micro Zephyr package in
+`modules/mm-iot-zephyr-prebuilt` and the nRF54 application port in `nrf54/`.
+The package contains `libmorse.a`, public headers, radio firmware, and the
+KeepTeen board calibration file; it contains no Morse implementation source.
+The nRF54 application currently follows `edge-device-nrf54` and uses its
+Zephyr BLE/Meshtastic provisioning protocol. The Live Stocking MQTT
+provisioning and telemetry behavior described below applies to the ESP32-S3
+target until it is ported to nRF54.
+
+## Heltec HT-HC33
+
 The ESP32-S3 derives its Appwrite serial from the Wi-Fi station MAC as
 `<12 uppercase hex digits>`, for example `AABBCCDDEEFF`. It advertises it as
 `PROV_AABBCCDDEEFF` so the provisioning client can obtain the serial by stripping

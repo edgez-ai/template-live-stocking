@@ -1,0 +1,140 @@
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/*
+ * Heltec HC01 on the XIAO nRF54L15, using the legacy external IMU route:
+ *   HALOW_POWER_EN -> P2.00, active-high
+ *   LED            -> P2.05, active-low
+ *   KEY            -> P2.03, active-low with pull-up
+ *   IMU_SCL        -> P2.06 (TWIM21 SCL)
+ *   IMU_SDA        -> P2.08 (TWIM21 SDA)
+ */
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+
+		user_led: user_led {
+			gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+			label = "User LED";
+		};
+	};
+
+	aliases {
+		led0 = &user_led;
+		imu0 = &lsm6ds3_hc01;
+		/delete-property/ gps0;
+	};
+
+	zephyr,user {
+		halow-power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
+		key-gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+};
+
+&spi00_default {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+			<NRF_PSEL(SPIM_MISO, 2, 4)>,
+			<NRF_PSEL(SPIM_MOSI, 2, 2)>;
+	};
+};
+
+&spi00_sleep {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+			<NRF_PSEL(SPIM_MISO, 2, 4)>,
+			<NRF_PSEL(SPIM_MOSI, 2, 2)>;
+	};
+};
+
+&pinctrl {
+	hc01_i2c21_default: hc01_i2c21_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 2, 6)>,
+				<NRF_PSEL(TWIM_SDA, 2, 8)>;
+			bias-pull-up;
+		};
+	};
+
+	hc01_i2c21_sleep: hc01_i2c21_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 2, 6)>,
+				<NRF_PSEL(TWIM_SDA, 2, 8)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* UART21 and I2C21 share the same nRF serial peripheral. */
+&uart21 {
+	status = "disabled";
+};
+
+&i2c21 {
+	status = "okay";
+	pinctrl-0 = <&hc01_i2c21_default>;
+	pinctrl-1 = <&hc01_i2c21_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+
+	lsm6ds3_hc01: lsm6ds3@6a {
+		compatible = "st,lsm6dsl";
+		reg = <0x6a>;
+		status = "okay";
+		zephyr,deferred-init;
+	};
+};
+
+/* Disable the stock XIAO Sense IMU route on I2C30. */
+&lsm6ds3tr_c {
+	status = "disabled";
+};
+
+&i2c30 {
+	status = "disabled";
+};
+
+&rfsw_ctl {
+	status = "disabled";
+};
+
+&rfsw_pwr {
+	status = "disabled";
+};
+
+&usr_btn {
+	gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	label = "KEY";
+};
+
+/*
+ * Heltec HC01 / Morse MM6108 SPI interface:
+ *   D3  -> P1.07 (CS)
+ *   D8  -> P2.01 (SCK)
+ *   D9  -> P2.04 (MISO)
+ *   D10 -> P2.02 (MOSI)
+ *   D2  -> P1.06 (IRQ)
+ *   D4  -> P1.10 (BUSY)
+ *   D1  -> P1.05 (WAKE)
+ *   D0  -> P1.04 (RESETn)
+ */
+&xiao_spi {
+	status = "okay";
+	cs-gpios = <&xiao_d 3 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi00_default>;
+	pinctrl-1 = <&spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	morse_wifi: morse@0 {
+		status = "okay";
+		compatible = "morse,mm6108";
+		spi-max-frequency = <12000000>;
+		reg = <0>;
+		power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
+
+		spi-irq-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&xiao_d 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		wakeup-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
+		resetn-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>;
+	};
+};

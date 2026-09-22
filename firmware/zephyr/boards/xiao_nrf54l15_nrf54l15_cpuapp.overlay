@@ -1,0 +1,164 @@
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/*
+ * KeepTeen nRF54L15 device overrides.
+ *   HALOW_POWER_EN -> P2.00, active-high
+ *   LED            -> P2.05, active-low
+ *   KEY            -> P2.03, active-low with pull-up
+ *   IMU_SCL        -> P0.04 (TWIM30 SCL)
+ *   IMU_SDA        -> P0.03 (TWIM30 SDA)
+ *   GPS_RXD        -> P1.11 (MCU UART TX) [temporary swapped-pin test]
+ *   GPS_TXD        -> P1.12 (MCU UART RX) [temporary swapped-pin test]
+ */
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+
+		user_led: user_led {
+			gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+			label = "User LED";
+		};
+	};
+
+	aliases {
+		led0 = &user_led;
+		imu0 = &lsm6ds3tr_c;
+		gps0 = &uart22;
+	};
+
+	zephyr,user {
+		halow-power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
+		key-gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	};
+};
+
+&spi00_default {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+			<NRF_PSEL(SPIM_MISO, 2, 4)>,
+			<NRF_PSEL(SPIM_MOSI, 2, 2)>;
+	};
+};
+
+&spi00_sleep {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 2, 1)>,
+			<NRF_PSEL(SPIM_MISO, 2, 4)>,
+			<NRF_PSEL(SPIM_MOSI, 2, 2)>;
+	};
+};
+
+&pinctrl {
+	i2c30_default: i2c30_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 4)>,
+				<NRF_PSEL(TWIM_SDA, 0, 3)>;
+			bias-pull-up;
+		};
+	};
+
+	i2c30_sleep: i2c30_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SCL, 0, 4)>,
+				<NRF_PSEL(TWIM_SDA, 0, 3)>;
+			low-power-enable;
+		};
+	};
+
+	gps_uart21_default: gps_uart21_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 1, 11)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 1, 12)>;
+			bias-pull-up;
+		};
+	};
+
+	gps_uart21_sleep: gps_uart21_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 1, 11)>,
+				<NRF_PSEL(UART_RX, 1, 12)>;
+			low-power-enable;
+		};
+	};
+
+};
+
+/* Diagnostics use SEGGER RTT instead of the board UART. */
+&uart20 {
+	status = "disabled";
+};
+
+/delete-node/ &uart21;
+
+&uart22 {
+	status = "okay";
+	current-speed = <9600>;
+	pinctrl-0 = <&gps_uart21_default>;
+	pinctrl-1 = <&gps_uart21_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/delete-node/ &i2c22;
+
+&i2c30 {
+	status = "okay";
+	pinctrl-0 = <&i2c30_default>;
+	pinctrl-1 = <&i2c30_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+/* The external IMU is routed through I2C30 on P0.04/P0.03. */
+&lsm6ds3tr_c {
+	status = "okay";
+	zephyr,deferred-init;
+};
+
+&rfsw_ctl {
+	status = "disabled";
+};
+
+&rfsw_pwr {
+	status = "disabled";
+};
+
+&usr_btn {
+	gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	label = "KEY";
+};
+
+/*
+ * Morse Micro Wi-Fi HaLow:
+ *   D3  -> P1.07 (CS)
+ *   D8  -> P2.01 (SCK)
+ *   D9  -> P2.04 (MISO)
+ *   D10 -> P2.02 (MOSI)
+ *   D2  -> P1.06 (IRQ)
+ *   D4  -> P1.10 (BUSY)
+ *   D1  -> P1.05 (WAKE)
+ *   D0  -> P1.04 (RESETn)
+ */
+&xiao_spi {
+	status = "okay";
+	cs-gpios = <&xiao_d 3 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&spi00_default>;
+	pinctrl-1 = <&spi00_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	morse_wifi: morse@0 {
+		status = "okay";
+		compatible = "morse,mm6108";
+		spi-max-frequency = <12000000>;
+		reg = <0>;
+		power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
+
+		spi-irq-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&xiao_d 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		wakeup-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
+		resetn-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>;
+	};
+};
