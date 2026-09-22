@@ -77,23 +77,38 @@ certificate bundle; certificate verification is not disabled. The handler
 validates the Appwrite serial syntax, stores the credential in NVS, and
 publishes an online event to
 `projects/<projectId>/devices/<serial>/telemetry/<channel>` after Wi-Fi and MQTT
-connect. Every 30 seconds it reads the HT-HC33 battery voltage using its
-GPIO20 controlled divider and GPIO1 ADC input. It publishes a single QoS 1
-JSON message to `projects/<projectId>/devices/<serial>/telemetry/status`:
+connect. The HT-HC33 queues decoded remote HaLow beacon readings in arrival
+order, including repeated readings from the same `clientId`. It publishes a
+batch when five remote readings are queued or 30 seconds have passed, whichever
+comes first. Each batch also includes a fresh HT-HC33 battery reading from its
+GPIO20 controlled divider and GPIO1 ADC input. The QoS 1 JSON payload sent to
+`projects/<projectId>/devices/<serial>/telemetry/status` is an array:
 
 ```json
-{
-  "status": "online",
-  "batteryVoltageMv": 3840,
-  "unit": "millivolt",
-  "latitude": 59.3293,
-  "longitude": 18.0686
-}
+[
+  {
+    "clientId": "11111111-1111-4111-8111-111111111111",
+    "status": "online",
+    "batteryVoltageMv": 3840,
+    "unit": "millivolt",
+    "latitude": 59.3293,
+    "longitude": 18.0686
+  },
+  {
+    "clientId": "22222222-2222-4222-8222-222222222222",
+    "status": "online",
+    "batteryVoltageMv": 3700,
+    "unit": "millivolt",
+    "sensors": [{ "type": 12, "value": 3.7 }]
+  }
+]
 ```
 
 The ADC is calibrated and the measured divider voltage is doubled to recover
 the battery voltage. A disconnected battery omits the voltage fields; status
-and any configured location still publish.
+and any configured location still publish. The in-memory queue holds up to 32
+remote readings while waiting to publish; overflow is logged and drops the new
+reading.
 The firmware also subscribes at QoS 1 to
 `projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.

@@ -15,6 +15,22 @@ constexpr char kTag[] = "halow";
 bool radio_initialized;
 bool ip_initialized;
 halow_ready_callback_t ready_callback;
+halow_beacon_callback_t beacon_callback;
+struct mmwlan_beacon_vendor_ie_filter beacon_filter{};
+
+void on_beacon_vendor_ie(const uint8_t *ies, uint32_t length,
+                         const uint8_t *, void *) {
+  if (!beacon_callback || !ies) return;
+  for (size_t offset = 0; offset + 2 <= length;) {
+    const size_t ie_length = ies[offset + 1];
+    if (offset + 2 + ie_length > length) break;
+    if (ies[offset] == 221 && ie_length > 5 &&
+        std::memcmp(ies + offset + 2, "EdgeZ", 5) == 0) {
+      beacon_callback(ies + offset + 7, ie_length - 5);
+    }
+    offset += 2 + ie_length;
+  }
+}
 
 const struct mmwlan_s1g_channel *find_channel(const char *country, uint8_t channel) {
   if (!country || std::strlen(country) != 2 || channel == 0) return nullptr;
@@ -58,6 +74,10 @@ bool halow_channel_supported(const char *country, uint8_t channel) {
   return find_channel(country, channel) != nullptr;
 }
 
+void halow_set_beacon_callback(halow_beacon_callback_t callback) {
+  beacon_callback = callback;
+}
+
 esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
                         const char *country, uint8_t channel,
                         halow_ready_callback_t on_ready) {
@@ -69,6 +89,17 @@ esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
   if (result != ESP_OK) return result;
   ready_callback = on_ready;
   mmipal_set_link_status_callback(link_status);
+  if (beacon_callback) {
+    beacon_filter.cb = on_beacon_vendor_ie;
+    beacon_filter.n_ouis = 1;
+    beacon_filter.ouis[0][0] = 'E';
+    beacon_filter.ouis[0][1] = 'd';
+    beacon_filter.ouis[0][2] = 'g';
+    if (mmwlan_update_beacon_vendor_ie_filter(&beacon_filter) != MMWLAN_SUCCESS) {
+      ESP_LOGE(kTag, "Could not install EdgeZ beacon filter");
+      return ESP_FAIL;
+    }
+  }
 
   const auto *selected = find_channel(country, channel);
   struct mmwlan_sta_args args = MMWLAN_STA_ARGS_INIT;

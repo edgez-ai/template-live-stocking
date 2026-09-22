@@ -19,11 +19,14 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
+#include "pb_decode.h"
+#include "usb_control.pb.h"
 
 namespace {
 constexpr char kTag[] = "iot_prov";
@@ -33,6 +36,7 @@ constexpr char kLocationNamespace[] = "location";
 constexpr char kMqttEndpoint[] = "mqtt-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kBatteryPublishInterval = pdMS_TO_TICKS(30000);
+constexpr size_t kBatchRecordCount = 5;
 constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
 constexpr adc_channel_t kBatteryAdcChannel = ADC_CHANNEL_0;  // GPIO1 / ADC_IN
 constexpr EventBits_t kNetworkConnected = BIT0;
@@ -63,6 +67,17 @@ struct DeviceLocation {
   int32_t longitude_e6;
 };
 
+struct BeaconFrame {
+  uint16_t length;
+  uint8_t data[250];
+};
+
+struct RemoteBeacon {
+  char client_id[37];
+  pb_size_t sensor_data_count;
+  ai_edgez_halow_SensorData sensor_data[9];
+};
+
 EventGroupHandle_t state_events;
 esp_mqtt_client_handle_t mqtt_client;
 adc_oneshot_unit_handle_t battery_adc;
@@ -76,6 +91,8 @@ char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
 bool halow_connect_started = false;
+QueueHandle_t beacon_queue;
+QueueHandle_t telemetry_queue;
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
@@ -226,15 +243,134 @@ void load_device_location() {
   nvs_close(handle);
 }
 
-void append_location(char *payload, size_t capacity) {
-  if (!device_location.has_location) return;
-  const size_t length = std::strlen(payload);
-  if (length == 0 || length >= capacity) return;
-  // The caller leaves the closing brace as the last character.
-  std::snprintf(payload + length - 1, capacity - length + 1,
-                ",\"latitude\":%.6f,\"longitude\":%.6f}",
-                device_location.latitude_e6 / 1000000.0,
-                device_location.longitude_e6 / 1000000.0);
+void enqueue_beacon(const uint8_t *data, size_t length) {
+  if (!beacon_queue || !data || length == 0 || length > sizeof(BeaconFrame::data)) return;
+  BeaconFrame frame{};
+  frame.length = length;
+  std::memcpy(frame.data, data, length);
+  if (xQueueSend(beacon_queue, &frame, 0) != pdTRUE) {
+    ESP_LOGW(kTag, "Raw HaLow beacon queue full; record dropped");
+  }
+}
+
+void decode_remote_beacon(const BeaconFrame &frame) {
+  ai_edgez_halow_Beacon beacon = ai_edgez_halow_Beacon_init_zero;
+  pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.length);
+  if (!pb_decode(&stream, ai_edgez_halow_Beacon_fields, &beacon) ||
+      (beacon.user_id_high == 0 && beacon.user_id_low == 0)) return;
+
+  RemoteBeacon reading{};
+  std::snprintf(reading.client_id, sizeof(reading.client_id),
+                "%08llx-%04llx-%04llx-%04llx-%012llx",
+                static_cast<unsigned long long>(beacon.user_id_high >> 32),
+                static_cast<unsigned long long>((beacon.user_id_high >> 16) & 0xffff),
+                static_cast<unsigned long long>(beacon.user_id_high & 0xffff),
+                static_cast<unsigned long long>(beacon.user_id_low >> 48),
+                static_cast<unsigned long long>(beacon.user_id_low & 0xffffffffffffULL));
+  if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) return;
+  float latitude = beacon.latitude;
+  float longitude = beacon.longitude;
+  bool has_latitude = false;
+  bool has_longitude = false;
+  for (pb_size_t i = 0; i < beacon.sensor_data_count; ++i) {
+    const auto &sensor = beacon.sensor_data[i];
+    if (sensor.which_value == ai_edgez_halow_SensorData_float_value_tag &&
+        std::isfinite(sensor.value.float_value)) {
+      if (sensor.type == ai_edgez_halow_SensorType_SENSOR_LATITUDE) {
+        latitude = sensor.value.float_value;
+        has_latitude = true;
+      } else if (sensor.type == ai_edgez_halow_SensorType_SENSOR_LONGITUDE) {
+        longitude = sensor.value.float_value;
+        has_longitude = true;
+      }
+    }
+  }
+  if (has_latitude == has_longitude && std::isfinite(latitude) &&
+      std::isfinite(longitude) && latitude >= -90.0f && latitude <= 90.0f &&
+      longitude >= -180.0f && longitude <= 180.0f &&
+      (latitude != 0.0f || longitude != 0.0f)) {
+    auto &lat = reading.sensor_data[reading.sensor_data_count++];
+    lat.type = ai_edgez_halow_SensorType_SENSOR_LATITUDE;
+    lat.which_value = ai_edgez_halow_SensorData_float_value_tag;
+    lat.value.float_value = latitude;
+    auto &lon = reading.sensor_data[reading.sensor_data_count++];
+    lon.type = ai_edgez_halow_SensorType_SENSOR_LONGITUDE;
+    lon.which_value = ai_edgez_halow_SensorData_float_value_tag;
+    lon.value.float_value = longitude;
+  }
+  for (pb_size_t i = 0; i < beacon.sensor_data_count &&
+                         reading.sensor_data_count < 9; ++i) {
+    const auto &sensor = beacon.sensor_data[i];
+    if (sensor.type == ai_edgez_halow_SensorType_SENSOR_LATITUDE ||
+        sensor.type == ai_edgez_halow_SensorType_SENSOR_LONGITUDE) continue;
+    reading.sensor_data[reading.sensor_data_count++] = sensor;
+  }
+
+  if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
+    ESP_LOGW(kTag, "Remote telemetry queue full; beacon record dropped");
+}
+
+void remote_beacon_task(void *) {
+  BeaconFrame frame{};
+  while (true) {
+    if (xQueueReceive(beacon_queue, &frame, portMAX_DELAY) == pdTRUE)
+      decode_remote_beacon(frame);
+  }
+}
+
+void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t count) {
+  static constexpr const char *kFields[] = {
+      nullptr, "temperature", "humidity", "latitude", "longitude", "length",
+      "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", nullptr};
+  for (size_t record_index = 0; record_index < count; ++record_index) {
+    const auto &reading = records[record_index];
+    cJSON *entry = cJSON_CreateObject();
+    if (!entry) continue;
+    cJSON_AddStringToObject(entry, "clientId", reading.client_id);
+    cJSON_AddStringToObject(entry, "status", "online");
+    cJSON *sensors = cJSON_CreateArray();
+    if (sensors) cJSON_AddItemToObject(entry, "sensors", sensors);
+    for (pb_size_t i = 0; i < reading.sensor_data_count; ++i) {
+      const auto &sensor = reading.sensor_data[i];
+      cJSON *value = nullptr;
+      switch (sensor.which_value) {
+        case ai_edgez_halow_SensorData_bool_value_tag:
+          value = cJSON_CreateBool(sensor.value.bool_value);
+          break;
+        case ai_edgez_halow_SensorData_int_value_tag:
+          value = cJSON_CreateNumber(sensor.value.int_value);
+          break;
+        case ai_edgez_halow_SensorData_float_value_tag:
+          if (std::isfinite(sensor.value.float_value))
+            value = cJSON_CreateNumber(sensor.value.float_value);
+          break;
+        default: break;
+      }
+      if (!value) continue;
+      if (sensors) {
+        cJSON *record = cJSON_CreateObject();
+        if (record) {
+          cJSON_AddNumberToObject(record, "type", sensor.type);
+          cJSON_AddItemToObject(record, "value", value);
+          cJSON_AddItemToArray(sensors, record);
+        } else cJSON_Delete(value);
+      } else cJSON_Delete(value);
+      if (sensor.which_value != ai_edgez_halow_SensorData_float_value_tag ||
+          !std::isfinite(sensor.value.float_value)) continue;
+      if (sensor.type == ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE) {
+        const int millivolts = static_cast<int>(std::lround(sensor.value.float_value * 1000.0f));
+        if (millivolts >= 2500 && millivolts <= 5000) {
+          cJSON_AddNumberToObject(entry, "batteryVoltageMv", millivolts);
+          cJSON_AddStringToObject(entry, "unit", "millivolt");
+        }
+      } else if (sensor.type >= ai_edgez_halow_SensorType_SENSOR_TEMPERATURE &&
+                 sensor.type <= ai_edgez_halow_SensorType_SENSOR_GYRO_Z &&
+                 kFields[sensor.type]) {
+        cJSON_AddNumberToObject(entry, kFields[sensor.type], sensor.value.float_value);
+      }
+    }
+    cJSON_AddItemToArray(batch, entry);
+  }
 }
 
 esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_length,
@@ -377,32 +513,65 @@ esp_err_t read_battery_millivolts(int *battery_mv) {
 }
 
 void battery_telemetry_task(void *) {
+  RemoteBeacon pending[kBatchRecordCount]{};
+  size_t pending_count = 0;
+  TickType_t last_publish_at = xTaskGetTickCount();
   while (true) {
     xEventGroupWaitBits(state_events, kMqttConnected, pdFALSE, pdTRUE, portMAX_DELAY);
+    const TickType_t elapsed = xTaskGetTickCount() - last_publish_at;
+    const TickType_t remaining = elapsed < kBatteryPublishInterval
+                                     ? kBatteryPublishInterval - elapsed : 0;
+    if (pending_count < kBatchRecordCount &&
+        xQueueReceive(telemetry_queue, &pending[pending_count], remaining) == pdTRUE) {
+      ++pending_count;
+      if (pending_count < kBatchRecordCount) continue;
+    }
+    if (!(xEventGroupGetBits(state_events) & kMqttConnected)) continue;
 
     int battery_mv = 0;
     const esp_err_t result = read_battery_millivolts(&battery_mv);
-    char payload[160] = "{\"status\":\"online\"}";
+    cJSON *batch = cJSON_CreateArray();
+    cJSON *self = cJSON_CreateObject();
+    if (!batch || !self) {
+      cJSON_Delete(batch);
+      cJSON_Delete(self);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+    cJSON_AddStringToObject(self, "clientId", mqtt_config.client_id);
+    cJSON_AddStringToObject(self, "status", "online");
     if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
-      std::snprintf(payload, sizeof(payload),
-                    "{\"status\":\"online\",\"batteryVoltageMv\":%d,\"unit\":\"millivolt\"}",
-                    battery_mv);
+      cJSON_AddNumberToObject(self, "batteryVoltageMv", battery_mv);
+      cJSON_AddStringToObject(self, "unit", "millivolt");
     } else if (result != ESP_OK) {
       ESP_LOGW(kTag, "Battery ADC read failed: %s", esp_err_to_name(result));
     } else if (battery_mv < 2500 || battery_mv > 5000) {
       ESP_LOGW(kTag, "Battery voltage %d mV outside expected range; skipping telemetry", battery_mv);
     }
-    append_location(payload, sizeof(payload));
-    if (xEventGroupGetBits(state_events) & kMqttConnected) {
+    if (device_location.has_location) {
+      cJSON_AddNumberToObject(self, "latitude", device_location.latitude_e6 / 1000000.0);
+      cJSON_AddNumberToObject(self, "longitude", device_location.longitude_e6 / 1000000.0);
+    }
+    cJSON_AddItemToArray(batch, self);
+    append_remote_telemetry(batch, pending, pending_count);
+    char *payload = cJSON_PrintUnformatted(batch);
+    int message_id = -1;
+    if (payload && (xEventGroupGetBits(state_events) & kMqttConnected)) {
       char topic[384]{};
       std::snprintf(topic, sizeof(topic),
                     "projects/%s/devices/%s/telemetry/%s",
                     mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
-      const int message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
-      ESP_LOGI(kTag, "Unified telemetry published to %s (%d): %s", topic, message_id, payload);
+      message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+      if (message_id >= 0)
+        ESP_LOGI(kTag, "Telemetry batch published to %s (%d): %u remote records",
+                 topic, message_id, static_cast<unsigned>(pending_count));
     }
-
-    vTaskDelay(kBatteryPublishInterval);
+    cJSON_free(payload);
+    cJSON_Delete(batch);
+    if (message_id >= 0) {
+      pending_count = 0;
+      last_publish_at = xTaskGetTickCount();
+    } else vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -553,6 +722,12 @@ extern "C" void app_main() {
   ESP_LOGI(kTag, "Device serial: %s", device_serial);
   state_events = xEventGroupCreate();
   ESP_ERROR_CHECK(state_events ? ESP_OK : ESP_ERR_NO_MEM);
+  beacon_queue = xQueueCreate(16, sizeof(BeaconFrame));
+  telemetry_queue = xQueueCreate(32, sizeof(RemoteBeacon));
+  ESP_ERROR_CHECK(beacon_queue && telemetry_queue ? ESP_OK : ESP_ERR_NO_MEM);
+  halow_set_beacon_callback(enqueue_beacon);
+  ESP_ERROR_CHECK(xTaskCreate(remote_beacon_task, "remote_beacons", 4096, nullptr, 5, nullptr) == pdPASS
+                      ? ESP_OK : ESP_ERR_NO_MEM);
   if (load_mqtt_config()) xEventGroupSetBits(state_events, kMqttConfigured);
   load_device_location();
 

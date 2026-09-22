@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/main.js",
   "scripts": {
-    "check": "node --check src/main.js"
+    "check": "node --check src/main.js && node --test src/main.test.js"
   },
   "dependencies": {
     "node-appwrite": "^20.0.0"

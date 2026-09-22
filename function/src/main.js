@@ -59,25 +59,38 @@ export default async function main({ req, res, error }) {
   } catch {
     return json(res, { error: "MQTT payload must be valid JSON" }, 400);
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return json(res, { error: "MQTT payload must be a JSON object" }, 400);
+  const entries = Array.isArray(payload) ? payload : [payload];
+  if (!entries.length || entries.length > 16 || entries.some((entry) =>
+      !entry || typeof entry !== "object" || Array.isArray(entry))) {
+    return json(res, { error: "MQTT payload must contain 1 to 16 telemetry objects" }, 400);
   }
-  if ((route.channel === "status" || route.channel === "battery") &&
-      payload.batteryVoltageMv !== undefined &&
-      (!Number.isInteger(payload.batteryVoltageMv) || payload.batteryVoltageMv < 2500 ||
-       payload.batteryVoltageMv > 5000 || payload.unit !== "millivolt")) {
-    return json(res, { error: "Battery telemetry must contain a valid batteryVoltageMv and millivolt unit" }, 400);
+  if (JSON.stringify(payload).length > 10000) {
+    return json(res, { error: "MQTT payload is too large" }, 413);
   }
-  if (payload.latitude !== undefined || payload.longitude !== undefined) {
-    if (typeof payload.latitude !== "number" || !Number.isFinite(payload.latitude) ||
-        payload.latitude < -90 || payload.latitude > 90 ||
-        typeof payload.longitude !== "number" || !Number.isFinite(payload.longitude) ||
-        payload.longitude < -180 || payload.longitude > 180) {
-      return json(res, { error: "Telemetry location must contain valid latitude and longitude" }, 400);
+  for (const entry of entries) {
+    if (Array.isArray(payload) &&
+        (typeof entry.clientId !== "string" ||
+         !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.clientId))) {
+      return json(res, { error: "Each telemetry entry needs a device clientId" }, 400);
+    }
+    if (entry.clientId !== undefined && typeof entry.clientId !== "string") {
+      return json(res, { error: "Telemetry clientId must be a string" }, 400);
+    }
+    if ((route.channel === "status" || route.channel === "battery") &&
+        entry.batteryVoltageMv !== undefined &&
+        (!Number.isInteger(entry.batteryVoltageMv) || entry.batteryVoltageMv < 2500 ||
+         entry.batteryVoltageMv > 5000 || entry.unit !== "millivolt")) {
+      return json(res, { error: "Battery telemetry must contain a valid batteryVoltageMv and millivolt unit" }, 400);
+    }
+    if (entry.latitude !== undefined || entry.longitude !== undefined) {
+      if (typeof entry.latitude !== "number" || !Number.isFinite(entry.latitude) ||
+          entry.latitude < -90 || entry.latitude > 90 ||
+          typeof entry.longitude !== "number" || !Number.isFinite(entry.longitude) ||
+          entry.longitude < -180 || entry.longitude > 180) {
+        return json(res, { error: "Telemetry location must contain valid latitude and longitude" }, 400);
+      }
     }
   }
-  const serialized = JSON.stringify(payload);
-  if (serialized.length > 10000) return json(res, { error: "MQTT payload is too large" }, 413);
 
   const client = new Client()
     .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
@@ -90,27 +103,43 @@ export default async function main({ req, res, error }) {
     if (!device || device.serial !== route.serial) {
       return json(res, { error: "MQTT topic serial does not match the Appwrite device" }, 403);
     }
-    const readPermissions = (device.$permissions || []).filter((permission) => permission.startsWith("read("));
-    if (!readPermissions.length) {
-      return json(res, { error: "Appwrite device has no owner read permission" }, 409);
+    const targets = [];
+    for (const entry of entries) {
+      const targetId = entry.clientId || deviceId;
+      const target = targetId === deviceId ? device : await getDevice(req, targetId);
+      if (!target || target.$id !== targetId) {
+        return json(res, { error: "Telemetry clientId does not match an Appwrite device" }, 403);
+      }
+      if (targetId !== deviceId &&
+          (!device.metadata?.farmId || target.metadata?.farmId !== device.metadata.farmId)) {
+        return json(res, { error: "Remote beacon is not in the gateway's farm" }, 403);
+      }
+      const readPermissions = (target.$permissions || []).filter((permission) => permission.startsWith("read("));
+      if (!readPermissions.length) {
+        return json(res, { error: "Appwrite device has no owner read permission" }, 409);
+      }
+      targets.push({ entry, target, readPermissions });
     }
-
     const receivedAt = new Date().toISOString();
-    const row = await tables.createRow({
-      databaseId: DATABASE_ID,
-      tableId: TELEMETRY_TABLE_ID,
-      rowId: ID.unique(),
-      data: {
-        deviceId,
-        serial: route.serial,
-        channel: route.channel,
-        topic,
-        payload: serialized,
-        receivedAt,
-      },
-      permissions: readPermissions,
-    });
-    return json(res, { accepted: true, telemetryId: row.$id, receivedAt }, 201);
+    const telemetryIds = [];
+    for (const { entry, target, readPermissions } of targets) {
+      const row = await tables.createRow({
+        databaseId: DATABASE_ID,
+        tableId: TELEMETRY_TABLE_ID,
+        rowId: ID.unique(),
+        data: {
+          deviceId: target.$id,
+          serial: target.serial,
+          channel: route.channel,
+          topic,
+          payload: JSON.stringify(entry),
+          receivedAt,
+        },
+        permissions: readPermissions,
+      });
+      telemetryIds.push(row.$id);
+    }
+    return json(res, { accepted: true, telemetryId: telemetryIds[0], telemetryIds, receivedAt }, 201);
   } catch (caught) {
     error(caught instanceof Error ? caught.message : String(caught));
     return json(res, { error: "Could not persist MQTT telemetry" }, 500);
