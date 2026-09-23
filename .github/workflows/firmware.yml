@@ -37,31 +37,38 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/firmware/live-stocking-flash.bin dist/firmware/live-stocking-ota.bin --clobber
 
-  nrf54l15:
+  fgh200m:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Checkout private Morse MM8108 source
+        uses: actions/checkout@v5
+        with:
+          repository: edgez-ai/mm-iot-zephyr
+          ref: 539d6b2550d7c63b2140a5b5ce8b6cb8e019a604
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          path: firmware/modules/mm-iot-zephyr
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install PlatformIO
         run: python -m pip install platformio==6.1.18
-      - name: Build KeepTeen nRF54L15 firmware
-        run: pio run --project-dir firmware --environment keepteen-nrf54l15
-      - name: Package nRF54L15 HEX
+      - name: Build FGH200M firmware
+        run: pio run --project-dir firmware --environment seeed-xiao-nrf54l15-fgh200m
+      - name: Package FGH200M HEX
         shell: bash
         run: |
           set -euo pipefail
-          source=firmware/.pio/build/keepteen-nrf54l15/firmware.hex
+          source=firmware/.pio/build/seeed-xiao-nrf54l15-fgh200m/firmware.hex
           test -s "$source"
           mkdir -p dist/firmware
-          cp "$source" dist/firmware/live-stocking-nrf54l15.hex
+          cp "$source" dist/firmware/live-stocking-fgh200m.hex
       - uses: actions/upload-artifact@v6
         with:
-          name: live-stocking-nrf54l15
-          path: dist/firmware/live-stocking-nrf54l15.hex
-      - name: Attach nRF54L15 HEX to release
+          name: live-stocking-fgh200m
+          path: dist/firmware/live-stocking-fgh200m.hex
+      - name: Attach FGH200M HEX to release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/firmware/live-stocking-nrf54l15.hex --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/firmware/live-stocking-fgh200m.hex --clobber

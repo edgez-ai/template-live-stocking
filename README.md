@@ -115,10 +115,13 @@ Devices, and project-wide authentication settings.
 The separate `Build firmware` and `Build mobile app` GitHub Actions workflows
 run when a GitHub Release is published and can each be started independently
 with **Run workflow**. Firmware produces `live-stocking-flash.bin` for flashing
-at address `0x0` and `live-stocking-ota.bin` as the app-only OTA payload. Mobile
-produces `live-stocking-signed.apk` and `live-stocking-unsigned.apk`. Only these
-four files are attached to a GitHub Release; the two workflow-run artifacts
-contain the same files.
+at address `0x0`, `live-stocking-ota.bin` as the app-only OTA payload, and
+`live-stocking-fgh200m.hex` for the nRF54L15/MM8108 FGH200M carrier. Mobile
+produces `live-stocking-signed.apk` and `live-stocking-unsigned.apk`. These five
+files are attached to a GitHub Release; the workflow-run artifacts contain the
+same files. The FGH200M build checks out the private
+`edgez-ai/mm-iot-zephyr` source module with the repository Actions secret
+`GH_PERSONAL_ACCESS_TOKEN`.
 
 The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
 and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
