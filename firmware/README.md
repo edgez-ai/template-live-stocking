@@ -29,6 +29,20 @@ again; after the next successful configuration it turns off again. Hold USER
 for five seconds, then release it to erase the NVS storage partition and reboot
 unprovisioned. This clears the saved HaLow and MQTT configuration and any old BLE bonds.
 
+## FGH200M nRF54L15
+
+Build the nRF54L15/MM8108 target with the private Morse source module available
+at `modules/mm-iot-zephyr` or through `MMIOT_ZEPHYR_ROOT`:
+
+```sh
+pio run -e seeed-xiao-nrf54l15-fgh200m
+```
+
+This environment mirrors the FGH200M target in `edge-device-nrf54`. It uses the
+FGH200M carrier overlay in `zephyr/boards/xiao_nrf54l15_fgh200m.overlay`, the
+MM8108 radio firmware, and the temporary MF15457 calibration fallback selected
+by `zephyr/fgh200m.conf`.
+
 ## Heltec HT-HC33
 
 The ESP32-S3 derives its Appwrite serial from the Wi-Fi station MAC as
