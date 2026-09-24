@@ -8,7 +8,7 @@ import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, 
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
 import { EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
-import type { EdgezMapCamera, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
+import type { EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -41,6 +41,7 @@ type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type VoltagePoint = { timestamp: number; value: number };
 type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
+type GeofenceGeometry = { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
 type SettingsTab = "team" | "areas" | "rules";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 const defaultAreaColor = "#E88D29";
@@ -158,39 +159,31 @@ function areaGeometry(draft: AreaDraft) {
   return JSON.stringify({ center, vertices, color });
 }
 
+function geofenceBoundaryPoints(shape: GeofenceShape, geometry: GeofenceGeometry) {
+  if (shape === "polygon") {
+    return (geometry.vertices || []).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Math.abs(point.latitude) <= 90 && Math.abs(point.longitude) <= 180);
+  }
+  const center = geometry.center;
+  if (!center || !Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return [];
+  const radiusX = shape === "circle" ? Number(geometry.radiusMeters) : shape === "oval" ? Number(geometry.radiusXMeters) : Number(geometry.widthMeters) / 2;
+  const radiusY = shape === "circle" ? radiusX : shape === "oval" ? Number(geometry.radiusYMeters) : Number(geometry.heightMeters) / 2;
+  if (!Number.isFinite(radiusX) || !Number.isFinite(radiusY) || radiusX <= 0 || radiusY <= 0) return [];
+  const rotation = (Number(geometry.rotationDegrees) || 0) * Math.PI / 180;
+  const corners = shape === "rectangle" ? [[-radiusX, -radiusY], [radiusX, -radiusY], [radiusX, radiusY], [-radiusX, radiusY]] : Array.from({ length: 48 }, (_, index) => { const angle = index * Math.PI / 24; return [radiusX * Math.cos(angle), radiusY * Math.sin(angle)]; });
+  return corners.map(([east, north]) => {
+    const rotatedEast = east * Math.cos(rotation) - north * Math.sin(rotation);
+    const rotatedNorth = east * Math.sin(rotation) + north * Math.cos(rotation);
+    return { latitude: center.latitude + rotatedNorth / 111320, longitude: center.longitude + rotatedEast / (111320 * Math.max(0.01, Math.cos(center.latitude * Math.PI / 180))) };
+  });
+}
+
 function geofenceLine(area: GeofenceArea): EdgezMapLine | null {
   try {
-    const geometry = JSON.parse(area.geometry) as { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
-    const center = geometry.center;
-    if (!center || !Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return null;
-    let points: { latitude: number; longitude: number }[];
-    if (area.shape === "polygon") {
-      points = (geometry.vertices || []).filter((point) => Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Math.abs(point.latitude) <= 90 && Math.abs(point.longitude) <= 180);
-    } else {
-      const radiusX = area.shape === "circle" ? Number(geometry.radiusMeters) : area.shape === "oval" ? Number(geometry.radiusXMeters) : Number(geometry.widthMeters) / 2;
-      const radiusY = area.shape === "circle" ? radiusX : area.shape === "oval" ? Number(geometry.radiusYMeters) : Number(geometry.heightMeters) / 2;
-      if (!Number.isFinite(radiusX) || !Number.isFinite(radiusY) || radiusX <= 0 || radiusY <= 0) return null;
-      const rotation = (Number(geometry.rotationDegrees) || 0) * Math.PI / 180;
-      const corners = area.shape === "rectangle" ? [[-radiusX, -radiusY], [radiusX, -radiusY], [radiusX, radiusY], [-radiusX, radiusY]] : Array.from({ length: 48 }, (_, index) => { const angle = index * Math.PI / 24; return [radiusX * Math.cos(angle), radiusY * Math.sin(angle)]; });
-      points = corners.map(([east, north]) => {
-        const rotatedEast = east * Math.cos(rotation) - north * Math.sin(rotation);
-        const rotatedNorth = east * Math.sin(rotation) + north * Math.cos(rotation);
-        return { latitude: center.latitude + rotatedNorth / 111320, longitude: center.longitude + rotatedEast / (111320 * Math.max(0.01, Math.cos(center.latitude * Math.PI / 180))) };
-      });
-    }
+    const geometry = JSON.parse(area.geometry) as GeofenceGeometry;
+    const points = geofenceBoundaryPoints(area.shape, geometry);
     if (points.length < 3) return null;
     return { id: area.$id, points: [...points, points[0]], color: areaColor(geometry.color) };
   } catch { return null; }
-}
-
-function polygonScreenPoint(point: { latitude: number; longitude: number }, camera: EdgezMapCamera, width: number, height: number) {
-  const mercatorY = (latitude: number) => {
-    const radians = Math.max(-85.051128, Math.min(85.051128, latitude)) * Math.PI / 180;
-    return (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2;
-  };
-  const pixels = 256 * 2 ** camera.zoom;
-  const longitudeDelta = ((point.longitude - camera.longitude + 540) % 360) - 180;
-  return { x: width / 2 + longitudeDelta / 360 * pixels, y: height / 2 + (mercatorY(point.latitude) - mercatorY(camera.latitude)) * pixels };
 }
 
 const sensorType = { latitude: 3, longitude: 4, batteryVoltage: 12 } as const;
@@ -447,32 +440,31 @@ function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft;
   const [primary, setPrimary] = useState(Number(draft.primary) || 100);
   const [secondary, setSecondary] = useState(Number(draft.secondary) || 100);
   const [vertices, setVertices] = useState(draft.vertices);
-  const [camera, setCamera] = useState<EdgezMapCamera>({ ...initial, zoom: 16 });
-  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
   const resize = (setter: React.Dispatch<React.SetStateAction<number>>, amount: number) => setter((value) => Math.max(10, Math.min(100000, value + amount)));
   const polygonVertices = vertices.split(";").map((vertex) => coordinatesFromLocation(vertex)).filter((vertex): vertex is { latitude: number; longitude: number } => Boolean(vertex));
   const vertexCount = polygonVertices.length;
   const distinctVertexCount = new Set(polygonVertices.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`)).size;
-  const polygonPoints = polygonVertices.map((point) => polygonScreenPoint(point, camera, mapSize.width, mapSize.height));
-  const polygonEdges = polygonPoints.length >= 2 ? polygonPoints.map((point, index) => ({ start: point, end: polygonPoints[(index + 1) % polygonPoints.length] })).filter((_, index) => polygonPoints.length >= 3 || index === 0) : [];
   const addVertex = () => setVertices((value) => [...value.split(";").filter(Boolean), `${center.latitude.toFixed(6)},${center.longitude.toFixed(6)}`].join(";"));
   const removeVertex = () => setVertices((value) => value.split(";").filter(Boolean).slice(0, -1).join(";"));
-  const width = Math.max(56, Math.min(220, primary / 2));
-  const height = draft.shape === "circle" ? width : Math.max(56, Math.min(220, secondary / 2));
+  const boundaryPoints = geofenceBoundaryPoints(draft.shape, {
+    center,
+    radiusMeters: primary,
+    radiusXMeters: primary,
+    radiusYMeters: secondary,
+    widthMeters: primary,
+    heightMeters: secondary,
+    vertices: polygonVertices,
+  });
+  const previewLines: EdgezMapLine[] = boundaryPoints.length >= 2 ? [{
+    id: "area-preview",
+    points: boundaryPoints.length >= 3 ? [...boundaryPoints, boundaryPoints[0]] : boundaryPoints,
+    color: areaColor(draft.color),
+  }] : [];
   return <SafeAreaView style={styles.dialogPage}>
     <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>EDIT AREA ON MAP</Text><Text style={styles.dialogTitle}>{draft.name || "New area"}</Text></View><Pressable onPress={onCancel}><Text style={styles.close}>BACK</Text></Pressable></View>
-    <View style={styles.locationMap} onLayout={(event) => setMapSize({ width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height })}>
-      <EdgezOrganicMap ref={map} nodes={[]} centerLatitude={initial.latitude} centerLongitude={initial.longitude} zoom={16} enableMapDownloads style={styles.map} onMapReady={() => map.current?.getCamera()} onCameraChanged={(nextCamera) => { setCenter({ latitude: nextCamera.latitude, longitude: nextCamera.longitude }); setCamera(nextCamera); }} />
-      {draft.shape === "polygon"
-        ? <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-            {polygonEdges.map(({ start, end }, index) => {
-              const length = Math.hypot(end.x - start.x, end.y - start.y);
-              return <View key={`edge-${index}`} style={[styles.polygonEdge, { backgroundColor: draft.color, left: (start.x + end.x - length) / 2, top: (start.y + end.y) / 2 - 2, width: length, transform: [{ rotate: `${Math.atan2(end.y - start.y, end.x - start.x)}rad` }] }]} />;
-            })}
-            {polygonPoints.map((point, index) => <View key={`point-${index}`} style={[styles.polygonVertex, { backgroundColor: draft.color, left: point.x - 13, top: point.y - 13 }]}><Text style={styles.polygonVertexText}>{index + 1}</Text></View>)}
-            <View style={styles.mapCrosshair}><Text style={styles.mapCrosshairText}>＋</Text></View>
-          </View>
-        : <View pointerEvents="none" style={[styles.areaPreview, { width, height, marginLeft: -width / 2, marginTop: -height / 2, borderColor: draft.color, backgroundColor: `${draft.color}2e` }, draft.shape === "circle" && styles.areaCircle, draft.shape === "oval" && styles.areaOval, draft.shape === "rectangle" && styles.areaRectangle]} />}
+    <View style={styles.locationMap}>
+      <EdgezOrganicMap ref={map} nodes={[]} lines={previewLines} centerLatitude={initial.latitude} centerLongitude={initial.longitude} zoom={16} enableMapDownloads style={styles.map} onMapReady={() => map.current?.getCamera()} onCameraChanged={(nextCamera) => setCenter({ latitude: nextCamera.latitude, longitude: nextCamera.longitude })} />
+      <View pointerEvents="none" style={styles.mapCrosshair}><Text style={styles.mapCrosshairText}>＋</Text></View>
       <View style={styles.areaMapControls}>
         {draft.shape === "circle" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>RADIUS · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
         {draft.shape === "oval" && <><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>HORIZONTAL · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View><View style={styles.areaDimension}><Text style={styles.areaControlLabel}>VERTICAL · {secondary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setSecondary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View></>}
@@ -1482,7 +1474,7 @@ const styles = StyleSheet.create({
   selectField: { minHeight: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }, selectText: { color: "#0a3037", fontSize: 14 }, optionList: { borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", overflow: "hidden" }, optionRow: { minHeight: 46, paddingHorizontal: 15, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
   passphraseField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passphraseInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037" }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
   locationMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, mapCrosshair: { position: "absolute", left: "50%", top: "50%", marginLeft: -18, marginTop: -26, width: 36, height: 52, alignItems: "center", justifyContent: "center" }, mapCrosshairText: { color: "#0a8c87", fontSize: 42, fontWeight: "900", textShadowColor: "white", textShadowRadius: 4 }, locationFooter: { paddingHorizontal: 22, paddingVertical: 12, gap: 5, backgroundColor: "#f7faf9" },
-  areaPreview: { position: "absolute", left: "50%", top: "50%", borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "#0a8c872e" }, areaCircle: { borderRadius: 999 }, areaOval: { borderRadius: 999 }, areaRectangle: { borderRadius: 3 }, polygonEdge: { position: "absolute", height: 4, borderRadius: 2, backgroundColor: "#0a8c87" }, polygonVertex: { position: "absolute", width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: "white", backgroundColor: "#0a8c87", alignItems: "center", justifyContent: "center" }, polygonVertexText: { color: "white", fontSize: 11, fontWeight: "900" }, areaMapControls: { position: "absolute", right: 16, bottom: 20, gap: 8, alignItems: "flex-end" }, areaDimension: { gap: 4, alignItems: "flex-end" }, areaControlButtons: { flexDirection: "row", gap: 6 }, areaControl: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, areaControlText: { color: "white", fontSize: 28, fontWeight: "600" }, areaControlLabel: { color: "white", fontSize: 10, fontWeight: "800", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: "#092e35e8" },
+  areaMapControls: { position: "absolute", right: 16, bottom: 20, gap: 8, alignItems: "flex-end" }, areaDimension: { gap: 4, alignItems: "flex-end" }, areaControlButtons: { flexDirection: "row", gap: 6 }, areaControl: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, areaControlText: { color: "white", fontSize: 28, fontWeight: "600" }, areaControlLabel: { color: "white", fontSize: 10, fontWeight: "800", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: "#092e35e8" },
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },
   wifiHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, rescan: { color: "#0a8c87", fontSize: 10, fontWeight: "900" }, wifiNetwork: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, wifiNetworkSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" }, signal: { color: "#59716f", fontSize: 10, fontWeight: "700" },
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
