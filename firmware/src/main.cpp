@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <ctime>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "esp_adc/adc_cali.h"
@@ -12,6 +14,7 @@
 #include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -28,6 +31,9 @@
 #include "nvs_flash.h"
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
+#include "mbedtls/error.h"
+#include "mbedtls/x509_crt.h"
+#include "ota_proxy_cert.h"
 #include "pb_decode.h"
 #include "usb_control.pb.h"
 
@@ -217,6 +223,65 @@ bool publish_ota_status(const OtaCommand &command, const char *status, const cha
   return false;
 }
 
+void log_ota_url(const char *label, const char *url) {
+  if (!url || !url[0]) {
+    ESP_LOGW(kTag, "OTA %s URL is unavailable", label);
+    return;
+  }
+  char redacted[kMaxOtaUrlLength]{};
+  strlcpy(redacted, url, sizeof(redacted));
+  char *query = std::strchr(redacted, '?');
+  if (query) strlcpy(query, "?<redacted>", static_cast<size_t>(redacted + sizeof(redacted) - query));
+  ESP_LOGI(kTag, "OTA %s URL: %s", label, redacted);
+}
+
+void log_ota_client_url(const char *label, esp_http_client_handle_t client) {
+  char url[kMaxOtaUrlLength]{};
+  if (client && esp_http_client_get_url(client, url, sizeof(url)) == ESP_OK) {
+    log_ota_url(label, url);
+  } else {
+    ESP_LOGW(kTag, "Could not read OTA %s URL", label);
+  }
+}
+
+esp_err_t ota_http_event_handler(esp_http_client_event_t *event) {
+  if (!event) return ESP_OK;
+  if (event->event_id == HTTP_EVENT_ON_CONNECTED) {
+    log_ota_client_url("connected", event->client);
+    return ESP_OK;
+  }
+  if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key && event->header_value &&
+      strcasecmp(event->header_key, "Location") == 0) {
+    log_ota_url("redirect", event->header_value);
+    return ESP_OK;
+  }
+  if (event->event_id != HTTP_EVENT_ERROR) return ESP_OK;
+
+  log_ota_client_url("failed", event->client);
+  int mbedtls_error = 0;
+  int verify_flags = 0;
+  const esp_err_t tls_error = esp_http_client_get_and_clear_last_tls_error(
+      event->client, &mbedtls_error, &verify_flags);
+  ESP_LOGE(kTag,
+           "OTA transport diagnostics: esp-tls=%s (0x%x), mbedTLS=-0x%04x, "
+           "verify_flags=0x%08x, errno=%d",
+           esp_err_to_name(tls_error), static_cast<unsigned>(tls_error),
+           static_cast<unsigned>(mbedtls_error < 0 ? -mbedtls_error : mbedtls_error),
+           static_cast<unsigned>(verify_flags), esp_http_client_get_errno(event->client));
+  if (mbedtls_error != 0) {
+    char error_text[160]{};
+    mbedtls_strerror(mbedtls_error, error_text, sizeof(error_text));
+    ESP_LOGE(kTag, "OTA mbedTLS error: %s", error_text);
+  }
+  if (verify_flags != 0) {
+    char verify_text[512]{};
+    const int length = mbedtls_x509_crt_verify_info(
+        verify_text, sizeof(verify_text), "  - ", static_cast<uint32_t>(verify_flags));
+    if (length > 0) ESP_LOGE(kTag, "OTA certificate verification reasons:\n%s", verify_text);
+  }
+  return ESP_OK;
+}
+
 void publish_saved_ota_result() {
   OtaResult result{};
   if (!load_ota_result(&result) || result.state == OtaResultState::kPending) return;
@@ -231,12 +296,29 @@ void ota_task(void *) {
   while (true) {
     if (xQueueReceive(ota_queue, &command, portMAX_DELAY) != pdTRUE) continue;
     ESP_LOGI(kTag, "Starting OTA request %s", command.request_id);
+    log_ota_url("requested", command.url);
+    const time_t now = time(nullptr);
+    struct tm utc_time{};
+    if (gmtime_r(&now, &utc_time)) {
+      ESP_LOGI(kTag, "OTA certificate check time: %04d-%02d-%02dT%02d:%02d:%02dZ (epoch %lld)",
+               utc_time.tm_year + 1900, utc_time.tm_mon + 1, utc_time.tm_mday,
+               utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec,
+               static_cast<long long>(now));
+    } else {
+      ESP_LOGW(kTag, "OTA certificate check time unavailable (epoch %lld)",
+               static_cast<long long>(now));
+    }
+    ESP_LOGI(kTag, "OTA trust store: pinned github.edgez.biz self-signed certificate (%u PEM bytes)",
+             static_cast<unsigned>(sizeof(kOtaProxyCertPem)));
     show_device_status("FIRMWARE UPDATE", "DOWNLOADING");
     publish_ota_status(command, "pending", "downloading");
 
     esp_http_client_config_t http_config{};
     http_config.url = command.url;
-    http_config.crt_bundle_attach = esp_crt_bundle_attach;
+    // The OTA proxy uses a private, self-signed certificate so the device does
+    // not need to validate a resource-intensive public CA chain.
+    http_config.cert_pem = kOtaProxyCertPem;
+    http_config.event_handler = ota_http_event_handler;
     http_config.timeout_ms = 30000;
     http_config.keep_alive_enable = true;
     // GitHub release assets redirect to a signed Azure URL whose request target
