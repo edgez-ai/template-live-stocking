@@ -1,9 +1,9 @@
 # Binary Morse Micro Zephyr module
 
-This module contains a prebuilt `libmorse.a` for Zephyr 4.2.1 on the
-KeepTeen nRF54L15 with an MM6108 radio. It includes the Morse Micro stack,
-HostAP, packet memory, regulatory database, and Zephyr radio driver objects.
-The radio firmware and board calibration blob remain separate binary files.
+This module contains chip-specific prebuilt `libmorse.a` archives for Zephyr
+4.2.1 on the nRF54L15 with MM6108 (FGH100M) or MM8108 (FGH200M). It includes
+the Morse Micro stack, HostAP, packet memory, regulatory database, Zephyr radio
+driver objects, radio firmware, and board calibration blobs.
 
 The package contains headers needed by the firmware. It has no Morse Micro
 implementation source or MM-IoT SDK source tree. The archive is tied to the

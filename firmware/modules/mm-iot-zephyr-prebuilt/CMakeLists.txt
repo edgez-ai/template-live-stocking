@@ -1,5 +1,12 @@
-# Binary-only Morse Micro module for the KeepTeen nRF54L15/MM6108 profile.
-set(MORSE_BINARY_ARCHIVE "${CMAKE_CURRENT_LIST_DIR}/zephyr/blobs/lib/mm6108/arm-cortex-m33f/libmorse.a")
+# Binary-only Morse Micro module for nRF54L15 MM6108/MM8108 profiles.
+if(CONFIG_DT_HAS_MORSE_MM8108_ENABLED)
+  set(MORSE_BINARY_CHIP mm8108)
+elseif(CONFIG_DT_HAS_MORSE_MM6108_ENABLED)
+  set(MORSE_BINARY_CHIP mm6108)
+else()
+  message(FATAL_ERROR "No supported Morse MM6108/MM8108 devicetree node is enabled")
+endif()
+set(MORSE_BINARY_ARCHIVE "${CMAKE_CURRENT_LIST_DIR}/zephyr/blobs/lib/${MORSE_BINARY_CHIP}/arm-cortex-m33f/libmorse.a")
 if(CONFIG_WIFI_MORSE_SM)
   if(NOT EXISTS "${MORSE_BINARY_ARCHIVE}")
     message(FATAL_ERROR "Missing packaged Morse archive: ${MORSE_BINARY_ARCHIVE}")

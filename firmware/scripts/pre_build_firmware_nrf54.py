@@ -32,11 +32,12 @@ def is_complete_morse_module(path):
 
 
 if use_prebuilt:
-    binary_root = PROJECT_DIR / "modules" / "mm-iot-zephyr-prebuilt"
+    binary_dir = Path(env.GetProjectOption("custom_morse_prebuilt_dir", "modules/mm-iot-zephyr-prebuilt"))
+    binary_root = binary_dir if binary_dir.is_absolute() else PROJECT_DIR / binary_dir
     mm_root = Path(os.environ.get("MMIOT_ZEPHYR_BINARY_ROOT", binary_root)).expanduser().resolve()
-    archive = mm_root / "zephyr/blobs/lib/mm6108/arm-cortex-m33f/libmorse.a"
-    if MORSE_CHIP != "mm6108" or not archive.is_file() or not (mm_root / "include/mmwlan.h").is_file():
-        print(f"ERROR: Complete MM6108 binary Morse module not found at {mm_root}")
+    archive = mm_root / "zephyr" / "blobs" / "lib" / MORSE_CHIP / "arm-cortex-m33f" / "libmorse.a"
+    if not archive.is_file() or not (mm_root / "include/mmwlan.h").is_file():
+        print(f"ERROR: Complete {MORSE_CHIP.upper()} binary Morse module not found at {mm_root}")
         env.Exit(1)
 else:
     mm_root = module_root if is_complete_morse_module(module_root) else fallback_root
@@ -104,14 +105,6 @@ if not use_prebuilt and fallback_root != mm_root:
 
 blob_dir = mm_root / "zephyr" / "blobs"
 staged_files = [] if use_prebuilt else [
-    (
-        first_existing(
-            [root / "zephyr" / "blobs" / "lib" / "mm6108" / "arm-cortex-m33f" / "libmorse.a" for root in source_roots]
-            + [root / "submodules" / "mm-iot-sdk" / "framework" / "morselib" / "lib" / "arm-cortex-m33f" / "libmorse.a" for root in source_roots]
-        ),
-        blob_dir / "lib" / "mm6108" / "arm-cortex-m33f" / "libmorse.a",
-        "libmorse.a",
-    ),
     (
         first_existing(
             [root / "zephyr" / "blobs" / "firmware" / MORSE_FIRMWARE for root in source_roots]

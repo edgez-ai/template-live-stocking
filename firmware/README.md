@@ -8,8 +8,9 @@ Build the nRF54L15/MM6108 target with:
 pio run -e keepteen-nrf54l15
 ```
 
-This target uses the prebuilt Morse Micro Zephyr package in
-`modules/mm-iot-zephyr-prebuilt` and the nRF54 application port in `nrf54/`.
+This target uses the MM6108 archive in the shared prebuilt Morse Micro Zephyr
+package at `modules/mm-iot-zephyr-prebuilt` and the nRF54 application port in
+`nrf54/`.
 The package contains `libmorse.a`, public headers, radio firmware, and the
 KeepTeen board calibration file; it contains no Morse implementation source.
 The nRF54 keeps its Meshtastic BLE service and advertises a `PROV_` name
@@ -31,8 +32,7 @@ unprovisioned. This clears the saved HaLow and MQTT configuration and any old BL
 
 ## FGH200M nRF54L15
 
-Build the nRF54L15/MM8108 target with the private Morse source module available
-at `modules/mm-iot-zephyr` or through `MMIOT_ZEPHYR_ROOT`:
+Build the nRF54L15/MM8108 target with:
 
 ```sh
 pio run -e seeed-xiao-nrf54l15-fgh200m
@@ -41,7 +41,8 @@ pio run -e seeed-xiao-nrf54l15-fgh200m
 This environment mirrors the FGH200M target in `edge-device-nrf54`. It uses the
 FGH200M carrier overlay in `zephyr/boards/xiao_nrf54l15_fgh200m.overlay`, the
 MM8108 radio firmware, and the temporary MF15457 calibration fallback selected
-by `zephyr/fgh200m.conf`.
+by `zephyr/fgh200m.conf`. Its MM8108 source-free library, radio firmware, and
+BCF share `modules/mm-iot-zephyr-prebuilt` with the FGH100M package.
 
 ## Heltec HT-HC33
 

@@ -1,6 +1,14 @@
 {
-  "target": "nrf54l15/mm6108",
-  "archiveSha256": "b0c2bf3bc398270cbd9cc045d00fecbd95d568fd063baecaab79028547893adb",
-  "configSha256": "0d4d8a9c0a308471d1c6f53eb2ee38fe05b84678c21c606db7b3a6f802e0d434",
-  "bcf": "bcf_fgh100mhaamd.mbin"
+  "targets": {
+    "nrf54l15/mm6108": {
+      "archiveSha256": "b0c2bf3bc398270cbd9cc045d00fecbd95d568fd063baecaab79028547893adb",
+      "configSha256": "0d4d8a9c0a308471d1c6f53eb2ee38fe05b84678c21c606db7b3a6f802e0d434",
+      "bcf": "bcf_fgh100mhaamd.mbin"
+    },
+    "nrf54l15/mm8108": {
+      "archiveSha256": "8b353e4e26cf5bbc68f5ade8725a855302120643153186d584215fe9c7dfa31d",
+      "configSha256": "bcd3cd88d346787d60d06e614e598c53be8bbef33df643cfb80a0ef577b90c13",
+      "bcf": "bcf_mf15457.mbin"
+    }
+  }
 }
