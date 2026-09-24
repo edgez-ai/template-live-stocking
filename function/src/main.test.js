@@ -7,6 +7,7 @@ process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
 process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
 process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
 process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
+process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
 const { default: main } = await import("./main.js");
 
 const gatewayId = "11111111-1111-4111-8111-111111111111";
@@ -23,15 +24,18 @@ const originalListRows = TablesDB.prototype.listRows;
 const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
 const topologyRows = [];
+const otaRows = [];
 
 beforeEach(() => {
   rows.length = 0;
   topologyRows.length = 0;
+  otaRows.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
   process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
   process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
+  process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
   globalThis.fetch = async (url) => {
     const device = devices.get(decodeURIComponent(url.split("/").pop()));
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
@@ -42,17 +46,26 @@ beforeEach(() => {
       topologyRows.push(row);
       return row;
     }
+    if (args.tableId === "ota-a") {
+      const row = { $id: `ota-${otaRows.length + 1}`, ...args.data };
+      otaRows.push(row);
+      return row;
+    }
     rows.push(args);
     return { $id: `telemetry-${rows.length}` };
   };
   TablesDB.prototype.listRows = async (args) => ({
     rows: args.tableId === "topology-a"
-      ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId) : [],
+      ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId)
+      : args.tableId === "ota-a"
+        ? otaRows : [],
   });
   TablesDB.prototype.updateRow = async (args) => {
     const row = topologyRows.find((candidate) => candidate.$id === args.rowId);
     if (row) Object.assign(row, args.data);
-    return row;
+    const ota = otaRows.find((candidate) => candidate.$id === args.rowId);
+    if (ota) Object.assign(ota, args.data);
+    return row || ota;
   };
 });
 
@@ -139,6 +152,20 @@ test("partial IMU readings are rejected", async () => {
   assert.equal(result.status, 400);
   assert.match(result.body.error, /IMU accelerometer/);
   assert.equal(rows.length, 0);
+});
+
+test("OTA telemetry creates and completes one status row", async () => {
+  const requestId = "33333333-3333-4333-8333-333333333333";
+  const accepted = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.4", ota: { requestId, status: "pending", detail: "accepted" } });
+  assert.equal(accepted.status, 201);
+  assert.equal(otaRows.length, 1);
+  assert.deepEqual(otaRows[0].status, "pending");
+
+  const completed = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.4", ota: { requestId, status: "succeeded", detail: "installed" } });
+  assert.equal(completed.status, 201);
+  assert.equal(otaRows.length, 1);
+  assert.equal(otaRows[0].status, "succeeded");
+  assert.ok(otaRows[0].completedAt);
 });
 
 test("gateway topology upserts direct links and marks missing peers inactive", async () => {

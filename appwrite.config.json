@@ -103,6 +103,28 @@
       ]
     },
     {
+      "$id": "ota-updates",
+      "databaseId": "live-stocking",
+      "name": "OTA updates",
+      "permissions": [],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "requestId", "type": "varchar", "size": 64, "required": true, "array": false },
+        { "key": "status", "type": "varchar", "size": 16, "required": true, "array": false },
+        { "key": "detail", "type": "varchar", "size": 256, "required": false, "array": false },
+        { "key": "firmwareVersion", "type": "varchar", "size": 128, "required": false, "array": false },
+        { "key": "reportedAt", "type": "varchar", "size": 40, "required": true, "array": false },
+        { "key": "completedAt", "type": "varchar", "size": 40, "required": false, "array": false }
+      ],
+      "indexes": [
+        { "key": "request-id", "type": "unique", "attributes": ["requestId"] },
+        { "key": "device-reported", "type": "key", "attributes": ["deviceId", "reportedAt"], "orders": ["ASC", "DESC"] }
+      ]
+    },
+    {
       "$id": "geofence-areas",
       "databaseId": "live-stocking",
       "name": "Geofence areas",
@@ -182,6 +204,7 @@
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
         { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
         { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" },
+        { "key": "LIVE_STOCKING_OTA_UPDATE_TABLE_ID", "value": "ota-updates" },
         { "key": "LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID", "value": "geofence-areas" },
         { "key": "LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID", "value": "geofence-rules" },
         { "key": "LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID", "value": "geofence-alarms" }
@@ -208,7 +231,8 @@
         { "key": "LIVE_STOCKING_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
         { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" }
+        { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" },
+        { "key": "LIVE_STOCKING_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
       ]
     }
   ]

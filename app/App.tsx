@@ -30,12 +30,13 @@ type FarmDetails = { name: string; country: string; location: string; halowChann
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
+type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type GeofenceShape = "circle" | "oval" | "rectangle" | "polygon";
 type GeofenceArea = Models.Row & { farmId: string; name: string; shape: GeofenceShape; geometry: string };
 type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
 type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "receivedAt">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -219,6 +220,7 @@ const config: AppConfig = {
   geofenceAreaTableId: appConfig.geofenceAreaTableId || "geofence-areas",
   geofenceRuleTableId: appConfig.geofenceRuleTableId || "geofence-rules",
   geofenceAlarmTableId: appConfig.geofenceAlarmTableId || "geofence-alarms",
+  otaUpdateTableId: appConfig.otaUpdateTableId || "ota-updates",
 };
 const endpoint = config.appwriteEndpoint.replace(/\/+$/, "");
 const otaRepositoryUrl = (config.otaRepositoryUrl || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -591,6 +593,7 @@ export default function App() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
+  const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
   const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
   const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
   const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
@@ -643,13 +646,14 @@ export default function App() {
   const refresh = useCallback((current: CurrentUser): Promise<Farm[]> => {
     if (refreshInFlight.current && refreshUserId.current === current.$id) return refreshInFlight.current;
     const request = (async () => {
-      const [farmResult, deviceResult, telemetryResult, topologyResult] = await Promise.allSettled([
+      const [farmResult, deviceResult, telemetryResult, topologyResult, otaResult] = await Promise.allSettled([
         tables.listRows<Farm>({ databaseId: config.databaseId, tableId: config.farmTableId, queries: [Query.limit(100)] }),
         deviceApi<{ devices: Device[] }>(),
         tables.listRows({ databaseId: config.databaseId, tableId: config.telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
         tables.listRows({ databaseId: config.databaseId, tableId: config.topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
+        tables.listRows({ databaseId: config.databaseId, tableId: config.otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
       ]);
-      const failures = [farmResult, deviceResult, telemetryResult, topologyResult].filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      const failures = [farmResult, deviceResult, telemetryResult, topologyResult, otaResult].filter((result): result is PromiseRejectedResult => result.status === "rejected");
       const authFailure = failures.find((failure) => isAuthError(failure.reason));
       if (authFailure) throw authFailure.reason;
       if (activeUserId.current !== current.$id) return farmsRef.current;
@@ -667,6 +671,7 @@ export default function App() {
         setTelemetry(telemetryRef.current);
       }
       if (topologyResult.status === "fulfilled") setTopology(topologyResult.value.rows as unknown as TopologyLink[]);
+      if (otaResult.status === "fulfilled") setOtaUpdates(otaResult.value.rows as unknown as OtaUpdate[]);
       await cacheSnapshot(current, farmsRef.current, devicesRef.current, telemetryRef.current);
       if (failures.length) {
         setOffline(true);
@@ -712,7 +717,7 @@ export default function App() {
         }
         else {
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setFarms([]); setDevices([]); setTelemetry([]); setTopology([]);
+          setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]);
           setCurrentFarmId((current.prefs as { currentFarmId?: string }).currentFarmId || "");
         }
         setUser(current);
@@ -725,7 +730,7 @@ export default function App() {
           if (cached) await clearCachedUser(cached.user.$id);
           activeUserId.current = null;
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setCurrentFarmId(""); setOffline(false);
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
         } else if (cached) setOffline(true);
         else setError(messageOf(caught));
       } finally { if (active) setBusy(false); }
@@ -739,7 +744,7 @@ export default function App() {
         if (isAuthError(caught)) {
           void clearCachedUser(user.$id);
           activeUserId.current = null;
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setCurrentFarmId(""); setOffline(false);
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
         } else setOffline(true);
       });
     }, offline ? 15000 : 5000);
@@ -1012,6 +1017,10 @@ export default function App() {
   }
 
   function requestFirmwareUpdate(device: Device) {
+    if (otaUpdates.some((update) => update.deviceId === device.$id && update.status === "pending")) {
+      setError("An OTA update is already pending for this device.");
+      return;
+    }
     Alert.alert("Update HT-HC33 firmware", `Install the latest firmware on ${device.name}?`, [
       { text: "Cancel", style: "cancel" },
       { text: "Update", onPress: () => void (async () => {
@@ -1044,7 +1053,7 @@ export default function App() {
     }
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
   }
 
   function openSettings() {
@@ -1231,6 +1240,8 @@ export default function App() {
   const detailStatus = detailDevice ? statusOf(detailDevice, latestTelemetryByDevice.get(detailDevice.$id)) : "";
   const detailFirmwareVersion = firmwareVersionOf(detailDevice ? latestTelemetryByDevice.get(detailDevice.$id) : undefined);
   const detailTopology = detailDevice ? topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === detailDevice.$id || link.peerDeviceId === detailDevice.$id)) : [];
+  const detailOtaUpdate = detailDevice ? otaUpdates.find((update) => update.deviceId === detailDevice.$id) : undefined;
+  const detailOtaPending = Boolean(detailDevice && otaUpdates.some((update) => update.deviceId === detailDevice.$id && update.status === "pending"));
   const currentFarm = farms.find((farm) => farm.$id === currentFarmId);
   const activeTeamId = currentFarm?.teamId;
   useEffect(() => {
@@ -1449,7 +1460,7 @@ export default function App() {
             {historyStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{historyStats.min.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{historyStats.average.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{historyStats.max.toFixed(2)} V</Text></View></View> : null}
             <Text style={styles.sensorNote}>Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</Text>
             <TopologyCard device={detailDevice} links={detailTopology} />
-            {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text><Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
+            {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text>{detailOtaUpdate ? <Text style={styles.otaDescription}>Latest update: {detailOtaUpdate.status.toUpperCase()}{detailOtaUpdate.detail ? ` · ${detailOtaUpdate.detail}` : ""}{detailOtaUpdate.reportedAt ? ` · ${relativeTime(detailOtaUpdate.reportedAt)}` : ""}</Text> : null}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : detailOtaPending ? "UPDATE PENDING" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
             <View style={styles.dangerZone}><Text style={styles.dangerTitle}>DEVICE ACCESS</Text><Text style={styles.dangerDescription}>Deleting this device revokes its MQTT credential. Historical telemetry is retained.</Text><Pressable style={[styles.deleteButton, offline && styles.disabledButton]} onPress={() => requestDeleteDevice(detailDevice)} disabled={busy || offline}><Text style={styles.deleteButtonText}>{busy ? "DELETING…" : "DELETE DEVICE"}</Text></Pressable></View>
           </ScrollView>
         </> : null}

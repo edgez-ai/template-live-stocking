@@ -3,6 +3,7 @@ import { Client, ID, Query, TablesDB } from "node-appwrite";
 const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABASE_ID;
 const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
 const TOPOLOGY_TABLE_ID = process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || "topology-links";
+const OTA_UPDATE_TABLE_ID = process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID || "ota-updates";
 const GEOFENCE_AREA_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID;
@@ -12,6 +13,7 @@ const SENSOR_LONGITUDE = 4;
 const SENSOR_ACCELEROMETER = [6, 7, 8];
 const SENSOR_GYROSCOPE = [9, 10, 11];
 const SENSOR_TYPE_MAX = 12;
+const OTA_STATUSES = new Set(["pending", "succeeded", "failed", "busy"]);
 
 function sensorValue(payload, type) {
   if (!Array.isArray(payload?.sensors)) return null;
@@ -71,6 +73,44 @@ async function syncTopology(tables, gateway, links, peerDevices, readPermissions
         permissions: readPermissions,
       });
     }
+  }
+}
+
+function otaStatus(entry) {
+  const ota = entry?.ota;
+  if (!ota || typeof ota !== "object" || Array.isArray(ota)) return null;
+  if (typeof ota.requestId !== "string" || !ota.requestId || ota.requestId.length > 64 ||
+      typeof ota.status !== "string" || !OTA_STATUSES.has(ota.status) ||
+      (ota.detail !== undefined && (typeof ota.detail !== "string" || ota.detail.length > 256))) return undefined;
+  return { requestId: ota.requestId, status: ota.status, detail: ota.detail || "" };
+}
+
+async function syncOtaUpdate(tables, target, entry, readPermissions, reportedAt) {
+  const update = otaStatus(entry);
+  if (!update) return;
+  const existing = await tables.listRows({
+    databaseId: DATABASE_ID,
+    tableId: OTA_UPDATE_TABLE_ID,
+    queries: [Query.equal("requestId", update.requestId), Query.limit(1)],
+  });
+  const firmwareVersion = typeof entry.firmwareVersion === "string" && entry.firmwareVersion.length <= 128
+    ? entry.firmwareVersion : "";
+  const completed = update.status === "succeeded" || update.status === "failed" || update.status === "busy";
+  const data = {
+    deviceId: target.$id,
+    serial: target.serial,
+    requestId: update.requestId,
+    status: update.status,
+    detail: update.detail,
+    firmwareVersion,
+    reportedAt,
+    completedAt: completed ? reportedAt : null,
+  };
+  const row = existing.rows?.[0];
+  if (row) {
+    await tables.updateRow({ databaseId: DATABASE_ID, tableId: OTA_UPDATE_TABLE_ID, rowId: row.$id, data, permissions: readPermissions });
+  } else {
+    await tables.createRow({ databaseId: DATABASE_ID, tableId: OTA_UPDATE_TABLE_ID, rowId: ID.unique(), data, permissions: readPermissions });
   }
 }
 
@@ -226,6 +266,9 @@ export default async function main({ req, res, error }) {
     if (entry.topology !== undefined && !validTopology(entry.topology)) {
       return json(res, { error: "Topology must contain at most 16 valid direct peer links" }, 400);
     }
+    if (route.channel === "ota" && !otaStatus(entry)) {
+      return json(res, { error: "OTA telemetry must contain a valid OTA status" }, 400);
+    }
     const sensorTypes = new Set((entry.sensors || []).map((sensor) => sensor.type));
     for (const [name, axes] of [["accelerometer", SENSOR_ACCELEROMETER], ["gyroscope", SENSOR_GYROSCOPE]]) {
       if (axes.some((type) => sensorTypes.has(type)) && !axes.every((type) => sensorTypes.has(type))) {
@@ -303,6 +346,7 @@ export default async function main({ req, res, error }) {
         permissions: readPermissions,
       });
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
+      await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);
       if (entry.topology) {
         await syncTopology(tables, device, entry.topology.links, topologyPeers, readPermissions, receivedAt);
       }

@@ -36,6 +36,9 @@ constexpr char kTag[] = "iot_prov";
 constexpr char kMqttNamespace[] = "mqtt";
 constexpr char kHalowNamespace[] = "halow";
 constexpr char kLocationNamespace[] = "location";
+constexpr char kOtaNamespace[] = "ota";
+constexpr char kOtaResultKey[] = "result";
+constexpr uint32_t kOtaResultMagic = 0x4f544131;
 constexpr char kMqttEndpoint[] = "mqtt-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kGatewayTelemetryInterval = pdMS_TO_TICKS(30000);
@@ -99,6 +102,15 @@ struct OtaCommand {
   char request_id[kMaxOtaRequestIdLength];
 };
 
+enum class OtaResultState : uint8_t { kNone, kPending, kSucceeded, kFailed };
+
+struct OtaResult {
+  uint32_t magic;
+  OtaResultState state;
+  char request_id[kMaxOtaRequestIdLength];
+  char detail[96];
+};
+
 EventGroupHandle_t state_events;
 esp_mqtt_client_handle_t mqtt_client;
 adc_oneshot_unit_handle_t battery_adc;
@@ -132,14 +144,56 @@ bool valid_https_url(const char *url) {
   return true;
 }
 
-void publish_ota_status(const OtaCommand &command, const char *status, const char *detail = nullptr) {
-  if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return;
+esp_err_t save_ota_result(const char *request_id, OtaResultState state, const char *detail = nullptr) {
+  if (!request_id || !request_id[0]) return ESP_ERR_INVALID_ARG;
+  OtaResult result{};
+  result.magic = kOtaResultMagic;
+  result.state = state;
+  strlcpy(result.request_id, request_id, sizeof(result.request_id));
+  if (detail) strlcpy(result.detail, detail, sizeof(result.detail));
+  nvs_handle_t handle;
+  esp_err_t error = nvs_open(kOtaNamespace, NVS_READWRITE, &handle);
+  if (error != ESP_OK) return error;
+  error = nvs_set_blob(handle, kOtaResultKey, &result, sizeof(result));
+  if (error == ESP_OK) error = nvs_commit(handle);
+  nvs_close(handle);
+  return error;
+}
+
+bool load_ota_result(OtaResult *result) {
+  if (!result) return false;
+  nvs_handle_t handle;
+  if (nvs_open(kOtaNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+  size_t size = sizeof(*result);
+  const esp_err_t error = nvs_get_blob(handle, kOtaResultKey, result, &size);
+  nvs_close(handle);
+  return error == ESP_OK && size == sizeof(*result) && result->magic == kOtaResultMagic &&
+      result->request_id[0] && (result->state == OtaResultState::kPending ||
+                                result->state == OtaResultState::kSucceeded ||
+                                result->state == OtaResultState::kFailed);
+}
+
+void clear_ota_result() {
+  nvs_handle_t handle;
+  if (nvs_open(kOtaNamespace, NVS_READWRITE, &handle) != ESP_OK) return;
+  nvs_erase_key(handle, kOtaResultKey);
+  nvs_commit(handle);
+  nvs_close(handle);
+}
+
+bool ota_is_pending() {
+  OtaResult result{};
+  return load_ota_result(&result) && result.state == OtaResultState::kPending;
+}
+
+bool publish_ota_status(const OtaCommand &command, const char *status, const char *detail = nullptr) {
+  if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return false;
   cJSON *root = cJSON_CreateObject();
   cJSON *ota = cJSON_CreateObject();
   if (!root || !ota) {
     cJSON_Delete(root);
     cJSON_Delete(ota);
-    return;
+    return false;
   }
   cJSON_AddStringToObject(root, "clientId", mqtt_config.client_id);
   cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
@@ -152,10 +206,22 @@ void publish_ota_status(const OtaCommand &command, const char *status, const cha
     char topic[384]{};
     std::snprintf(topic, sizeof(topic), "projects/%s/devices/%s/telemetry/ota",
                   mqtt_config.project_id, mqtt_config.username);
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    const bool queued = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0) >= 0;
     cJSON_free(payload);
+    cJSON_Delete(root);
+    return queued;
   }
   cJSON_Delete(root);
+  return false;
+}
+
+void publish_saved_ota_result() {
+  OtaResult result{};
+  if (!load_ota_result(&result) || result.state == OtaResultState::kPending) return;
+  OtaCommand command{};
+  strlcpy(command.request_id, result.request_id, sizeof(command.request_id));
+  const char *status = result.state == OtaResultState::kSucceeded ? "succeeded" : "failed";
+  if (publish_ota_status(command, status, result.detail)) clear_ota_result();
 }
 
 void ota_task(void *) {
@@ -164,7 +230,7 @@ void ota_task(void *) {
     if (xQueueReceive(ota_queue, &command, portMAX_DELAY) != pdTRUE) continue;
     ESP_LOGI(kTag, "Starting OTA request %s", command.request_id);
     show_device_status("FIRMWARE UPDATE", "DOWNLOADING");
-    publish_ota_status(command, "downloading");
+    publish_ota_status(command, "pending", "downloading");
 
     esp_http_client_config_t http_config{};
     http_config.url = command.url;
@@ -177,14 +243,16 @@ void ota_task(void *) {
     if (result == ESP_OK) {
       ESP_LOGI(kTag, "OTA request %s installed; rebooting", command.request_id);
       show_device_status("FIRMWARE UPDATE", "INSTALLED - REBOOTING");
-      publish_ota_status(command, "installed");
+      ESP_ERROR_CHECK(save_ota_result(command.request_id, OtaResultState::kSucceeded, "installed"));
+      publish_ota_status(command, "pending", "installed - rebooting");
       vTaskDelay(pdMS_TO_TICKS(1500));
       esp_restart();
     }
 
     ESP_LOGE(kTag, "OTA request %s failed: %s", command.request_id, esp_err_to_name(result));
     show_device_status("FIRMWARE UPDATE", "FAILED");
-    publish_ota_status(command, "failed", esp_err_to_name(result));
+    ESP_ERROR_CHECK(save_ota_result(command.request_id, OtaResultState::kFailed, esp_err_to_name(result)));
+    publish_saved_ota_result();
   }
 }
 
@@ -217,12 +285,24 @@ void handle_ota_command(const esp_mqtt_event_handle_t event) {
     ESP_LOGW(kTag, "Rejected invalid OTA command");
     return;
   }
-  if (xQueueSend(ota_queue, &command, 0) != pdTRUE) {
+  if (ota_is_pending()) {
     ESP_LOGW(kTag, "Ignored OTA request %s because an update is already queued", command.request_id);
     publish_ota_status(command, "busy");
     return;
   }
-  publish_ota_status(command, "accepted");
+  const esp_err_t stored = save_ota_result(command.request_id, OtaResultState::kPending, "accepted");
+  if (stored != ESP_OK) {
+    ESP_LOGE(kTag, "Could not persist OTA request %s: %s", command.request_id, esp_err_to_name(stored));
+    publish_ota_status(command, "failed", "could not persist OTA request");
+    return;
+  }
+  if (xQueueSend(ota_queue, &command, 0) != pdTRUE) {
+    clear_ota_result();
+    ESP_LOGW(kTag, "Ignored OTA request %s because an update is already queued", command.request_id);
+    publish_ota_status(command, "busy");
+    return;
+  }
+  publish_ota_status(command, "pending", "accepted");
 }
 
 void halow_ready() {
@@ -787,6 +867,7 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
                   mqtt_config.project_id, mqtt_config.username);
     const int subscription_id = esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
     ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)", command_topic, subscription_id);
+    publish_saved_ota_result();
   } else if (event_id == MQTT_EVENT_DISCONNECTED) {
     xEventGroupClearBits(state_events, kMqttConnected);
     show_device_status("MQTT STATUS", "DISCONNECTED - RETRYING");
@@ -896,11 +977,20 @@ void initialize_nvs() {
   }
   ESP_ERROR_CHECK(result);
 }
+
+void recover_interrupted_ota() {
+  OtaResult result{};
+  if (load_ota_result(&result) && result.state == OtaResultState::kPending) {
+    ESP_LOGW(kTag, "OTA request %s was interrupted before completion", result.request_id);
+    ESP_ERROR_CHECK(save_ota_result(result.request_id, OtaResultState::kFailed, "interrupted before completion"));
+  }
+}
 }  // namespace
 
 extern "C" void app_main() {
   ESP_LOGI(kTag, "HT-HC33 provisioning firmware starting");
   initialize_nvs();
+  recover_interrupted_ota();
   ESP_ERROR_CHECK(esp_netif_init());
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   make_device_identity();

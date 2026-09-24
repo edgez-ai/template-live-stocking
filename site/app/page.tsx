@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
+type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type VoltagePoint = { timestamp: number; value: number };
 type SensorPayload = {
@@ -21,6 +22,7 @@ const tables = new TablesDB(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
+const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -193,6 +195,7 @@ export default function Home() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
+  const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
@@ -209,14 +212,16 @@ export default function Home() {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, telemetryRows, topologyRows] = await Promise.all([
+    const [deviceResult, telemetryRows, topologyRows, otaRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
+      tables.listRows({ databaseId, tableId: otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
     ]);
     setDevices(deviceResult.devices);
     setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
     setTopology(topologyRows.rows as unknown as TopologyLink[]);
+    setOtaUpdates(otaRows.rows as unknown as OtaUpdate[]);
   }, []);
 
   useEffect(() => {
@@ -267,7 +272,7 @@ export default function Home() {
 
   async function signOut() {
     await account.deleteSession({ sessionId: "current" });
-    setUser(null); setDevices([]); setTelemetry([]); setTopology([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
+    setUser(null); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
   }
 
   async function removeSelectedDevice() {
@@ -282,7 +287,12 @@ export default function Home() {
   }
 
   async function updateSelectedDevice() {
-    if (!selectedDevice || !window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
+    if (!selectedDevice) return;
+    if (selectedOtaPending) {
+      setOtaMessage("An OTA update is already pending for this device.");
+      return;
+    }
+    if (!window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
     setOtaDeviceId(selectedDevice.$id); setOtaMessage(""); setError("");
     try {
       await sendOtaCommand(selectedDevice.$id);
@@ -311,6 +321,8 @@ export default function Home() {
   const selectedFirmwareVersion = firmwareVersionOf(selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined);
   const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
+  const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
+  const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
   const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
   const historyStats = useMemo(() => {
@@ -364,7 +376,7 @@ export default function Home() {
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
             <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
             <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
-            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : "Update HT-HC33"}</button></div>}
+            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>

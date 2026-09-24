@@ -5,6 +5,7 @@ const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "tel
 const databaseId = telemetryTable?.databaseId;
 const telemetryTableId = telemetryTable?.$id;
 const topologyTableId = appwriteConfig.tables?.find((table) => table.$id === "topology-links")?.$id;
+const otaUpdateTableId = appwriteConfig.tables?.find((table) => table.$id === "ota-updates")?.$id;
 const farmTableId = appwriteConfig.tables?.find((table) => table.$id === "farms")?.$id;
 const geofenceAreaTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas")?.$id;
 const geofenceRuleTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules")?.$id;
@@ -15,7 +16,7 @@ const configuredEndpoint =
   process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT || appwriteConfig.endpoint;
 const projectId = process.env.APPWRITE_PROJECT_ID;
 
-if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !topologyTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlarmTableId) {
+if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !topologyTableId || !otaUpdateTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlarmTableId) {
   throw new Error("Appwrite project and telemetry table environment is incomplete");
 }
 
@@ -57,6 +58,7 @@ module.exports = {
       databaseId,
       telemetryTableId,
       topologyTableId,
+      otaUpdateTableId,
       farmTableId,
       geofenceAreaTableId,
       geofenceRuleTableId,

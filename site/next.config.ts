@@ -8,10 +8,12 @@ function localResourceIds() {
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   const telemetryTable = config.tables?.find((table: { $id?: string }) => table.$id === "telemetry");
   const topologyTable = config.tables?.find((table: { $id?: string }) => table.$id === "topology-links");
+  const otaUpdateTable = config.tables?.find((table: { $id?: string }) => table.$id === "ota-updates");
   return {
     databaseId: telemetryTable?.databaseId as string | undefined,
     telemetryTableId: telemetryTable?.$id as string | undefined,
     topologyTableId: topologyTable?.$id as string | undefined,
+    otaUpdateTableId: otaUpdateTable?.$id as string | undefined,
   };
 }
 
@@ -39,6 +41,8 @@ const required = {
     process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || localResources.telemetryTableId,
   NEXT_PUBLIC_TOPOLOGY_TABLE_ID:
     process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || localResources.topologyTableId,
+  NEXT_PUBLIC_OTA_UPDATE_TABLE_ID:
+    process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID || localResources.otaUpdateTableId,
 };
 
 const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);
