@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 extern "C" {
 #include "mmhal.h"
 #include "mmipal.h"
@@ -17,15 +18,65 @@ bool ip_initialized;
 halow_ready_callback_t ready_callback;
 halow_beacon_callback_t beacon_callback;
 struct mmwlan_beacon_vendor_ie_filter beacon_filter{};
+struct BeaconRssi {
+  bool occupied;
+  uint8_t bssid[6];
+  int16_t rssi_dbm;
+  int64_t observed_ms;
+};
+constexpr size_t kBeaconRssiCapacity = 16;
+constexpr int64_t kBeaconRssiMaxAgeMs = 2 * 60 * 1000;
+BeaconRssi beacon_rssi[kBeaconRssiCapacity]{};
+
+void remember_beacon_rssi(const uint8_t bssid[6], int16_t rssi_dbm) {
+  if (!bssid) return;
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  BeaconRssi *slot = nullptr;
+  BeaconRssi *oldest = &beacon_rssi[0];
+  for (auto &entry : beacon_rssi) {
+    if (entry.occupied && std::memcmp(entry.bssid, bssid, sizeof(entry.bssid)) == 0) {
+      slot = &entry;
+      break;
+    }
+    if (!entry.occupied && !slot) slot = &entry;
+    if (entry.observed_ms < oldest->observed_ms) oldest = &entry;
+  }
+  if (!slot) slot = oldest;
+  slot->occupied = true;
+  std::memcpy(slot->bssid, bssid, sizeof(slot->bssid));
+  slot->rssi_dbm = rssi_dbm;
+  slot->observed_ms = now_ms;
+}
+
+bool beacon_rssi_for(const uint8_t bssid[6], int16_t *rssi_dbm) {
+  if (!bssid || !rssi_dbm) return false;
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  for (const auto &entry : beacon_rssi) {
+    if (entry.occupied && now_ms - entry.observed_ms <= kBeaconRssiMaxAgeMs &&
+        std::memcmp(entry.bssid, bssid, sizeof(entry.bssid)) == 0) {
+      *rssi_dbm = entry.rssi_dbm;
+      return true;
+    }
+  }
+  return false;
+}
+
+void on_mesh_scan_result(const struct mmwlan_scan_result *result, void *) {
+  if (result && result->bssid) remember_beacon_rssi(result->bssid, result->rssi);
+}
+
 void on_beacon_vendor_ie(const uint8_t *ies, uint32_t length,
                          const uint8_t *bssid, void *) {
   if (!beacon_callback || !ies) return;
+  int16_t rssi_dbm = 0;
+  bool rssi_valid = beacon_rssi_for(bssid, &rssi_dbm);
+  if (!rssi_valid && bssid) rssi_valid = mmwlan_get_mesh_peer_rssi(bssid, &rssi_dbm) == MMWLAN_SUCCESS;
   for (size_t offset = 0; offset + 2 <= length;) {
     const size_t ie_length = ies[offset + 1];
     if (offset + 2 + ie_length > length) break;
     if (ies[offset] == 221 && ie_length > 5 &&
         std::memcmp(ies + offset + 2, "EdgeZ", 5) == 0) {
-      beacon_callback(ies + offset + 7, ie_length - 5, bssid);
+      beacon_callback(ies + offset + 7, ie_length - 5, bssid, rssi_dbm, rssi_valid);
     }
     offset += 2 + ie_length;
   }
@@ -124,6 +175,7 @@ esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
   args.mesh_mode = true;
   args.mesh_frequency_khz = selected->centre_freq_hz / 1000U;
   args.mesh_bandwidth_mhz = selected->bw_mhz;
+  args.scan_rx_cb = on_mesh_scan_result;
   args.scan_interval_base_s = 1;
   args.scan_interval_limit_s = 8;
   ESP_LOGI(kTag, "Joining mesh %s in %s on channel %u at %lu kHz / %u MHz",

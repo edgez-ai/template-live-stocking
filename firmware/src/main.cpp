@@ -80,6 +80,8 @@ struct BeaconFrame {
   uint16_t length;
   uint8_t data[250];
   uint8_t source_mac[6];
+  int16_t rssi_dbm;
+  bool rssi_valid;
 };
 
 struct RemoteBeacon {
@@ -237,6 +239,9 @@ void ota_task(void *) {
     http_config.crt_bundle_attach = esp_crt_bundle_attach;
     http_config.timeout_ms = 30000;
     http_config.keep_alive_enable = true;
+    // GitHub release assets redirect to a signed Azure URL whose request target
+    // exceeds ESP-IDF's default 512-byte transmit buffer.
+    http_config.buffer_size_tx = 4096;
     esp_https_ota_config_t ota_config{};
     ota_config.http_config = &http_config;
     const esp_err_t result = esp_https_ota(&ota_config);
@@ -450,21 +455,23 @@ void load_device_location() {
   nvs_close(handle);
 }
 
-void enqueue_beacon(const uint8_t *data, size_t length, const uint8_t source_mac[6]) {
+void enqueue_beacon(const uint8_t *data, size_t length, const uint8_t source_mac[6],
+                    int16_t rssi_dbm, bool rssi_valid) {
   if (!beacon_queue || !data || !source_mac || length == 0 || length > sizeof(BeaconFrame::data)) return;
   BeaconFrame frame{};
   frame.length = length;
   std::memcpy(frame.data, data, length);
   std::memcpy(frame.source_mac, source_mac, sizeof(frame.source_mac));
+  frame.rssi_dbm = rssi_dbm;
+  frame.rssi_valid = rssi_valid;
   if (xQueueSend(beacon_queue, &frame, 0) != pdTRUE) {
     ESP_LOGW(kTag, "Raw HaLow beacon queue full; record dropped");
   }
 }
 
-void remember_topology_peer(const char *client_id, const uint8_t radio_mac[6]) {
+void remember_topology_peer(const char *client_id, const uint8_t radio_mac[6],
+                            int16_t rssi_dbm, bool rssi_valid) {
   if (!client_id || !client_id[0] || !radio_mac) return;
-  int16_t rssi_dbm = 0;
-  const bool rssi_valid = halow_get_peer_rssi(radio_mac, &rssi_dbm);
   const int64_t now_ms = esp_timer_get_time() / 1000;
   portENTER_CRITICAL(&topology_lock);
   TopologyPeer *slot = nullptr;
@@ -481,8 +488,10 @@ void remember_topology_peer(const char *client_id, const uint8_t radio_mac[6]) {
   slot->occupied = true;
   strlcpy(slot->client_id, client_id, sizeof(slot->client_id));
   std::memcpy(slot->radio_mac, radio_mac, sizeof(slot->radio_mac));
-  slot->rssi_dbm = rssi_dbm;
-  slot->rssi_valid = rssi_valid;
+  if (rssi_valid || !slot->rssi_valid) {
+    slot->rssi_dbm = rssi_dbm;
+    slot->rssi_valid = rssi_valid;
+  }
   slot->last_seen_ms = now_ms;
   portEXIT_CRITICAL(&topology_lock);
 }
@@ -535,7 +544,7 @@ void decode_remote_beacon(const BeaconFrame &frame) {
                 static_cast<unsigned long long>(beacon.user_id_low >> 48),
                 static_cast<unsigned long long>(beacon.user_id_low & 0xffffffffffffULL));
   if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) return;
-  remember_topology_peer(reading.client_id, frame.source_mac);
+  remember_topology_peer(reading.client_id, frame.source_mac, frame.rssi_dbm, frame.rssi_valid);
   float latitude = beacon.latitude;
   float longitude = beacon.longitude;
   bool has_latitude = false;
