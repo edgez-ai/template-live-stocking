@@ -27,6 +27,7 @@ struct provisioning_json {
 	char *passphrase;
 	char *country;
 	char *device_name;
+	char *confirmation_id;
 	bool use_device_gps;
 	int32_t halow_channel;
 	int32_t halow_frequency_khz;
@@ -48,6 +49,7 @@ static const struct json_obj_descr provisioning_descr[] = {
 	JSON_OBJ_DESCR_PRIM(struct provisioning_json, latitude, JSON_TOK_DOUBLE_FP),
 	JSON_OBJ_DESCR_PRIM(struct provisioning_json, longitude, JSON_TOK_DOUBLE_FP),
 	JSON_OBJ_DESCR_PRIM_NAMED(struct provisioning_json, "deviceName", device_name, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM_NAMED(struct provisioning_json, "confirmationId", confirmation_id, JSON_TOK_STRING),
 	JSON_OBJ_DESCR_PRIM_NAMED(struct provisioning_json, "useDeviceGps", use_device_gps, JSON_TOK_TRUE),
 };
 
@@ -118,7 +120,8 @@ bool livestock_config_is_provisioned(void)
 	return saved.magic == LIVESTOCK_MAGIC;
 }
 
-int livestock_config_apply_json(char *json, size_t length, const char *device_serial)
+int livestock_config_apply_json(char *json, size_t length, const char *device_serial,
+				char *confirmation_id, size_t confirmation_id_size)
 {
 	struct provisioning_json request = {0};
 	struct livestock_saved_config updated = { .magic = LIVESTOCK_MAGIC };
@@ -128,15 +131,21 @@ int livestock_config_apply_json(char *json, size_t length, const char *device_se
 	uint64_t user_id_high;
 	uint64_t user_id_low;
 
-	if (!json || !device_serial || length == 0 || length > 1024) {
+	if (!json || !device_serial || !confirmation_id || confirmation_id_size == 0 ||
+	    length == 0 || length > 1024) {
 		return -EINVAL;
 	}
+	confirmation_id[0] = '\0';
 	fields = json_obj_parse(json, length, provisioning_descr,
 				ARRAY_SIZE(provisioning_descr), &request);
 	if (fields < 0 || (fields & BIT_MASK(10)) != BIT_MASK(10)) {
-		LOG_ERR("MQTT provisioning JSON parse failed fields=%lld required=0x%x",
-			(long long)fields, BIT_MASK(10));
+		LOG_ERR("MQTT provisioning JSON parse failed fields=%lld required=0x%lx",
+			(long long)fields, (unsigned long)BIT_MASK(10));
 		return -EBADMSG;
+	}
+	if (request.confirmation_id) {
+		if (!valid_string(request.confirmation_id, confirmation_id_size)) return -EINVAL;
+		strcpy(confirmation_id, request.confirmation_id);
 	}
 	if (!valid_string(request.client_id, sizeof(updated.client_id)) ||
 	    !valid_string(request.username, sizeof(updated.username)) ||
@@ -178,6 +187,17 @@ int livestock_config_apply_json(char *json, size_t length, const char *device_se
 	if (rc != 0) {
 		LOG_ERR("Could not save MQTT configuration rc=%d", rc);
 		return rc;
+	}
+	{
+		struct livestock_saved_config verified = {0};
+		ssize_t bytes = settings_load_one(LIVESTOCK_SETTINGS_KEY, &verified,
+						 sizeof(verified));
+
+		if (bytes != sizeof(verified) || memcmp(&verified, &updated, sizeof(updated)) != 0) {
+			LOG_ERR("MQTT configuration NVS verification failed bytes=%d expected=%u",
+				(int)bytes, (unsigned int)sizeof(verified));
+			return -EIO;
+		}
 	}
 	rc = edgez_config_apply_provisioning(request.mesh_id, request.passphrase,
 				     (uint32_t)request.halow_frequency_khz,

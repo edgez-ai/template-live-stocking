@@ -1,4 +1,4 @@
-#include "meshtastic_ble.h"
+#include "edgez_ble.h"
 
 #include <errno.h>
 #include <string.h>
@@ -25,6 +25,7 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 #define EDGEZ_BLE_NOTIFY_RETRY_DELAY K_MSEC(10)
 #define EDGEZ_BLE_NOTIFY_MAX_RETRIES 10
 #define MQTT_CONFIG_MAX_LEN 1024
+#define MQTT_CONFIRMATION_ID_MAX_LEN 64
 #define PROVISIONING_NAME_PREFIX "PROV_"
 
 /* Direct nRF provisioning: service, mqtt-config write, result read. */
@@ -35,10 +36,11 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 static struct bt_uuid_128 livestock_service_uuid = BT_UUID_INIT_128(LIVESTOCK_SERVICE_UUID);
 static struct bt_uuid_128 livestock_config_uuid = BT_UUID_INIT_128(LIVESTOCK_CONFIG_UUID);
 static struct bt_uuid_128 livestock_status_uuid = BT_UUID_INIT_128(LIVESTOCK_STATUS_UUID);
+extern const struct bt_gatt_service_static livestock_svc;
 static char mqtt_config_buffer[MQTT_CONFIG_MAX_LEN + 1];
 static size_t mqtt_config_expected;
 static size_t mqtt_config_received;
-static const char *mqtt_config_status = "{\"pending\":true}";
+static char mqtt_config_status[192] = "{\"pending\":true}";
 
 static struct bt_uuid_16 edgez_service_uuid = BT_UUID_INIT_16(0xfff0);
 static struct bt_uuid_16 edgez_rx_uuid = BT_UUID_INIT_16(0xfff1);
@@ -233,6 +235,7 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 				 const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
 	const uint8_t *data = buf;
+	char confirmation_id[MQTT_CONFIRMATION_ID_MAX_LEN] = {0};
 	size_t header;
 	int rc;
 
@@ -244,10 +247,10 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 	if (data[0] == 1 && len >= 4) {
 		mqtt_config_expected = sys_get_le16(&data[1]);
 		mqtt_config_received = 0;
-		mqtt_config_status = "{\"pending\":true}";
+		strcpy(mqtt_config_status, "{\"pending\":true}");
 		header = 3;
 		if (!mqtt_config_expected || mqtt_config_expected > MQTT_CONFIG_MAX_LEN) {
-			mqtt_config_status = "{\"ok\":false,\"error\":\"Configuration too large\"}";
+			strcpy(mqtt_config_status, "{\"ok\":false,\"error\":\"Configuration too large\"}");
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
 	} else if (data[0] == 2 && mqtt_config_expected) {
@@ -256,7 +259,7 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 	if (mqtt_config_received + len - header > mqtt_config_expected) {
-		mqtt_config_status = "{\"ok\":false,\"error\":\"Invalid configuration length\"}";
+		strcpy(mqtt_config_status, "{\"ok\":false,\"error\":\"Invalid configuration length\"}");
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 	memcpy(&mqtt_config_buffer[mqtt_config_received], data + header, len - header);
@@ -264,14 +267,28 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 	if (mqtt_config_received == mqtt_config_expected) {
 		mqtt_config_buffer[mqtt_config_received] = '\0';
 		rc = livestock_config_apply_json(mqtt_config_buffer, mqtt_config_received,
-					      get_advertised_name() + sizeof(PROVISIONING_NAME_PREFIX) - 1);
-		mqtt_config_status = rc == 0 ? "{\"ok\":true}" :
-			"{\"ok\":false,\"error\":\"Invalid configuration or storage failed\"}";
+					      get_advertised_name() + sizeof(PROVISIONING_NAME_PREFIX) - 1,
+					      confirmation_id, sizeof(confirmation_id));
+		if (rc == 0) {
+			snprintk(mqtt_config_status, sizeof(mqtt_config_status),
+				 "{\"ok\":true,\"persisted\":true,\"confirmationId\":\"%s\"}",
+				 confirmation_id);
+		} else {
+			snprintk(mqtt_config_status, sizeof(mqtt_config_status),
+				 "{\"ok\":false,\"persisted\":false,\"confirmationId\":\"%s\",\"error\":\"Invalid configuration or NVS verification failed\"}",
+				 confirmation_id);
+		}
 		if (rc == 0) provisioning_enabled = false;
 		LOG_INF("Live Stocking mqtt-config received bytes=%u result=%d",
 			(unsigned int)mqtt_config_received, rc);
 		mqtt_config_expected = 0;
 		mqtt_config_received = 0;
+		if (current_conn) {
+			int notify_rc = bt_gatt_notify_uuid(current_conn, &livestock_status_uuid.uuid,
+						     livestock_svc.attrs, mqtt_config_status,
+						     strlen(mqtt_config_status));
+			if (notify_rc) LOG_WRN("Provisioning confirmation notify failed: %d", notify_rc);
+		}
 	}
 	return len;
 }
@@ -288,8 +305,9 @@ BT_GATT_SERVICE_DEFINE(livestock_svc,
 	BT_GATT_CHARACTERISTIC(&livestock_config_uuid.uuid, BT_GATT_CHRC_WRITE,
 		BT_GATT_PERM_WRITE, NULL, write_mqtt_config, NULL),
 	BT_GATT_CUD("mqtt-config", BT_GATT_PERM_READ),
-	BT_GATT_CHARACTERISTIC(&livestock_status_uuid.uuid, BT_GATT_CHRC_READ,
-		BT_GATT_PERM_READ, read_mqtt_config_status, NULL, NULL));
+	BT_GATT_CHARACTERISTIC(&livestock_status_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+		BT_GATT_PERM_READ, read_mqtt_config_status, NULL, NULL),
+	BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
 
 BT_GATT_SERVICE_DEFINE(edgez_svc,
 	BT_GATT_PRIMARY_SERVICE(&edgez_service_uuid),
@@ -378,7 +396,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	rx_length = 0;
 	mqtt_config_expected = 0;
 	mqtt_config_received = 0;
-	mqtt_config_status = "{\"pending\":true}";
+	strcpy(mqtt_config_status, "{\"pending\":true}");
 	pending_response_len = 0;
 	tx_notify_enabled = false;
 	LOG_INF("EdgeZ BLE provisioning client connected peer=%s; no pairing required",
@@ -426,17 +444,17 @@ static void bt_ready_cb(int err)
 	start_advertising();
 }
 
-bool meshtastic_ble_is_connected(void)
+bool edgez_ble_is_connected(void)
 {
 	return current_conn != NULL;
 }
 
-bool meshtastic_ble_is_enabled(void)
+bool edgez_ble_is_enabled(void)
 {
 	return bt_ready && provisioning_enabled;
 }
 
-void meshtastic_ble_update_battery(uint8_t level)
+void edgez_ble_update_battery(uint8_t level)
 {
 	battery_level = MIN(level, 100);
 	if (bt_ready) {
@@ -445,7 +463,7 @@ void meshtastic_ble_update_battery(uint8_t level)
 	}
 }
 
-int meshtastic_ble_start(void)
+int edgez_ble_start(void)
 {
 	int err;
 

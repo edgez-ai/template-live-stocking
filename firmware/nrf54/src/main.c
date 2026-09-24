@@ -16,7 +16,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <errno.h>
 
-#include "meshtastic_ble.h"
+#include "edgez_ble.h"
 #include "livestocking_config.h"
 #include "edgez_config.h"
 #include "edgez_battery.h"
@@ -71,7 +71,7 @@ static void halow_beacon_reboot_work_handler(struct k_work *work)
 	if (reasons == 0U) {
 		return;
 	}
-	if (meshtastic_ble_is_connected()) {
+	if (edgez_ble_is_connected()) {
 		if (atomic_cas(&reboot_waiting_for_ble, 0, 1)) {
 			LOG_WRN("Reboot pending reasons=0x%02x; waiting for BLE disconnect",
 				reasons);
@@ -822,7 +822,7 @@ static void update_status_leds(void)
 	static bool ble_was_connected;
 	struct edgez_halow_profile profile = {0};
 	int64_t now_ms = k_uptime_get();
-	bool ble_connected = meshtastic_ble_is_connected();
+	bool ble_connected = edgez_ble_is_connected();
 
 	enum halow_state state = (enum halow_state)atomic_get(&halow_state);
 	edgez_config_get_profile(&profile);
@@ -834,14 +834,14 @@ static void update_status_leds(void)
 
 	if ((profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
 	     profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR) &&
-	    !meshtastic_ble_is_enabled()) {
+	    !edgez_ble_is_enabled()) {
 		int64_t cycle_ms = WIFI_LED_FLASH_PERIOD_MS + DEVICE_LED_HEARTBEAT_OFF_MS;
 		set_status_leds(false, now_ms % cycle_ms < WIFI_LED_FLASH_PERIOD_MS);
 		return;
 	}
 
 	if (profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_USER) {
-		bool ble_enabled = meshtastic_ble_is_enabled();
+		bool ble_enabled = edgez_ble_is_enabled();
 
 		if (ble_enabled && !ble_connected) {
 			ble_was_connected = false;
@@ -1045,8 +1045,8 @@ static void publish_heartbeat(void)
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? "open" : "WPA3-SAE",
 	       IS_ENABLED(CONFIG_WIFI_MORSE_MESH_MODE) ? 0U :
 		       (unsigned int)strlen(profile.passphrase),
-	       ipv4_ready, wifi_last_error, meshtastic_ble_is_enabled(),
-	       meshtastic_ble_is_connected(),
+	       ipv4_ready, wifi_last_error, edgez_ble_is_enabled(),
+	       edgez_ble_is_connected(),
 	       morse_stage, morse_sta, morse_evt, scan_count, target_scan_count,
 	       scan_ssid, scan_rssi, scan_freq_khz, scan_bw_mhz,
 	       morse_boot_errno, morse_boot_status, morse_fw, morselib,
@@ -1058,7 +1058,7 @@ static void publish_heartbeat(void)
 
 	LOG_INF("heartbeat seq=%u halow=%s ble=%s ipv4=%d",
 		seq++, halow_state_name(state),
-		meshtastic_ble_is_connected() ? "connected" : "idle", ipv4_ready);
+		edgez_ble_is_connected() ? "connected" : "idle", ipv4_ready);
 #endif
 }
 
@@ -1116,8 +1116,8 @@ static void poll_button(void)
 #if defined(CONFIG_WIFI_MORSE_TEST)
 			start_halow_manual_boot();
 #endif
-			if (!meshtastic_ble_is_enabled() && !meshtastic_ble_is_connected()) {
-				int rc = meshtastic_ble_start();
+			if (!edgez_ble_is_enabled() && !edgez_ble_is_connected()) {
+				int rc = edgez_ble_start();
 				LOG_INF("KEY re-enabled BLE provisioning rc=%d", rc);
 			}
 		}
@@ -1835,7 +1835,7 @@ int main(void)
 		LOG_INF("BLE provisioning disabled after setup; press KEY to enable it");
 	} else {
 		LOG_INF("BLE provisioning enabled: MQTT or HaLow profile incomplete");
-		int ble_rc = meshtastic_ble_start();
+		int ble_rc = edgez_ble_start();
 		if (ble_rc) {
 			LOG_ERR("EdgeZ BLE provisioning failed to start: %d", ble_rc);
 		} else {

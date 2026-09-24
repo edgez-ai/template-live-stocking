@@ -39,6 +39,11 @@ For nRF54 the flow has three steps. The app connects over BLE without a PoP or
 pairing code, skips upstream Wi-Fi selection, and writes the same configuration
 to its encrypted `mqtt-config` GATT characteristic. Device GPS is an additional
 location choice for nRF54; it uses fixes from the GPS attached to the device.
+Each request carries a unique confirmation ID. The app waits up to ten seconds
+for the nRF54 to report that both MQTT and HaLow settings were saved and read
+back from NVS; a missing or stale confirmation fails provisioning. Success,
+failure, and cancel paths all disconnect BLE. After a successful confirmation,
+the nRF54 waits for that disconnect and then reboots into the saved profile.
 The nRF54 stores the MQTT credential and HaLow profile. Its HaLow beacon uses
 the MQTT client ID (the Appwrite Device ID) as its user ID and includes GPS and
 IMU sensor data when available. MQTT telemetry publishing is not yet implemented

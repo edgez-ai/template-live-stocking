@@ -955,7 +955,9 @@ export default function App() {
       }
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
 
-      setProvisioningStatus(`Sending ${farm.name} device configuration…`);
+      setProvisioningStatus(isNrfDevice(selectedBleDevice)
+        ? `Saving ${farm.name} configuration and waiting for NVS confirmation…`
+        : `Sending ${farm.name} device configuration…`);
       const payload = JSON.stringify({
         clientId: mqtt.clientId,
         username: mqtt.username,
@@ -975,8 +977,10 @@ export default function App() {
       const mqttResponse = isNrfDevice(selectedBleDevice)
         ? await selectedBleDevice.sendMqttConfig(payload)
         : await selectedBleDevice.sendData("mqtt-config", payload);
-      const accepted = JSON.parse(mqttResponse) as { ok?: boolean; error?: string };
-      if (!accepted.ok) throw new Error(accepted.error || "The device rejected its configuration.");
+      const accepted = JSON.parse(mqttResponse) as { ok?: boolean; persisted?: boolean; error?: string };
+      if (!accepted.ok || (isNrfDevice(selectedBleDevice) && !accepted.persisted)) {
+        throw new Error(accepted.error || "The device did not confirm that its configuration was persisted.");
+      }
       if (useUpstreamWifi && !isNrfDevice(selectedBleDevice)) {
         setProvisioningStatus("Connecting the ESP32 to upstream Wi-Fi…");
         await selectedBleDevice.provision(upstreamSsid, upstreamPassword);

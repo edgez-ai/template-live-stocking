@@ -27,8 +27,6 @@ zephyr_include_directories("${CMAKE_CURRENT_LIST_DIR}")
 zephyr_include_directories(
 	"${CMAKE_CURRENT_LIST_DIR}/../nrf54/include"
 	"${CMAKE_CURRENT_LIST_DIR}/../nrf54/src"
-	"${CMAKE_CURRENT_LIST_DIR}/../nrf54/src/mesh"
-	"${CMAKE_CURRENT_LIST_DIR}/../nrf54/src/mesh/generated"
 	"${CMAKE_CURRENT_LIST_DIR}/../nrf54/src/nanopb"
 )
 target_compile_definitions(app PRIVATE PB_ENABLE_MALLOC=1)
@@ -78,7 +76,6 @@ if(CONFIG_WIFI_MORSE OR CONFIG_WIFI_MORSE_SM)
 endif()
 
 file(GLOB app_sources ../nrf54/src/*.c ../nrf54/src/nanopb/*.c)
-list(FILTER app_sources EXCLUDE REGEX "/meshtastic_phone_api\\.c$")
 target_sources(app PRIVATE ${app_sources})
 
 if(CONFIG_WIFI_MORSE_SM)

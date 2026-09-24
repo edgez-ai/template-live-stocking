@@ -48,12 +48,12 @@ config WIFI_MORSE_TEST
 	  registration of the Morse Micro device as a Zephyr network interface.
 
 config WIFI_MORSE_MESH_MODE
-	bool "Use Meshtastic-style open HaLow bearer"
+	bool "Use open HaLow mesh bearer"
 	default n
 	help
 	  Make the Zephyr Wi-Fi connect path use the primary channel name as the
 	  HaLow SSID/mesh ID while passing MMWLAN_OPEN and passphrase_len=0 to the
-	  Morse stack, matching the raw bearer shape used by Meshtastic-HaLow.
+	  Morse stack, matching the raw open-mesh bearer used by EdgeZ devices.
 
 config WIFI_MORSE_MESH_TRAFFIC_LOG
 	bool "Log HaLow mesh bearer traffic"

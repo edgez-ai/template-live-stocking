@@ -13,12 +13,15 @@ package at `modules/mm-iot-zephyr-prebuilt` and the nRF54 application port in
 `nrf54/`.
 The package contains `libmorse.a`, public headers, radio firmware, and the
 KeepTeen board calibration file; it contains no Morse implementation source.
-The nRF54 keeps its Meshtastic BLE service and advertises a `PROV_` name
+The nRF54 uses the EdgeZ provisioning BLE service and advertises a `PROV_` name
 with its 12-character serial. Its separate GATT service accepts
 `mqtt-config` directly without BLE pairing, ESP-IDF provisioning, Wi-Fi setup,
 or PoP. The app sends the farm country, 1 MHz channel frequency, mesh ID,
 passphrase, optional device location or device GPS selection, and MQTT credential.
 The firmware saves these settings and reboots into the selected HaLow profile.
+Before acknowledging provisioning, it reads both saved MQTT and HaLow records
+back from NVS and returns the request's confirmation ID over the BLE status
+characteristic. It waits for the mobile app to disconnect before rebooting.
 Its sensor beacon uses the MQTT `clientId`/Appwrite Device UUID as its user ID,
 with IMU, GPS, and battery voltage sensor values. The KeepTeen board's
 `ADC_VBAT` on P1.13 uses SAADC channel 6 and a 100 kΩ + 100 kΩ divider;

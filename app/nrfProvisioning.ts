@@ -22,6 +22,21 @@ function utf8Bytes(value: string): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+function decodedStatus(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return String.fromCharCode(...toByteArray(value));
+}
+
+function matchingConfirmation(value: string | null, confirmationId: string): string | null {
+  if (!value) return null;
+  try {
+    const status = JSON.parse(value) as { confirmationId?: string; pending?: boolean };
+    return status.confirmationId === confirmationId && !status.pending ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export class NrfProvisioningDevice {
   readonly kind = "nrf" as const;
   private connected: Device | null = null;
@@ -37,20 +52,38 @@ export class NrfProvisioningDevice {
   async sendMqttConfig(json: string): Promise<string> {
     const device = this.connected;
     if (!device) throw new Error("The nRF54 is not connected.");
-    const payload = utf8Bytes(json);
+    const document = JSON.parse(json) as Record<string, unknown>;
+    const confirmationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+    const payload = utf8Bytes(JSON.stringify({ ...document, confirmationId }));
     if (!payload.length || payload.length > 1024) throw new Error("Device configuration exceeds the BLE limit.");
+    let notifiedStatus: string | null = null;
+    const subscription = device.monitorCharacteristicForService(serviceUuid, statusUuid, (error, characteristic) => {
+      if (error) return;
+      const value = matchingConfirmation(decodedStatus(characteristic?.value), confirmationId);
+      if (value) notifiedStatus = value;
+    });
     const chunkSize = Math.max(1, Math.min(160, (device.mtu || 23) - 6));
-    for (let offset = 0; offset < payload.length;) {
-      const first = offset === 0;
-      const count = Math.min(payload.length - offset, chunkSize);
-      const header = first ? [1, payload.length & 255, payload.length >> 8] : [2];
-      const chunk = Uint8Array.from([...header, ...payload.slice(offset, offset + count)]);
-      await device.writeCharacteristicWithResponseForService(serviceUuid, configUuid, fromByteArray(chunk));
-      offset += count;
+    try {
+      for (let offset = 0; offset < payload.length;) {
+        const first = offset === 0;
+        const count = Math.min(payload.length - offset, chunkSize);
+        const header = first ? [1, payload.length & 255, payload.length >> 8] : [2];
+        const chunk = Uint8Array.from([...header, ...payload.slice(offset, offset + count)]);
+        await device.writeCharacteristicWithResponseForService(serviceUuid, configUuid, fromByteArray(chunk));
+        offset += count;
+      }
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        if (notifiedStatus) return notifiedStatus;
+        const status = await device.readCharacteristicForService(serviceUuid, statusUuid);
+        const confirmed = matchingConfirmation(decodedStatus(status.value), confirmationId);
+        if (confirmed) return confirmed;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      throw new Error("The nRF54 did not confirm that its configuration was saved within 10 seconds.");
+    } finally {
+      subscription.remove();
     }
-    const status = await device.readCharacteristicForService(serviceUuid, statusUuid);
-    if (!status.value) throw new Error("The nRF54 returned no configuration status.");
-    return String.fromCharCode(...toByteArray(status.value));
   }
 
   disconnect(): void {

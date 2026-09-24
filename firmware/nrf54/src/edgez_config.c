@@ -184,6 +184,17 @@ static int save_persisted_profile_locked(void)
 			       offsetof(struct edgez_persisted_profile, settings_data) +
 			       stored.settings_len);
 	if (rc == 0) {
+		struct edgez_persisted_profile verified = {0};
+		size_t stored_len = offsetof(struct edgez_persisted_profile, settings_data) +
+			stored.settings_len;
+		ssize_t verified_len = settings_load_one(EDGEZ_PROFILE_SETTINGS_KEY, &verified,
+						       sizeof(verified));
+
+		if (verified_len != stored_len || memcmp(&verified, &stored, stored_len) != 0) {
+			LOG_ERR("Persistent HaLow profile NVS verification failed bytes=%d expected=%u",
+				(int)verified_len, (unsigned int)stored_len);
+			return -EIO;
+		}
 		LOG_INF("Persistent HaLow profile saved device_type=%d mesh_id=%s frequency=%u kHz bandwidth=%u MHz bytes=%u",
 			settings.device_type, settings.mesh_id, mesh_frequency_khz,
 			mesh_bandwidth_mhz, stored.settings_len);
