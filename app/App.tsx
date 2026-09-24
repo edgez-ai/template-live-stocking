@@ -29,12 +29,13 @@ type CachedSnapshot = { version: 1; user: CurrentUser; farms: CachedFarm[]; devi
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
+type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type GeofenceShape = "circle" | "oval" | "rectangle" | "polygon";
 type GeofenceArea = Models.Row & { farmId: string; name: string; shape: GeofenceShape; geometry: string };
 type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
 type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "receivedAt">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -235,6 +236,7 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "6h", label: "6 HOURS", duration: 6 * 60 * 60 * 1000 },
   { key: "24h", label: "24 HOURS", duration: 24 * 60 * 60 * 1000 },
 ];
+const topologyRecentMs = 2 * 60 * 1000;
 
 function isAuthError(error: unknown) {
   const code = (error as { code?: unknown; status?: unknown } | null)?.code ?? (error as { status?: unknown } | null)?.status;
@@ -309,6 +311,10 @@ function relativeTime(value: string) {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 
+function isRecentTopology(link: TopologyLink) {
+  return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
+}
+
 function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: number }) {
   const [width, setWidth] = useState(0);
   const height = 210;
@@ -344,6 +350,26 @@ function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: 
     {coordinates.length ? <View style={[styles.chartDot, { left: coordinates[coordinates.length - 1].x - 4, top: coordinates[coordinates.length - 1].y - 4 }]} /> : null}
     {!points.length ? <Text style={styles.chartEmpty}>No battery voltage data in this range.</Text> : null}
     {points.length ? <><Text style={styles.chartMax}>{rawMax.toFixed(2)} V</Text><Text style={styles.chartMin}>{rawMin.toFixed(2)} V</Text></> : null}
+  </View>;
+}
+
+function TopologyCard({ device, links }: { device: Device; links: TopologyLink[] }) {
+  const neighbors = links.map((link) => ({
+    id: link.gatewayDeviceId === device.$id ? link.peerDeviceId : link.gatewayDeviceId,
+    serial: link.gatewayDeviceId === device.$id ? link.peerSerial : link.gatewaySerial,
+    radioMac: link.peerRadioMac,
+    rssi: link.rssi,
+    lastSeenAt: link.lastSeenAt,
+  })).filter((neighbor, index, items) => items.findIndex((item) => item.id === neighbor.id) === index);
+  const updatedAt = links.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
+  return <View style={styles.topologyCard}>
+    <View style={styles.topologyHeader}><View><Text style={styles.chartTitle}>Mesh topology</Text><Text style={styles.chartSubtitle}>Direct HaLow links from the last 2 minutes</Text></View><Text style={styles.topologyCount}>{neighbors.length} LINKS{updatedAt ? ` · ${relativeTime(updatedAt)}` : ""}</Text></View>
+    <View style={styles.topologyRoot}><View style={styles.topologyRootIcon}><MaterialCommunityIcons name="router-wireless" size={20} color="white" /></View><View><Text style={styles.topologyNodeName}>{device.name}</Text><Text style={styles.topologyNodeMeta}>{device.serial}</Text></View></View>
+    {neighbors.map((neighbor) => <View key={neighbor.id} style={styles.topologyLinkRow}>
+      <View style={styles.topologyRail}><View style={styles.topologyVertical} /><View style={styles.topologyHorizontal} /><View style={styles.topologyPeerDot} /></View>
+      <View style={styles.topologyPeerInfo}><Text style={styles.topologyNodeName}>{neighbor.serial}</Text><Text style={styles.topologyNodeMeta}>{neighbor.radioMac} · {typeof neighbor.rssi === "number" ? `${neighbor.rssi} dBm` : "direct link"} · {relativeTime(neighbor.lastSeenAt)}</Text></View>
+    </View>)}
+    {!neighbors.length ? <Text style={styles.topologyEmpty}>No active mesh links reported for this device.</Text> : null}
   </View>;
 }
 
@@ -561,6 +587,7 @@ export default function App() {
   const [inviteName, setInviteName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
+  const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
   const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
   const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
@@ -613,12 +640,13 @@ export default function App() {
   const refresh = useCallback((current: CurrentUser): Promise<Farm[]> => {
     if (refreshInFlight.current && refreshUserId.current === current.$id) return refreshInFlight.current;
     const request = (async () => {
-      const [farmResult, deviceResult, telemetryResult] = await Promise.allSettled([
+      const [farmResult, deviceResult, telemetryResult, topologyResult] = await Promise.allSettled([
         tables.listRows<Farm>({ databaseId: config.databaseId, tableId: config.farmTableId, queries: [Query.limit(100)] }),
         deviceApi<{ devices: Device[] }>(),
         tables.listRows({ databaseId: config.databaseId, tableId: config.telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
+        tables.listRows({ databaseId: config.databaseId, tableId: config.topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
       ]);
-      const failures = [farmResult, deviceResult, telemetryResult].filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      const failures = [farmResult, deviceResult, telemetryResult, topologyResult].filter((result): result is PromiseRejectedResult => result.status === "rejected");
       const authFailure = failures.find((failure) => isAuthError(failure.reason));
       if (authFailure) throw authFailure.reason;
       if (activeUserId.current !== current.$id) return farmsRef.current;
@@ -635,6 +663,7 @@ export default function App() {
         telemetryRef.current = telemetryResult.value.rows as unknown as Telemetry[];
         setTelemetry(telemetryRef.current);
       }
+      if (topologyResult.status === "fulfilled") setTopology(topologyResult.value.rows as unknown as TopologyLink[]);
       await cacheSnapshot(current, farmsRef.current, devicesRef.current, telemetryRef.current);
       if (failures.length) {
         setOffline(true);
@@ -680,7 +709,7 @@ export default function App() {
         }
         else {
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setFarms([]); setDevices([]); setTelemetry([]);
+          setFarms([]); setDevices([]); setTelemetry([]); setTopology([]);
           setCurrentFarmId((current.prefs as { currentFarmId?: string }).currentFarmId || "");
         }
         setUser(current);
@@ -693,7 +722,7 @@ export default function App() {
           if (cached) await clearCachedUser(cached.user.$id);
           activeUserId.current = null;
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setCurrentFarmId(""); setOffline(false);
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setCurrentFarmId(""); setOffline(false);
         } else if (cached) setOffline(true);
         else setError(messageOf(caught));
       } finally { if (active) setBusy(false); }
@@ -707,7 +736,7 @@ export default function App() {
         if (isAuthError(caught)) {
           void clearCachedUser(user.$id);
           activeUserId.current = null;
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setCurrentFarmId(""); setOffline(false);
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setCurrentFarmId(""); setOffline(false);
         } else setOffline(true);
       });
     }, offline ? 15000 : 5000);
@@ -991,7 +1020,7 @@ export default function App() {
     }
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
   }
 
   function openSettings() {
@@ -1176,6 +1205,7 @@ export default function App() {
   const activeHistoryDuration = activeHistoryRange.duration;
   const detailLatest = detailDevice ? latestVoltageByDevice.get(detailDevice.$id) : undefined;
   const detailStatus = detailDevice ? statusOf(detailDevice, latestTelemetryByDevice.get(detailDevice.$id)) : "";
+  const detailTopology = detailDevice ? topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === detailDevice.$id || link.peerDeviceId === detailDevice.$id)) : [];
   const currentFarm = farms.find((farm) => farm.$id === currentFarmId);
   const activeTeamId = currentFarm?.teamId;
   useEffect(() => {
@@ -1390,9 +1420,10 @@ export default function App() {
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>
             <View style={styles.rangeSelector}>{historyRanges.map((range) => <Pressable key={range.key} style={[styles.rangeButton, historyRange === range.key && styles.rangeButtonActive]} onPress={() => setHistoryRange(range.key)} disabled={historyLoading}><Text style={[styles.rangeButtonText, historyRange === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
-            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Battery voltage</Text><Text style={styles.chartSubtitle}>HT-HC33 battery ADC · {historyPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View><VoltageChart points={historyPoints} duration={activeHistoryDuration} /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
+            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Battery voltage</Text><Text style={styles.chartSubtitle}>Device battery ADC · {historyPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View><VoltageChart points={historyPoints} duration={activeHistoryDuration} /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
             {historyStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{historyStats.min.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{historyStats.average.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{historyStats.max.toFixed(2)} V</Text></View></View> : null}
-            <Text style={styles.sensorNote}>Battery voltage is measured on the HT-HC33; no reading appears when a battery is disconnected.</Text>
+            <Text style={styles.sensorNote}>Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</Text>
+            <TopologyCard device={detailDevice} links={detailTopology} />
             <View style={styles.dangerZone}><Text style={styles.dangerTitle}>DEVICE ACCESS</Text><Text style={styles.dangerDescription}>Deleting this device revokes its MQTT credential. Historical telemetry is retained.</Text><Pressable style={[styles.deleteButton, offline && styles.disabledButton]} onPress={() => requestDeleteDevice(detailDevice)} disabled={busy || offline}><Text style={styles.deleteButtonText}>{busy ? "DELETING…" : "DELETE DEVICE"}</Text></Pressable></View>
           </ScrollView>
         </> : null}
@@ -1423,5 +1454,6 @@ const styles = StyleSheet.create({
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
   sectionLabel: { color: "#7d9a97", fontSize: 10, fontWeight: "900", letterSpacing: 1.2, marginTop: 6 }, deviceCard: { padding: 18, borderRadius: 18, backgroundColor: "#f7faf9" }, deviceCardHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, deviceCardName: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, deviceSerial: { color: "#718783", fontSize: 10, fontWeight: "700", letterSpacing: .7, marginTop: 3 }, statusBadge: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 20, backgroundColor: "#e7efed" }, statusDot: { width: 7, height: 7, borderRadius: 4 }, statusOnline: { backgroundColor: "#16a085" }, statusOffline: { backgroundColor: "#9badaa" }, statusText: { color: "#4d6965", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, latestRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 24 }, latestLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, latestValue: { color: "#0a3037", fontSize: 39, lineHeight: 45, fontWeight: "900", letterSpacing: -1.5 }, cardArrow: { color: "#0a8c87", fontSize: 36, lineHeight: 42, fontWeight: "300" }, lastSeen: { color: "#718783", fontSize: 10, marginTop: 5 },
   detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, statsRow: { flexDirection: "row", gap: 10 }, stat: { flex: 1, padding: 13, borderRadius: 14, backgroundColor: "white" }, statLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, statValue: { color: "#0a3037", fontSize: 19, fontWeight: "900", marginTop: 4 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
+  topologyCard: { padding: 16, borderRadius: 18, backgroundColor: "white", gap: 12 }, topologyHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }, topologyCount: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, topologyRoot: { flexDirection: "row", alignItems: "center", gap: 10, padding: 11, borderRadius: 12, backgroundColor: "#e9f7f5" }, topologyRootIcon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: "#0a3037" }, topologyNodeName: { color: "#0a3037", fontSize: 12, fontWeight: "900" }, topologyNodeMeta: { color: "#718783", fontSize: 8, marginTop: 2 }, topologyLinkRow: { minHeight: 52, flexDirection: "row", alignItems: "center" }, topologyRail: { width: 50, alignSelf: "stretch", position: "relative" }, topologyVertical: { position: "absolute", left: 18, top: -12, bottom: 26, width: 2, backgroundColor: "#8fcac4" }, topologyHorizontal: { position: "absolute", left: 18, top: 25, width: 25, height: 2, backgroundColor: "#8fcac4" }, topologyPeerDot: { position: "absolute", left: 39, top: 19, width: 14, height: 14, borderRadius: 7, borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "white" }, topologyPeerInfo: { flex: 1, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#f3f8f6" }, topologyEmpty: { paddingVertical: 18, color: "#718783", fontSize: 10, textAlign: "center" },
   empty: { color: "#829d9a", textAlign: "center", padding: 28 }, error: { color: "#ffc0af", textAlign: "center", fontSize: 12, paddingVertical: 12 },
 });

@@ -7,9 +7,11 @@ function localResourceIds() {
   if (!existsSync(configPath)) return {};
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   const telemetryTable = config.tables?.find((table: { $id?: string }) => table.$id === "telemetry");
+  const topologyTable = config.tables?.find((table: { $id?: string }) => table.$id === "topology-links");
   return {
     databaseId: telemetryTable?.databaseId as string | undefined,
     telemetryTableId: telemetryTable?.$id as string | undefined,
+    topologyTableId: topologyTable?.$id as string | undefined,
   };
 }
 
@@ -34,6 +36,8 @@ const required = {
     process.env.LIVE_STOCKING_DATABASE_ID || localResources.databaseId,
   NEXT_PUBLIC_TELEMETRY_TABLE_ID:
     process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || localResources.telemetryTableId,
+  NEXT_PUBLIC_TOPOLOGY_TABLE_ID:
+    process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || localResources.topologyTableId,
 };
 
 const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);

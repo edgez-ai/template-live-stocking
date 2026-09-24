@@ -23,7 +23,9 @@ Its sensor beacon uses the MQTT `clientId`/Appwrite Device UUID as its user ID,
 with IMU, GPS, and battery voltage sensor values. The KeepTeen board's
 `ADC_VBAT` on P1.13 uses SAADC channel 6 and a 100 kΩ + 100 kΩ divider;
 P1.14 (`ADC_VBAT_EN`) powers the divider only while sampling. Battery voltage
-is reported in volts in the HaLow beacon. MQTT telemetry
+is resampled every 15 seconds and the cached HaLow vendor IE is refreshed while
+the interface is active, so updates do not require a reboot. It is reported in
+volts in the HaLow beacon. MQTT telemetry
 publishing has not yet been ported to the nRF54 target. BLE provisioning stays
 off on subsequent boots. Short press the USER button to enable BLE provisioning
 again; after the next successful configuration it turns off again. Hold USER
@@ -96,7 +98,10 @@ connect. The HT-HC33 queues decoded remote HaLow beacon readings in arrival
 order, including repeated readings from the same `clientId`. It publishes a
 batch when five remote readings are queued or 30 seconds have passed, whichever
 comes first. Each batch also includes a fresh HT-HC33 battery reading from its
-GPIO20 controlled divider and GPIO1 ADC input. The QoS 1 JSON payload sent to
+GPIO20 controlled divider and GPIO1 ADC input. Its status entry also includes
+the direct HaLow peers observed in the last two minutes, keyed by the peer's
+Appwrite device ID and radio MAC, with RSSI when the Morse driver provides it.
+The QoS 1 JSON payload sent to
 `projects/<projectId>/devices/<serial>/telemetry/status` is an array:
 
 ```json
@@ -107,7 +112,15 @@ GPIO20 controlled divider and GPIO1 ADC input. The QoS 1 JSON payload sent to
     "batteryVoltageMv": 3840,
     "unit": "millivolt",
     "latitude": 59.3293,
-    "longitude": 18.0686
+    "longitude": 18.0686,
+    "topology": {
+      "links": [{
+        "peerId": "22222222-2222-4222-8222-222222222222",
+        "peerRadioMac": "02:00:00:00:00:02",
+        "ageMs": 1250,
+        "rssi": -61
+      }]
+    }
   },
   {
     "clientId": "22222222-2222-4222-8222-222222222222",

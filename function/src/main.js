@@ -2,6 +2,7 @@ import { Client, ID, Query, TablesDB } from "node-appwrite";
 
 const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABASE_ID;
 const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
+const TOPOLOGY_TABLE_ID = process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || "topology-links";
 const GEOFENCE_AREA_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID;
@@ -16,6 +17,61 @@ function sensorValue(payload, type) {
   if (!Array.isArray(payload?.sensors)) return null;
   const sensor = payload.sensors.find((candidate) => candidate?.type === type);
   return typeof sensor?.value === "number" && Number.isFinite(sensor.value) ? sensor.value : null;
+}
+
+function validTopology(topology) {
+  const valid = topology && typeof topology === "object" && !Array.isArray(topology) &&
+    Array.isArray(topology.links) && topology.links.length <= 16 &&
+    topology.links.every((link) => link && typeof link === "object" &&
+      typeof link.peerId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(link.peerId) &&
+      typeof link.peerRadioMac === "string" && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(link.peerRadioMac) &&
+      Number.isInteger(link.ageMs) && link.ageMs >= 0 && link.ageMs <= 300000 &&
+      (link.rssi === undefined || (Number.isInteger(link.rssi) && link.rssi >= -127 && link.rssi <= 0)));
+  return Boolean(valid) && new Set(topology.links.map((link) => link.peerId)).size === topology.links.length;
+}
+
+async function syncTopology(tables, gateway, links, peerDevices, readPermissions, reportedAt) {
+  const existing = await tables.listRows({
+    databaseId: DATABASE_ID,
+    tableId: TOPOLOGY_TABLE_ID,
+    queries: [Query.equal("gatewayDeviceId", gateway.$id), Query.limit(100)],
+  });
+  const rowsByPeer = new Map((existing.rows || []).map((row) => [row.peerDeviceId, row]));
+  const activePeerIds = new Set();
+  for (let index = 0; index < links.length; index += 1) {
+    const link = links[index];
+    const peer = peerDevices[index];
+    activePeerIds.add(peer.$id);
+    const data = {
+      farmId: gateway.metadata.farmId,
+      gatewayDeviceId: gateway.$id,
+      gatewaySerial: gateway.serial,
+      peerDeviceId: peer.$id,
+      peerSerial: peer.serial,
+      peerRadioMac: link.peerRadioMac.toUpperCase(),
+      rssi: link.rssi ?? null,
+      active: true,
+      lastSeenAt: new Date(new Date(reportedAt).getTime() - link.ageMs).toISOString(),
+      reportedAt,
+    };
+    const row = rowsByPeer.get(peer.$id);
+    if (row) {
+      await tables.updateRow({ databaseId: DATABASE_ID, tableId: TOPOLOGY_TABLE_ID, rowId: row.$id, data, permissions: readPermissions });
+    } else {
+      await tables.createRow({ databaseId: DATABASE_ID, tableId: TOPOLOGY_TABLE_ID, rowId: ID.unique(), data, permissions: readPermissions });
+    }
+  }
+  for (const row of existing.rows || []) {
+    if (!activePeerIds.has(row.peerDeviceId) && row.active) {
+      await tables.updateRow({
+        databaseId: DATABASE_ID,
+        tableId: TOPOLOGY_TABLE_ID,
+        rowId: row.$id,
+        data: { active: false, reportedAt },
+        permissions: readPermissions,
+      });
+    }
+  }
 }
 
 function locationOf(payload) {
@@ -167,6 +223,9 @@ export default async function main({ req, res, error }) {
         typeof sensor.value !== "number" || !Number.isFinite(sensor.value)))) {
       return json(res, { error: "Telemetry sensors must contain supported numeric type and value fields" }, 400);
     }
+    if (entry.topology !== undefined && !validTopology(entry.topology)) {
+      return json(res, { error: "Topology must contain at most 16 valid direct peer links" }, 400);
+    }
     const sensorTypes = new Set((entry.sensors || []).map((sensor) => sensor.type));
     for (const [name, axes] of [["accelerometer", SENSOR_ACCELEROMETER], ["gyroscope", SENSOR_GYROSCOPE]]) {
       if (axes.some((type) => sensorTypes.has(type)) && !axes.every((type) => sensorTypes.has(type))) {
@@ -212,11 +271,23 @@ export default async function main({ req, res, error }) {
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      targets.push({ entry, target, readPermissions });
+      if (entry.topology && targetId !== deviceId) {
+        return json(res, { error: "Only the publishing gateway can report topology" }, 403);
+      }
+      const topologyPeers = [];
+      for (const link of entry.topology?.links || []) {
+        if (link.peerId === deviceId) return json(res, { error: "A topology link cannot target its gateway" }, 400);
+        const peer = await getDevice(req, link.peerId);
+        if (!peer || peer.$id !== link.peerId || !device.metadata?.farmId || peer.metadata?.farmId !== device.metadata.farmId) {
+          return json(res, { error: "Topology peer is not an Appwrite device in the gateway farm" }, 403);
+        }
+        topologyPeers.push(peer);
+      }
+      targets.push({ entry, target, readPermissions, topologyPeers });
     }
     const receivedAt = new Date().toISOString();
     const telemetryIds = [];
-    for (const { entry, target, readPermissions } of targets) {
+    for (const { entry, target, readPermissions, topologyPeers } of targets) {
       const row = await tables.createRow({
         databaseId: DATABASE_ID,
         tableId: TELEMETRY_TABLE_ID,
@@ -232,6 +303,9 @@ export default async function main({ req, res, error }) {
         permissions: readPermissions,
       });
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
+      if (entry.topology) {
+        await syncTopology(tables, device, entry.topology.links, topologyPeers, readPermissions, receivedAt);
+      }
       telemetryIds.push(row.$id);
     }
     return json(res, { accepted: true, telemetryId: telemetryIds[0], telemetryIds, receivedAt }, 201);

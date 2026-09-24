@@ -52,7 +52,10 @@ are displayed as map nodes when latitude and longitude are present. List view
 shows the selected farm name and each device as a card with its connectivity
 status and latest battery voltage. Selecting a card opens the full-screen device
 history view, where the battery voltage line chart can show the last 30 minutes,
-1 hour, 6 hours, or 24 hours.
+1 hour, 6 hours, or 24 hours. The detail view also lists direct HaLow peers from
+the current-state `topology-links` table, including radio MAC, RSSI when
+available, and last-seen time. It hides links whose gateway report is more than
+two minutes old.
 The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.

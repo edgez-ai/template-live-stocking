@@ -11,6 +11,9 @@ device list on the left and the selected device's current battery voltage, histo
 chart, statistics, and recent telemetry on the right. On mobile, devices are
 shown as app-style cards and selecting one opens a full-screen detail view.
 Both layouts require an explicit confirmation before deleting the selected
-device through the authenticated Appwrite Devices API.
+device through the authenticated Appwrite Devices API. The detail view also
+draws the selected device's direct HaLow links from the current-state
+`topology-links` table. Only active rows whose gateway report arrived within
+the last two minutes are displayed.
 Appwrite filters device reads by the permissions assigned at creation, so the
 portal only lists Devices readable by the signed-in creator.

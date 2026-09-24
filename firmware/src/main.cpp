@@ -16,6 +16,7 @@
 #include "mqtt_client.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -36,6 +37,8 @@ constexpr char kLocationNamespace[] = "location";
 constexpr char kMqttEndpoint[] = "mqtt-config";
 constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kGatewayTelemetryInterval = pdMS_TO_TICKS(30000);
+constexpr int64_t kTopologyPeerMaxAgeMs = 120000;
+constexpr size_t kMaxTopologyPeers = 16;
 constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
 constexpr adc_channel_t kBatteryAdcChannel = ADC_CHANNEL_0;  // GPIO1 / ADC_IN
 constexpr EventBits_t kNetworkConnected = BIT0;
@@ -69,12 +72,22 @@ struct DeviceLocation {
 struct BeaconFrame {
   uint16_t length;
   uint8_t data[250];
+  uint8_t source_mac[6];
 };
 
 struct RemoteBeacon {
   char client_id[37];
   pb_size_t sensor_data_count;
   ai_edgez_halow_SensorData sensor_data[9];
+};
+
+struct TopologyPeer {
+  bool occupied;
+  char client_id[37];
+  uint8_t radio_mac[6];
+  int16_t rssi_dbm;
+  bool rssi_valid;
+  int64_t last_seen_ms;
 };
 
 EventGroupHandle_t state_events;
@@ -92,6 +105,8 @@ bool provisioning_active = false;
 bool halow_connect_started = false;
 QueueHandle_t beacon_queue;
 QueueHandle_t telemetry_queue;
+TopologyPeer topology_peers[kMaxTopologyPeers]{};
+portMUX_TYPE topology_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
@@ -242,14 +257,74 @@ void load_device_location() {
   nvs_close(handle);
 }
 
-void enqueue_beacon(const uint8_t *data, size_t length) {
-  if (!beacon_queue || !data || length == 0 || length > sizeof(BeaconFrame::data)) return;
+void enqueue_beacon(const uint8_t *data, size_t length, const uint8_t source_mac[6]) {
+  if (!beacon_queue || !data || !source_mac || length == 0 || length > sizeof(BeaconFrame::data)) return;
   BeaconFrame frame{};
   frame.length = length;
   std::memcpy(frame.data, data, length);
+  std::memcpy(frame.source_mac, source_mac, sizeof(frame.source_mac));
   if (xQueueSend(beacon_queue, &frame, 0) != pdTRUE) {
     ESP_LOGW(kTag, "Raw HaLow beacon queue full; record dropped");
   }
+}
+
+void remember_topology_peer(const char *client_id, const uint8_t radio_mac[6]) {
+  if (!client_id || !client_id[0] || !radio_mac) return;
+  int16_t rssi_dbm = 0;
+  const bool rssi_valid = halow_get_peer_rssi(radio_mac, &rssi_dbm);
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  portENTER_CRITICAL(&topology_lock);
+  TopologyPeer *slot = nullptr;
+  TopologyPeer *oldest = &topology_peers[0];
+  for (auto &peer : topology_peers) {
+    if (peer.occupied && std::strcmp(peer.client_id, client_id) == 0) {
+      slot = &peer;
+      break;
+    }
+    if (!peer.occupied && !slot) slot = &peer;
+    if (peer.last_seen_ms < oldest->last_seen_ms) oldest = &peer;
+  }
+  if (!slot) slot = oldest;
+  slot->occupied = true;
+  strlcpy(slot->client_id, client_id, sizeof(slot->client_id));
+  std::memcpy(slot->radio_mac, radio_mac, sizeof(slot->radio_mac));
+  slot->rssi_dbm = rssi_dbm;
+  slot->rssi_valid = rssi_valid;
+  slot->last_seen_ms = now_ms;
+  portEXIT_CRITICAL(&topology_lock);
+}
+
+void append_topology(cJSON *entry) {
+  TopologyPeer snapshot[kMaxTopologyPeers]{};
+  portENTER_CRITICAL(&topology_lock);
+  std::memcpy(snapshot, topology_peers, sizeof(snapshot));
+  portEXIT_CRITICAL(&topology_lock);
+
+  cJSON *topology = cJSON_CreateObject();
+  cJSON *links = cJSON_CreateArray();
+  if (!topology || !links) {
+    cJSON_Delete(topology);
+    cJSON_Delete(links);
+    return;
+  }
+  cJSON_AddItemToObject(topology, "links", links);
+  const int64_t now_ms = esp_timer_get_time() / 1000;
+  for (const auto &peer : snapshot) {
+    const int64_t age_ms = now_ms - peer.last_seen_ms;
+    if (!peer.occupied || age_ms < 0 || age_ms > kTopologyPeerMaxAgeMs) continue;
+    cJSON *link = cJSON_CreateObject();
+    if (!link) continue;
+    char radio_mac[18]{};
+    std::snprintf(radio_mac, sizeof(radio_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                  peer.radio_mac[0], peer.radio_mac[1], peer.radio_mac[2],
+                  peer.radio_mac[3], peer.radio_mac[4], peer.radio_mac[5]);
+    cJSON_AddStringToObject(link, "peerId", peer.client_id);
+    cJSON_AddStringToObject(link, "peerRadioMac", radio_mac);
+    cJSON_AddNumberToObject(link, "ageMs", static_cast<double>(age_ms));
+    if (peer.rssi_valid) cJSON_AddNumberToObject(link, "rssi", peer.rssi_dbm);
+    cJSON_AddItemToArray(links, link);
+  }
+  cJSON_AddItemToObject(entry, "topology", topology);
 }
 
 void decode_remote_beacon(const BeaconFrame &frame) {
@@ -267,6 +342,7 @@ void decode_remote_beacon(const BeaconFrame &frame) {
                 static_cast<unsigned long long>(beacon.user_id_low >> 48),
                 static_cast<unsigned long long>(beacon.user_id_low & 0xffffffffffffULL));
   if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) return;
+  remember_topology_peer(reading.client_id, frame.source_mac);
   float latitude = beacon.latitude;
   float longitude = beacon.longitude;
   bool has_latitude = false;
@@ -325,6 +401,7 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
     if (!entry) continue;
     cJSON_AddStringToObject(entry, "clientId", reading.client_id);
     cJSON_AddStringToObject(entry, "status", "online");
+    if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) append_topology(entry);
     cJSON *sensors = cJSON_CreateArray();
     if (sensors) cJSON_AddItemToObject(entry, "sensors", sensors);
     for (pb_size_t i = 0; i < reading.sensor_data_count; ++i) {

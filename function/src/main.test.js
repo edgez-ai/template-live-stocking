@@ -6,6 +6,7 @@ process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
 process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
 process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
 process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
+process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
 const { default: main } = await import("./main.js");
 
 const gatewayId = "11111111-1111-4111-8111-111111111111";
@@ -18,27 +19,48 @@ const devices = new Map([
 ]);
 const originalFetch = globalThis.fetch;
 const originalCreateRow = TablesDB.prototype.createRow;
+const originalListRows = TablesDB.prototype.listRows;
+const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
+const topologyRows = [];
 
 beforeEach(() => {
   rows.length = 0;
+  topologyRows.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
   process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
+  process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
   globalThis.fetch = async (url) => {
     const device = devices.get(decodeURIComponent(url.split("/").pop()));
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
   TablesDB.prototype.createRow = async (args) => {
+    if (args.tableId === "topology-a") {
+      const row = { $id: `topology-${topologyRows.length + 1}`, ...args.data };
+      topologyRows.push(row);
+      return row;
+    }
     rows.push(args);
     return { $id: `telemetry-${rows.length}` };
+  };
+  TablesDB.prototype.listRows = async (args) => ({
+    rows: args.tableId === "topology-a"
+      ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId) : [],
+  });
+  TablesDB.prototype.updateRow = async (args) => {
+    const row = topologyRows.find((candidate) => candidate.$id === args.rowId);
+    if (row) Object.assign(row, args.data);
+    return row;
   };
 });
 
 after(() => {
   globalThis.fetch = originalFetch;
   TablesDB.prototype.createRow = originalCreateRow;
+  TablesDB.prototype.listRows = originalListRows;
+  TablesDB.prototype.updateRow = originalUpdateRow;
 });
 
 async function publish(payload) {
@@ -117,4 +139,33 @@ test("partial IMU readings are rejected", async () => {
   assert.equal(result.status, 400);
   assert.match(result.body.error, /IMU accelerometer/);
   assert.equal(rows.length, 0);
+});
+
+test("gateway topology upserts direct links and marks missing peers inactive", async () => {
+  const link = { peerId: remoteId, peerRadioMac: "02:11:22:33:44:55", rssi: -67, ageMs: 1200 };
+  let result = await publish({ clientId: gatewayId, status: "online", topology: { links: [link] } });
+  assert.equal(result.status, 201);
+  assert.equal(topologyRows.length, 1);
+  assert.deepEqual(
+    { gatewayDeviceId: topologyRows[0].gatewayDeviceId, peerDeviceId: topologyRows[0].peerDeviceId, rssi: topologyRows[0].rssi, active: topologyRows[0].active },
+    { gatewayDeviceId: gatewayId, peerDeviceId: remoteId, rssi: -67, active: true },
+  );
+
+  result = await publish({ clientId: gatewayId, status: "online", topology: { links: [] } });
+  assert.equal(result.status, 201);
+  assert.equal(topologyRows.length, 1);
+  assert.equal(topologyRows[0].active, false);
+});
+
+test("remote devices cannot report gateway topology", async () => {
+  const result = await publish([{ clientId: remoteId, topology: { links: [] } }]);
+  assert.equal(result.status, 403);
+  assert.equal(topologyRows.length, 0);
+});
+
+test("a topology report rejects duplicate peers", async () => {
+  const link = { peerId: remoteId, peerRadioMac: "02:11:22:33:44:55", ageMs: 0 };
+  const result = await publish({ clientId: gatewayId, topology: { links: [link, link] } });
+  assert.equal(result.status, 400);
+  assert.equal(topologyRows.length, 0);
 });

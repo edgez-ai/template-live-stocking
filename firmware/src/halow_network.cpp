@@ -18,14 +18,14 @@ halow_ready_callback_t ready_callback;
 halow_beacon_callback_t beacon_callback;
 struct mmwlan_beacon_vendor_ie_filter beacon_filter{};
 void on_beacon_vendor_ie(const uint8_t *ies, uint32_t length,
-                         const uint8_t *, void *) {
+                         const uint8_t *bssid, void *) {
   if (!beacon_callback || !ies) return;
   for (size_t offset = 0; offset + 2 <= length;) {
     const size_t ie_length = ies[offset + 1];
     if (offset + 2 + ie_length > length) break;
     if (ies[offset] == 221 && ie_length > 5 &&
         std::memcmp(ies + offset + 2, "EdgeZ", 5) == 0) {
-      beacon_callback(ies + offset + 7, ie_length - 5);
+      beacon_callback(ies + offset + 7, ie_length - 5, bssid);
     }
     offset += 2 + ie_length;
   }
@@ -77,6 +77,11 @@ bool halow_channel_supported(const char *country, uint8_t channel) {
 
 void halow_set_beacon_callback(halow_beacon_callback_t callback) {
   beacon_callback = callback;
+}
+
+bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
+  return peer_mac && rssi_dbm &&
+         mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
 }
 
 esp_err_t halow_connect(const char *mesh_id, const char *passphrase,

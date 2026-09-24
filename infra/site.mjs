@@ -17,6 +17,7 @@ export function installSite() {
     ["LIVE_STOCKING_PROJECT_ID", config.projectId],
     ["LIVE_STOCKING_DATABASE_ID", config.databaseId],
     ["LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId],
+    ["LIVE_STOCKING_TOPOLOGY_TABLE_ID", config.topologyTableId],
   ];
   for (const [key, value] of variables) upsertResourceVariable("sites", "--site-id", id, key, value);
   run(["sites", "create-deployment", "--site-id", id, "--code", "../site", "--install-command", "npm install", "--build-command", "npm run build", "--output-directory", "out", "--activate", "true"], { cwd: infraDir });

@@ -49,12 +49,16 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    topics and subscribe only beneath its own commands topic.
    Firmware reads the HT-HC33 battery ADC every 30 seconds and publishes one
    `status` message with online state, optional `batteryVoltageMv` in millivolts,
-   and optional provisioning coordinates.
+   optional provisioning coordinates, and its recently observed direct HaLow
+   peers.
 6. Appwrite resolves the MQTT client and emits
    `devices.<deviceId>.mqtt.message.publish` to the Function.
 7. The Function verifies the topic project and serial against the built-in
-   device, then creates a telemetry row carrying its read permissions.
-8. Web and mobile read permitted telemetry directly from TablesDB.
+   device, creates a telemetry row carrying its read permissions, and upserts
+   the gateway's current links in `topology-links`.
+8. Web and mobile read permitted telemetry and topology directly from TablesDB.
+   They display only active links reported within the last two minutes, so an
+   offline gateway cannot leave stale topology visible.
 
 The mobile app caches each signed-in user's farm list, device list, and recent
 telemetry for offline viewing. It refreshes them when Appwrite is reachable and

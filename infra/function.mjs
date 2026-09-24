@@ -13,6 +13,7 @@ export function installFunction() {
     : ["functions", "create", ...settings]);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_DATABASE_ID", config.databaseId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId);
+  upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_TOPOLOGY_TABLE_ID", config.topologyTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID", config.geofenceAreaTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID", config.geofenceRuleTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID", config.geofenceAlarmTableId);

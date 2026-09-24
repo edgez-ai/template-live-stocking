@@ -53,6 +53,35 @@ export function installDatabase() {
     ["tables-db", "get-index", ...telemetry, "--key", "device-history"],
     ["tables-db", "create-index", ...telemetry, "--key", "device-history", "--type", "key", "--columns", "deviceId", "receivedAt", "--orders", "ASC", "ASC"]);
 
+  const topology = ["--database-id", config.databaseId, "--table-id", config.topologyTableId];
+  ensure("topology links table",
+    ["tables-db", "get-table", ...topology],
+    ["tables-db", "create-table", ...topology, "--name", "Topology links", "--row-security", "true"]);
+  run(["tables-db", "update-table", ...topology, "--row-security", "true"]);
+  for (const [key, size] of [["farmId", "36"], ["gatewayDeviceId", "36"], ["gatewaySerial", "36"], ["peerDeviceId", "36"], ["peerSerial", "36"], ["peerRadioMac", "17"], ["lastSeenAt", "40"], ["reportedAt", "40"]]) {
+    ensure(`topology.${key} column`,
+      ["tables-db", "get-column", ...topology, "--key", key],
+      ["tables-db", "create-string-column", ...topology, "--key", key, "--size", size, "--required", "true"]);
+  }
+  ensure("topology.rssi column",
+    ["tables-db", "get-column", ...topology, "--key", "rssi"],
+    ["tables-db", "create-integer-column", ...topology, "--key", "rssi", "--min", "-127", "--max", "0"]);
+  ensure("topology.active column",
+    ["tables-db", "get-column", ...topology, "--key", "active"],
+    ["tables-db", "create-boolean-column", ...topology, "--key", "active", "--required", "true"]);
+  ensure("topology gateway-peer index",
+    ["tables-db", "get-index", ...topology, "--key", "gateway-peer"],
+    ["tables-db", "create-index", ...topology, "--key", "gateway-peer", "--type", "unique", "--columns", "gatewayDeviceId", "peerDeviceId"]);
+  ensure("topology gateway index",
+    ["tables-db", "get-index", ...topology, "--key", "gateway-id"],
+    ["tables-db", "create-index", ...topology, "--key", "gateway-id", "--type", "key", "--columns", "gatewayDeviceId"]);
+  ensure("topology farm active index",
+    ["tables-db", "get-index", ...topology, "--key", "farm-active"],
+    ["tables-db", "create-index", ...topology, "--key", "farm-active", "--type", "key", "--columns", "farmId", "active"]);
+  ensure("topology active reported index",
+    ["tables-db", "get-index", ...topology, "--key", "active-reported"],
+    ["tables-db", "create-index", ...topology, "--key", "active-reported", "--type", "key", "--columns", "active", "reportedAt", "--orders", "ASC", "DESC"]);
+
   const geofenceAreas = ["--database-id", config.databaseId, "--table-id", config.geofenceAreaTableId];
   ensure("geofence areas table",
     ["tables-db", "get-table", ...geofenceAreas],

@@ -13,3 +13,10 @@ the publishing device.
 The unified `status` payload may include an integer `batteryVoltageMv` from
 2500 to 5000 with `unit: "millivolt"`, plus valid latitude and longitude.
 Other telemetry channels keep their JSON payloads.
+
+A publishing gateway may include `topology.links` in its own status entry. The
+Function validates each peer against the gateway's farm and upserts one current
+row per gateway-peer pair in `topology-links`. Peers omitted by the next report
+are marked inactive. Each row keeps both the peer's `lastSeenAt` and the
+gateway report's `reportedAt`; clients additionally reject reports older than
+two minutes.

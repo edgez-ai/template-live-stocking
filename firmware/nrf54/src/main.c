@@ -1385,16 +1385,15 @@ static void maybe_refresh_edgez_sensor_beacon(void)
 
 	/* Morse mesh starts beaconing before its station state necessarily reaches
 	 * MMWLAN_STA_CONNECTED. Gate on the applied interface generation instead;
-	 * requiring HALOW_CONNECTED leaves the initial IMU payload cached forever
-	 * on a beacon-only mesh node. */
-	if (edgez_applied_generation == 0 || edgez_restart_pending ||
-	    (!edgez_imu_is_ready() && !edgez_gps_is_ready())) {
+	 * requiring HALOW_CONNECTED leaves dynamic battery/IMU/GPS values cached
+	 * forever on a beacon-only mesh node. */
+	if (edgez_applied_generation == 0 || edgez_restart_pending) {
 		return;
 	}
 
 	edgez_config_get_profile(&profile);
-	if (profile.device_type != ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON &&
-	    profile.device_type != ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR) {
+	if (profile.device_type < ai_edgez_halow_DeviceType_DEVICE_TYPE_USER ||
+	    profile.device_type > ai_edgez_halow_DeviceType_DEVICE_TYPE_RELAY) {
 		return;
 	}
 	if (last_refresh_ms != 0 &&
@@ -1406,6 +1405,9 @@ static void maybe_refresh_edgez_sensor_beacon(void)
 	(void)mmwlan_get_vif_mac_addr(MMWLAN_VIF_STA, current_mac);
 	if (edgez_config_build_vendor_ies(vendor_ies, sizeof(vendor_ies),
 					 current_mac, &vendor_ies_len) == 0) {
+		/* Battery sensing is present even when IMU and GPS are unavailable. The
+		 * ADC helper performs the slower 15-second sampling/cache policy, while
+		 * rebuilding here ensures the next mesh beacon receives that new value. */
 		LOG_DBG("Refreshed dynamic sensor beacon IE len=%u", (unsigned)vendor_ies_len);
 	}
 }

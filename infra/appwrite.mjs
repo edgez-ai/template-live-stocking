@@ -9,6 +9,7 @@ const appwriteConfig = JSON.parse(
   readFileSync(path.join(rootDir, "appwrite.config.json"), "utf8"),
 );
 const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
+const topologyTable = appwriteConfig.tables?.find((table) => table.$id === "topology-links");
 const farmTable = appwriteConfig.tables?.find((table) => table.$id === "farms");
 const geofenceAreaTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas");
 const geofenceRuleTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules");
@@ -16,9 +17,9 @@ const geofenceAlarmTable = appwriteConfig.tables?.find((table) => table.$id === 
 const database = appwriteConfig.tablesDB?.find(
   (candidate) => candidate.$id === telemetryTable?.databaseId,
 );
-if (!database || !telemetryTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
-    [farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
-  throw new Error("appwrite.config.json must define the farm, telemetry, and geofence tables in the same database");
+if (!database || !telemetryTable || !topologyTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+    [topologyTable, farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
+  throw new Error("appwrite.config.json must define the farm, telemetry, topology, and geofence tables in the same database");
 }
 
 const cli = path.join(infraDir, "node_modules", ".bin", "appwrite");
@@ -55,6 +56,7 @@ export const config = {
   apiKey: process.env.APPWRITE_API_KEY,
   databaseId: database.$id,
   telemetryTableId: telemetryTable.$id,
+  topologyTableId: topologyTable.$id,
   farmTableId: farmTable.$id,
   geofenceAreaTableId: geofenceAreaTable.$id,
   geofenceRuleTableId: geofenceRuleTable.$id,

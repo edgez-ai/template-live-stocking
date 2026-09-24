@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
+type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type VoltagePoint = { timestamp: number; value: number };
 type SensorPayload = {
@@ -19,6 +20,7 @@ const account = new Account(client);
 const tables = new TablesDB(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
+const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const historyRanges: { key: HistoryRange; label: string; duration: number }[] = [
@@ -27,6 +29,7 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "6h", label: "6 hours", duration: 6 * 60 * 60 * 1000 },
   { key: "24h", label: "24 hours", duration: 24 * 60 * 60 * 1000 },
 ];
+const topologyRecentMs = 2 * 60 * 1000;
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
@@ -59,6 +62,10 @@ function relativeTime(value: string) {
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   return `${Math.floor(seconds / 3600)}h ago`;
+}
+
+function isRecentTopology(link: TopologyLink) {
+  return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
 }
 
 function prettyPayload(payload: string) {
@@ -98,6 +105,34 @@ function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: 
   </div>;
 }
 
+function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[] }) {
+  const neighbors = links.map((link) => ({
+    id: link.gatewayDeviceId === device.$id ? link.peerDeviceId : link.gatewayDeviceId,
+    serial: link.gatewayDeviceId === device.$id ? link.peerSerial : link.gatewaySerial,
+    rssi: link.rssi,
+    lastSeenAt: link.lastSeenAt,
+  })).filter((neighbor, index, items) => items.findIndex((item) => item.id === neighbor.id) === index);
+  const height = Math.max(220, neighbors.length * 74);
+  const centerY = height / 2;
+  if (!neighbors.length) return <div className="topology-empty">No active mesh links reported for this device.</div>;
+  return <div className="topology-wrap"><svg className="topology-graph" viewBox={`0 0 720 ${height}`} role="img" aria-label={`Mesh topology for ${device.name}`}>
+    {neighbors.map((neighbor, index) => {
+      const y = neighbors.length === 1
+        ? centerY
+        : 40 + index * ((height - 80) / (neighbors.length - 1));
+      return <g key={neighbor.id}>
+        <line className="topology-edge" x1="360" y1={centerY} x2="590" y2={y} />
+        <text className="topology-signal" x="475" y={(centerY + y) / 2 - 7} textAnchor="middle">{typeof neighbor.rssi === "number" ? `${neighbor.rssi} dBm` : "direct"}</text>
+        <circle className="topology-peer" cx="590" cy={y} r="25" />
+        <text className="topology-node-label" x="625" y={y - 3}>{neighbor.serial}</text>
+        <text className="topology-node-meta" x="625" y={y + 13}>{relativeTime(neighbor.lastSeenAt)}</text>
+      </g>;
+    })}
+    <circle className="topology-gateway" cx="360" cy={centerY} r="31" />
+    <text className="topology-center-label" x="360" y={centerY + 4} textAnchor="middle">{device.name.slice(0, 10)}</text>
+  </svg></div>;
+}
+
 async function listDevices<T>() {
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices`, {
@@ -132,6 +167,7 @@ export default function Home() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
+  const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
@@ -146,12 +182,14 @@ export default function Home() {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, telemetryRows] = await Promise.all([
+    const [deviceResult, telemetryRows, topologyRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
+      tables.listRows({ databaseId, tableId: topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
     ]);
     setDevices(deviceResult.devices);
     setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
+    setTopology(topologyRows.rows as unknown as TopologyLink[]);
   }, []);
 
   useEffect(() => {
@@ -202,7 +240,7 @@ export default function Home() {
 
   async function signOut() {
     await account.deleteSession({ sessionId: "current" });
-    setUser(null); setDevices([]); setTelemetry([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
+    setUser(null); setDevices([]); setTelemetry([]); setTopology([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
   }
 
   async function removeSelectedDevice() {
@@ -234,6 +272,8 @@ export default function Home() {
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
   const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
+  const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
+  const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
   const historyStats = useMemo(() => {
     if (!historyPoints.length) return null;
@@ -285,6 +325,7 @@ export default function Home() {
             <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>Device battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><VoltageChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
             <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
+            <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>
