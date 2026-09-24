@@ -7,6 +7,10 @@ type Device = { $id: string; serial: string; name: string; status: string; enabl
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type VoltagePoint = { timestamp: number; value: number };
+type SensorPayload = {
+  batteryVoltageMv?: unknown;
+  sensors?: { type?: unknown; value?: unknown }[];
+};
 
 const client = new Client()
   .setEndpoint(process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!)
@@ -28,10 +32,19 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
+const batteryVoltageSensorType = 12;
+
 function voltageOf(row: Telemetry) {
   try {
-    const value = Number((JSON.parse(row.payload) as { batteryVoltageMv?: unknown }).batteryVoltageMv);
-    return (row.channel === "status" || row.channel === "battery") && Number.isInteger(value) && value >= 2500 && value <= 5000 ? value / 1000 : null;
+    if (row.channel !== "status" && row.channel !== "battery") return null;
+    const payload = JSON.parse(row.payload) as SensorPayload;
+    const sensorValue = payload.sensors?.find((sensor) => sensor?.type === batteryVoltageSensorType)?.value;
+    if (typeof sensorValue === "number" && Number.isFinite(sensorValue) && sensorValue >= 2.5 && sensorValue <= 5.0) {
+      return sensorValue;
+    }
+    const legacyMillivolts = Number(payload.batteryVoltageMv);
+    return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 2500 && legacyMillivolts <= 5000
+      ? legacyMillivolts / 1000 : null;
   } catch { return null; }
 }
 
@@ -269,9 +282,9 @@ export default function Home() {
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing telemetry rows are not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
-            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>HT-HC33 battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><VoltageChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
+            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>Device battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><VoltageChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
-            <p className="sensor-note">Battery voltage is measured on the HT-HC33; no reading appears when a battery is disconnected.</p>
+            <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>
