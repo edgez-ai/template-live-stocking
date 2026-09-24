@@ -3,7 +3,7 @@
 import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean };
+type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
@@ -23,6 +23,9 @@ const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
+const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
+const otaImageUrl = /^https:\/\/github\.com\/[^/]+\/[^/]+$/.test(otaRepositoryUrl)
+  ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
 const historyRanges: { key: HistoryRange; label: string; duration: number }[] = [
   { key: "30m", label: "30 min", duration: 30 * 60 * 1000 },
   { key: "1h", label: "1 hour", duration: 60 * 60 * 1000 },
@@ -49,6 +52,14 @@ function voltageOf(row: Telemetry) {
     return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 2500 && legacyMillivolts <= 5000
       ? legacyMillivolts / 1000 : null;
   } catch { return null; }
+}
+
+function firmwareVersionOf(row?: Telemetry) {
+  if (!row) return "";
+  try {
+    const value = (JSON.parse(row.payload) as { firmwareVersion?: unknown }).firmwareVersion;
+    return typeof value === "string" ? value : "";
+  } catch { return ""; }
 }
 
 function statusOf(device: Device, latest?: Telemetry) {
@@ -163,6 +174,20 @@ async function deleteDevice(deviceId: string) {
   }
 }
 
+async function sendOtaCommand(deviceId: string) {
+  if (!otaImageUrl) throw new Error("This deployment does not expose a supported source repository for OTA.");
+  const jwt = await account.createJWT();
+  const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
+    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() } }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { message?: string };
+    throw new Error(payload.message || "Could not send the OTA command.");
+  }
+}
+
 export default function Home() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -176,6 +201,8 @@ export default function Home() {
   const [historyError, setHistoryError] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [otaDeviceId, setOtaDeviceId] = useState("");
+  const [otaMessage, setOtaMessage] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(true);
@@ -254,6 +281,16 @@ export default function Home() {
     finally { setDeleting(false); }
   }
 
+  async function updateSelectedDevice() {
+    if (!selectedDevice || !window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
+    setOtaDeviceId(selectedDevice.$id); setOtaMessage(""); setError("");
+    try {
+      await sendOtaCommand(selectedDevice.$id);
+      setOtaMessage("Update requested. The device will download, install, and restart in the background.");
+    } catch (caught) { setError(errorMessage(caught)); }
+    finally { setOtaDeviceId(""); }
+  }
+
   const latestVoltageByDevice = useMemo(() => {
     const latest = new Map<string, { row: Telemetry; value: number }>();
     for (const row of telemetry) {
@@ -271,6 +308,7 @@ export default function Home() {
   const selectedDevice = devices.find((device) => device.$id === selectedDeviceId);
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
+  const selectedFirmwareVersion = firmwareVersionOf(selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined);
   const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
@@ -326,6 +364,7 @@ export default function Home() {
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
             <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
             <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
+            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>

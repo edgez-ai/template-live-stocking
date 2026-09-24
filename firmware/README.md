@@ -150,8 +150,15 @@ table, and factory app image to flash at address `0x0`, and
 table has two OTA app slots and OTA data. Existing devices with the previous
 factory-only partition table need the new partition table flashed before an OTA
 image can be used. Flashing the merged image erases provisioning data in NVS;
-provision the device again afterward. The firmware does not yet download or
-apply OTA updates by itself.
+provision the device again afterward.
+
+The HT-HC33 subscribes to
+`projects/<projectId>/devices/<serial>/commands/ota`. A command contains an
+HTTPS `url` and unique `requestId`. Firmware queues the request outside the MQTT
+callback, downloads it with the ESP-IDF certificate bundle, installs it in the
+inactive OTA slot, and restarts only after ESP-IDF validates the image. OTA
+progress is published on `telemetry/ota`. Normal gateway status telemetry and
+OTA progress both include the running ESP-IDF application `firmwareVersion`.
 
 This target is the Heltec HT-HC33. It has no dependency on the WiFi LoRa 32 V3
 SSD1306 display or its I2C/Vext pins; provisioning, HaLow, MQTT, and reset status

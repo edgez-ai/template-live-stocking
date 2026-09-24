@@ -9,8 +9,10 @@
 #include "esp_adc/adc_oneshot.h"
 #include "halow_network.h"
 #include "driver/gpio.h"
+#include "esp_app_desc.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "mqtt_client.h"
@@ -39,6 +41,8 @@ constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kGatewayTelemetryInterval = pdMS_TO_TICKS(30000);
 constexpr int64_t kTopologyPeerMaxAgeMs = 120000;
 constexpr size_t kMaxTopologyPeers = 16;
+constexpr size_t kMaxOtaUrlLength = 512;
+constexpr size_t kMaxOtaRequestIdLength = 64;
 constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
 constexpr adc_channel_t kBatteryAdcChannel = ADC_CHANNEL_0;  // GPIO1 / ADC_IN
 constexpr EventBits_t kNetworkConnected = BIT0;
@@ -90,6 +94,11 @@ struct TopologyPeer {
   int64_t last_seen_ms;
 };
 
+struct OtaCommand {
+  char url[kMaxOtaUrlLength];
+  char request_id[kMaxOtaRequestIdLength];
+};
+
 EventGroupHandle_t state_events;
 esp_mqtt_client_handle_t mqtt_client;
 adc_oneshot_unit_handle_t battery_adc;
@@ -105,12 +114,116 @@ bool provisioning_active = false;
 bool halow_connect_started = false;
 QueueHandle_t beacon_queue;
 QueueHandle_t telemetry_queue;
+QueueHandle_t ota_queue;
 TopologyPeer topology_peers[kMaxTopologyPeers]{};
 portMUX_TYPE topology_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
 esp_err_t configure_mesh(cJSON *root);
+
+bool valid_https_url(const char *url) {
+  if (!url || std::strncmp(url, "https://", 8) != 0) return false;
+  const size_t length = std::strlen(url);
+  if (length <= 8 || length >= kMaxOtaUrlLength) return false;
+  for (size_t index = 8; index < length; ++index) {
+    if (url[index] <= ' ' || url[index] == '\\') return false;
+  }
+  return true;
+}
+
+void publish_ota_status(const OtaCommand &command, const char *status, const char *detail = nullptr) {
+  if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return;
+  cJSON *root = cJSON_CreateObject();
+  cJSON *ota = cJSON_CreateObject();
+  if (!root || !ota) {
+    cJSON_Delete(root);
+    cJSON_Delete(ota);
+    return;
+  }
+  cJSON_AddStringToObject(root, "clientId", mqtt_config.client_id);
+  cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
+  cJSON_AddStringToObject(ota, "requestId", command.request_id);
+  cJSON_AddStringToObject(ota, "status", status);
+  if (detail && detail[0]) cJSON_AddStringToObject(ota, "detail", detail);
+  cJSON_AddItemToObject(root, "ota", ota);
+  char *payload = cJSON_PrintUnformatted(root);
+  if (payload) {
+    char topic[384]{};
+    std::snprintf(topic, sizeof(topic), "projects/%s/devices/%s/telemetry/ota",
+                  mqtt_config.project_id, mqtt_config.username);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    cJSON_free(payload);
+  }
+  cJSON_Delete(root);
+}
+
+void ota_task(void *) {
+  OtaCommand command{};
+  while (true) {
+    if (xQueueReceive(ota_queue, &command, portMAX_DELAY) != pdTRUE) continue;
+    ESP_LOGI(kTag, "Starting OTA request %s", command.request_id);
+    show_device_status("FIRMWARE UPDATE", "DOWNLOADING");
+    publish_ota_status(command, "downloading");
+
+    esp_http_client_config_t http_config{};
+    http_config.url = command.url;
+    http_config.crt_bundle_attach = esp_crt_bundle_attach;
+    http_config.timeout_ms = 30000;
+    http_config.keep_alive_enable = true;
+    esp_https_ota_config_t ota_config{};
+    ota_config.http_config = &http_config;
+    const esp_err_t result = esp_https_ota(&ota_config);
+    if (result == ESP_OK) {
+      ESP_LOGI(kTag, "OTA request %s installed; rebooting", command.request_id);
+      show_device_status("FIRMWARE UPDATE", "INSTALLED - REBOOTING");
+      publish_ota_status(command, "installed");
+      vTaskDelay(pdMS_TO_TICKS(1500));
+      esp_restart();
+    }
+
+    ESP_LOGE(kTag, "OTA request %s failed: %s", command.request_id, esp_err_to_name(result));
+    show_device_status("FIRMWARE UPDATE", "FAILED");
+    publish_ota_status(command, "failed", esp_err_to_name(result));
+  }
+}
+
+void handle_ota_command(const esp_mqtt_event_handle_t event) {
+  char expected_topic[384]{};
+  std::snprintf(expected_topic, sizeof(expected_topic), "projects/%s/devices/%s/commands/ota",
+                mqtt_config.project_id, mqtt_config.username);
+  const size_t expected_length = std::strlen(expected_topic);
+  if (event->topic_len != static_cast<int>(expected_length) ||
+      std::memcmp(event->topic, expected_topic, expected_length) != 0) return;
+  if (event->current_data_offset != 0 || event->data_len != event->total_data_len ||
+      event->data_len <= 0 || event->data_len > 1024) {
+    ESP_LOGW(kTag, "Rejected fragmented or oversized OTA command");
+    return;
+  }
+
+  cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
+  cJSON *url = root ? cJSON_GetObjectItemCaseSensitive(root, "url") : nullptr;
+  cJSON *request_id = root ? cJSON_GetObjectItemCaseSensitive(root, "requestId") : nullptr;
+  OtaCommand command{};
+  const bool valid = cJSON_IsString(url) && url->valuestring && valid_https_url(url->valuestring) &&
+      cJSON_IsString(request_id) && request_id->valuestring && request_id->valuestring[0] &&
+      std::strlen(request_id->valuestring) < sizeof(command.request_id);
+  if (valid) {
+    strlcpy(command.url, url->valuestring, sizeof(command.url));
+    strlcpy(command.request_id, request_id->valuestring, sizeof(command.request_id));
+  }
+  cJSON_Delete(root);
+  if (!valid) {
+    ESP_LOGW(kTag, "Rejected invalid OTA command");
+    return;
+  }
+  if (xQueueSend(ota_queue, &command, 0) != pdTRUE) {
+    ESP_LOGW(kTag, "Ignored OTA request %s because an update is already queued", command.request_id);
+    publish_ota_status(command, "busy");
+    return;
+  }
+  publish_ota_status(command, "accepted");
+}
 
 void halow_ready() {
   xEventGroupSetBits(state_events, kNetworkConnected);
@@ -401,7 +514,10 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
     if (!entry) continue;
     cJSON_AddStringToObject(entry, "clientId", reading.client_id);
     cJSON_AddStringToObject(entry, "status", "online");
-    if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) append_topology(entry);
+    if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) {
+      cJSON_AddStringToObject(entry, "firmwareVersion", esp_app_get_description()->version);
+      append_topology(entry);
+    }
     cJSON *sensors = cJSON_CreateArray();
     if (sensors) cJSON_AddItemToObject(entry, "sensors", sensors);
     for (pb_size_t i = 0; i < reading.sensor_data_count; ++i) {
@@ -680,6 +796,7 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
     const int data_length = event->data_len < 512 ? event->data_len : 512;
     ESP_LOGI(kTag, "Command received topic=%.*s payload=%.*s",
              topic_length, event->topic, data_length, event->data);
+    handle_ota_command(event);
   }
 }
 
@@ -792,7 +909,8 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(state_events ? ESP_OK : ESP_ERR_NO_MEM);
   beacon_queue = xQueueCreate(16, sizeof(BeaconFrame));
   telemetry_queue = xQueueCreate(32, sizeof(RemoteBeacon));
-  ESP_ERROR_CHECK(beacon_queue && telemetry_queue ? ESP_OK : ESP_ERR_NO_MEM);
+  ota_queue = xQueueCreate(1, sizeof(OtaCommand));
+  ESP_ERROR_CHECK(beacon_queue && telemetry_queue && ota_queue ? ESP_OK : ESP_ERR_NO_MEM);
   halow_set_beacon_callback(enqueue_beacon);
   ESP_ERROR_CHECK(xTaskCreate(remote_beacon_task, "remote_beacons", 4096, nullptr, 5, nullptr) == pdPASS
                       ? ESP_OK : ESP_ERR_NO_MEM);
@@ -822,6 +940,8 @@ extern "C" void app_main() {
   const BaseType_t publish_task_created = xTaskCreate(
       telemetry_publish_task, "telemetry_publish", 4096, nullptr, 5, nullptr);
   ESP_ERROR_CHECK(gateway_task_created == pdPASS && publish_task_created == pdPASS
+                      ? ESP_OK : ESP_ERR_NO_MEM);
+  ESP_ERROR_CHECK(xTaskCreate(ota_task, "ota", 8192, nullptr, 6, nullptr) == pdPASS
                       ? ESP_OK : ESP_ERR_NO_MEM);
 
   ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));

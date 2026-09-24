@@ -60,6 +60,12 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
 
+Web and mobile can request an HT-HC33 firmware update. The repository is taken
+from Appwrite's deployment-provided `APPWRITE_VCS_REPOSITORY_URL` (or GitHub
+Actions' `GITHUB_REPOSITORY` for mobile), so **Deploy on EdgeZ** installations
+use their own latest release instead of a fixed template repository. Only users
+with update permission on the Device can publish its MQTT OTA command.
+
 The mobile app caches each signed-in user's farm list, device list, and recent
 telemetry for offline viewing. It refreshes them when Appwrite is reachable and
 clears the cache on sign-out. Farm mesh passphrases and MQTT credentials are not

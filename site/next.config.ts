@@ -24,6 +24,7 @@ function publicClientEndpoint(value: string | undefined) {
 }
 
 const localResources = localResourceIds();
+const otaRepositoryUrl = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL;
 const required = {
   NEXT_PUBLIC_APPWRITE_ENDPOINT: publicClientEndpoint(
     process.env.LIVE_STOCKING_ENDPOINT || process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT,
@@ -43,5 +44,8 @@ const required = {
 const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);
 if (missing.length) throw new Error(`Missing public Appwrite configuration: ${missing.join(", ")}`);
 
-const nextConfig: NextConfig = { env: required, output: "export" };
+const nextConfig: NextConfig = {
+  env: { ...required, NEXT_PUBLIC_OTA_REPOSITORY_URL: otaRepositoryUrl || "" },
+  output: "export",
+};
 export default nextConfig;

@@ -15,5 +15,8 @@ device through the authenticated Appwrite Devices API. The detail view also
 draws the selected device's direct HaLow links from the current-state
 `topology-links` table. Only active rows whose gateway report arrived within
 the last two minutes are displayed.
+HT-HC33 details also show the running firmware version and offer MQTT OTA from
+the latest release of `APPWRITE_VCS_REPOSITORY_URL`, the repository used for
+the current Appwrite Site deployment.
 Appwrite filters device reads by the permissions assigned at creation, so the
 portal only lists Devices readable by the signed-in creator.

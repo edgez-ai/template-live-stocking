@@ -29,6 +29,8 @@ const androidName = appName.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+
 const platform = `${bundlePrefix}.${androidName}`;
 const teamInviteUrl = process.env.APPWRITE_TEAM_INVITE_URL ||
   `https://${appName}-${projectId.slice(0, 8)}.sites.${domainSuffix}/invite.html`;
+const vcsRepositoryUrl = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL ||
+  (process.env.GITHUB_REPOSITORY ? `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${process.env.GITHUB_REPOSITORY}` : "");
 
 module.exports = {
   expo: {
@@ -59,6 +61,7 @@ module.exports = {
       geofenceAreaTableId,
       geofenceRuleTableId,
       geofenceAlarmTableId,
+      otaRepositoryUrl: vcsRepositoryUrl.replace(/\.git$/, "").replace(/\/$/, ""),
     },
   },
 };

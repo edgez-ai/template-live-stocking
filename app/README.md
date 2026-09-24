@@ -64,6 +64,9 @@ two minutes old.
 The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.
+For HT-HC33 devices it also shows the running firmware version and can publish
+an MQTT OTA command for `live-stocking-ota.bin` from the latest release of the
+repository that built the app. The action is available only while online.
 
 New Devices grant read access to farm team members and update/delete access to
 farm team owners. Telemetry inherits the Device read permission.
