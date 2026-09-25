@@ -8,6 +8,8 @@ process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
 process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
 process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
 process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
+process.env.LIVE_STOCKING_DOWNLINK_TABLE_ID = "downlink-a";
+process.env.LIVE_STOCKING_REPOSITORY_URL = "https://github.example/acme/live-stocking";
 const { default: main } = await import("./main.js");
 
 const gatewayId = "11111111-1111-4111-8111-111111111111";
@@ -25,11 +27,13 @@ const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
 const topologyRows = [];
 const otaRows = [];
+const downlinkRows = [];
 
 beforeEach(() => {
   rows.length = 0;
   topologyRows.length = 0;
   otaRows.length = 0;
+  downlinkRows.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
@@ -37,6 +41,9 @@ beforeEach(() => {
   process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
   process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
   globalThis.fetch = async (url) => {
+    if (url === "https://github.example/acme/live-stocking/releases/latest") {
+      return { ok: true, status: 200, url: "https://github.example/acme/live-stocking/releases/tag/v0.0.4" };
+    }
     const device = devices.get(decodeURIComponent(url.split("/").pop()));
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
@@ -51,6 +58,11 @@ beforeEach(() => {
       otaRows.push(row);
       return row;
     }
+    if (args.tableId === "downlink-a") {
+      const row = { $id: `downlink-${downlinkRows.length + 1}`, ...args.data };
+      downlinkRows.push(row);
+      return row;
+    }
     rows.push(args);
     return { $id: `telemetry-${rows.length}` };
   };
@@ -58,14 +70,17 @@ beforeEach(() => {
     rows: args.tableId === "topology-a"
       ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId)
       : args.tableId === "ota-a"
-        ? otaRows : [],
+        ? otaRows
+        : args.tableId === "downlink-a" ? downlinkRows : [],
   });
   TablesDB.prototype.updateRow = async (args) => {
     const row = topologyRows.find((candidate) => candidate.$id === args.rowId);
     if (row) Object.assign(row, args.data);
     const ota = otaRows.find((candidate) => candidate.$id === args.rowId);
     if (ota) Object.assign(ota, args.data);
-    return row || ota;
+    const downlink = downlinkRows.find((candidate) => candidate.$id === args.rowId);
+    if (downlink) Object.assign(downlink, args.data);
+    return row || ota || downlink;
   };
 });
 
@@ -156,15 +171,29 @@ test("partial IMU readings are rejected", async () => {
 
 test("OTA telemetry creates and completes one status row", async () => {
   const requestId = "33333333-3333-4333-8333-333333333333";
-  const accepted = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.4", ota: { requestId, status: "pending", detail: "accepted" } });
+  const accepted = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId, status: "pending", detail: "accepted" } });
   assert.equal(accepted.status, 201);
   assert.equal(otaRows.length, 1);
   assert.deepEqual(otaRows[0].status, "pending");
+  assert.equal(otaRows[0].targetFirmwareVersion, "v0.0.4");
 
   const completed = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.4", ota: { requestId, status: "succeeded", detail: "installed" } });
   assert.equal(completed.status, 201);
   assert.equal(otaRows.length, 1);
   assert.equal(otaRows[0].status, "succeeded");
+  assert.ok(otaRows[0].completedAt);
+});
+
+test("ordinary telemetry completes a pending OTA when the target version is running", async () => {
+  const requestId = "44444444-4444-4444-8444-444444444444";
+  await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId, status: "pending", detail: "downloading" } });
+  assert.equal(otaRows[0].status, "pending");
+
+  const reconciled = await publish({ clientId: gatewayId, firmwareVersion: "0.0.4", status: "online" });
+  assert.equal(reconciled.status, 201);
+  assert.equal(otaRows[0].status, "succeeded");
+  assert.equal(otaRows[0].detail, "running target firmware");
+  assert.equal(otaRows[0].firmwareVersion, "0.0.4");
   assert.ok(otaRows[0].completedAt);
 });
 
@@ -195,4 +224,22 @@ test("a topology report rejects duplicate peers", async () => {
   const result = await publish({ clientId: gatewayId, topology: { links: [link, link] } });
   assert.equal(result.status, 400);
   assert.equal(topologyRows.length, 0);
+});
+
+test("gateway downlink status is stored against the remote nRF device", async () => {
+  let result = await publish({ clientId: remoteId, downlink: {
+    requestId: "6ab551810011772b0ac9", revision: 7, status: "cached",
+  } });
+  assert.equal(result.status, 201);
+  assert.equal(downlinkRows.length, 1);
+  assert.equal(downlinkRows[0].deviceId, remoteId);
+  assert.equal(downlinkRows[0].gatewayDeviceId, gatewayId);
+
+  result = await publish({ clientId: remoteId, downlink: {
+    requestId: "6ab551810011772b0ac9", revision: 7, status: "applied",
+  } });
+  assert.equal(result.status, 201);
+  assert.equal(downlinkRows.length, 1);
+  assert.equal(downlinkRows[0].status, "applied");
+  assert.ok(downlinkRows[0].completedAt);
 });

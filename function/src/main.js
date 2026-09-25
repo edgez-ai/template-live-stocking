@@ -4,6 +4,8 @@ const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABAS
 const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
 const TOPOLOGY_TABLE_ID = process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || "topology-links";
 const OTA_UPDATE_TABLE_ID = process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID || "ota-updates";
+const DOWNLINK_TABLE_ID = process.env.LIVE_STOCKING_DOWNLINK_TABLE_ID || "downlinks";
+const OTA_REPOSITORY_URL = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL || "";
 const GEOFENCE_AREA_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID;
@@ -14,6 +16,38 @@ const SENSOR_ACCELEROMETER = [6, 7, 8];
 const SENSOR_GYROSCOPE = [9, 10, 11];
 const SENSOR_TYPE_MAX = 12;
 const OTA_STATUSES = new Set(["pending", "succeeded", "failed", "busy"]);
+const DOWNLINK_STATUSES = new Set(["cached", "transmitting", "applied", "failed", "expired"]);
+const LATEST_RELEASE_CACHE_MS = 5 * 60 * 1000;
+let latestReleaseCache = { repository: "", version: "", expiresAt: 0 };
+
+function normalizedFirmwareVersion(value) {
+  return typeof value === "string" ? value.trim().replace(/^v/i, "") : "";
+}
+
+async function latestReleaseVersion() {
+  const repository = OTA_REPOSITORY_URL.replace(/\.git$/, "").replace(/\/$/, "");
+  if (!repository) return "";
+  const now = Date.now();
+  if (latestReleaseCache.repository === repository && latestReleaseCache.expiresAt > now) {
+    return latestReleaseCache.version;
+  }
+  let version = "";
+  try {
+    const response = await fetch(`${repository}/releases/latest`, {
+      method: "HEAD",
+      redirect: "follow",
+      signal: AbortSignal.timeout(3000),
+    });
+    if (response.ok && response.url) {
+      const match = /\/releases\/tag\/([^/?#]+)/.exec(new URL(response.url).pathname);
+      if (match) version = decodeURIComponent(match[1]);
+    }
+  } catch {
+    // OTA ingestion must continue even if the release host is temporarily unavailable.
+  }
+  latestReleaseCache = { repository, version, expiresAt: now + LATEST_RELEASE_CACHE_MS };
+  return version;
+}
 
 function sensorValue(payload, type) {
   if (!Array.isArray(payload?.sensors)) return null;
@@ -30,6 +64,40 @@ function validTopology(topology) {
       Number.isInteger(link.ageMs) && link.ageMs >= 0 && link.ageMs <= 300000 &&
       (link.rssi === undefined || (Number.isInteger(link.rssi) && link.rssi >= -127 && link.rssi <= 0)));
   return Boolean(valid) && new Set(topology.links.map((link) => link.peerId)).size === topology.links.length;
+}
+
+function validDownlinkStatus(value) {
+  return value && typeof value === "object" && !Array.isArray(value) &&
+    typeof value.requestId === "string" && value.requestId.length >= 1 && value.requestId.length <= 64 &&
+    DOWNLINK_STATUSES.has(value.status) && Number.isInteger(value.revision) &&
+    value.revision >= 1 && value.revision <= 0xffffffff &&
+    (value.detail === undefined || (typeof value.detail === "string" && value.detail.length <= 256));
+}
+
+async function syncDownlink(tables, gateway, target, value, readPermissions, reportedAt) {
+  const existing = await tables.listRows({
+    databaseId: DATABASE_ID, tableId: DOWNLINK_TABLE_ID,
+    queries: [Query.equal("requestId", value.requestId), Query.limit(1)],
+  });
+  const data = {
+    deviceId: target.$id,
+    serial: target.serial,
+    gatewayDeviceId: gateway.$id,
+    gatewaySerial: gateway.serial,
+    requestId: value.requestId,
+    revision: value.revision,
+    status: value.status,
+    detail: value.detail || "",
+    reportedAt,
+    completedAt: ["applied", "failed", "expired"].includes(value.status) ? reportedAt : null,
+  };
+  if (existing.rows?.[0]) {
+    await tables.updateRow({ databaseId: DATABASE_ID, tableId: DOWNLINK_TABLE_ID,
+      rowId: existing.rows[0].$id, data });
+  } else {
+    await tables.createRow({ databaseId: DATABASE_ID, tableId: DOWNLINK_TABLE_ID,
+      rowId: ID.unique(), data, permissions: readPermissions });
+  }
 }
 
 async function syncTopology(tables, gateway, links, peerDevices, readPermissions, reportedAt) {
@@ -95,6 +163,8 @@ async function syncOtaUpdate(tables, target, entry, readPermissions, reportedAt)
   });
   const firmwareVersion = typeof entry.firmwareVersion === "string" && entry.firmwareVersion.length <= 128
     ? entry.firmwareVersion : "";
+  const row = existing.rows?.[0];
+  const targetFirmwareVersion = row?.targetFirmwareVersion || await latestReleaseVersion();
   const completed = update.status === "succeeded" || update.status === "failed" || update.status === "busy";
   const data = {
     deviceId: target.$id,
@@ -103,14 +173,47 @@ async function syncOtaUpdate(tables, target, entry, readPermissions, reportedAt)
     status: update.status,
     detail: update.detail,
     firmwareVersion,
+    targetFirmwareVersion,
     reportedAt,
     completedAt: completed ? reportedAt : null,
   };
-  const row = existing.rows?.[0];
   if (row) {
     await tables.updateRow({ databaseId: DATABASE_ID, tableId: OTA_UPDATE_TABLE_ID, rowId: row.$id, data, permissions: readPermissions });
   } else {
     await tables.createRow({ databaseId: DATABASE_ID, tableId: OTA_UPDATE_TABLE_ID, rowId: ID.unique(), data, permissions: readPermissions });
+  }
+}
+
+async function reconcileOtaUpdate(tables, target, entry, readPermissions, reportedAt) {
+  const firmwareVersion = typeof entry.firmwareVersion === "string" && entry.firmwareVersion.length <= 128
+    ? entry.firmwareVersion : "";
+  if (!firmwareVersion) return;
+  const existing = await tables.listRows({
+    databaseId: DATABASE_ID,
+    tableId: OTA_UPDATE_TABLE_ID,
+    queries: [Query.equal("deviceId", target.$id), Query.orderDesc("reportedAt"), Query.limit(25)],
+  });
+  const pending = (existing.rows || []).filter((row) => row.status === "pending");
+  if (!pending.length) return;
+  const fallbackTargetVersion = pending.some((row) => !row.targetFirmwareVersion)
+    ? await latestReleaseVersion() : "";
+  for (const row of pending) {
+    const targetVersion = row.targetFirmwareVersion || fallbackTargetVersion;
+    if (!targetVersion || normalizedFirmwareVersion(firmwareVersion) !== normalizedFirmwareVersion(targetVersion)) continue;
+    await tables.updateRow({
+      databaseId: DATABASE_ID,
+      tableId: OTA_UPDATE_TABLE_ID,
+      rowId: row.$id,
+      data: {
+        status: "succeeded",
+        detail: "running target firmware",
+        firmwareVersion,
+        targetFirmwareVersion: targetVersion,
+        reportedAt,
+        completedAt: reportedAt,
+      },
+      permissions: readPermissions,
+    });
   }
 }
 
@@ -266,6 +369,9 @@ export default async function main({ req, res, error }) {
     if (entry.topology !== undefined && !validTopology(entry.topology)) {
       return json(res, { error: "Topology must contain at most 16 valid direct peer links" }, 400);
     }
+    if (entry.downlink !== undefined && !validDownlinkStatus(entry.downlink)) {
+      return json(res, { error: "Downlink status is invalid" }, 400);
+    }
     if (route.channel === "ota" && !otaStatus(entry)) {
       return json(res, { error: "OTA telemetry must contain a valid OTA status" }, 400);
     }
@@ -347,6 +453,8 @@ export default async function main({ req, res, error }) {
       });
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);
+      await reconcileOtaUpdate(tables, target, entry, readPermissions, receivedAt);
+      if (entry.downlink) await syncDownlink(tables, device, target, entry.downlink, readPermissions, receivedAt);
       if (entry.topology) {
         await syncTopology(tables, device, entry.topology.links, topologyPeers, readPermissions, receivedAt);
       }
