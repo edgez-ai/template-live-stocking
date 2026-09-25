@@ -35,6 +35,19 @@ again; after the next successful configuration it turns off again. Hold USER
 for five seconds, then release it to erase the NVS storage partition and reboot
 unprovisioned. This clears the saved HaLow and MQTT configuration and any old BLE bonds.
 
+## Heltec HT-HC01 nRF54L15
+
+Build the nRF54L15/MM6108 HT-HC01 target with:
+
+```sh
+pio run -e seeed-xiao-nrf54l15-hc01
+```
+
+This target uses the same application, MM6108 radio firmware, and prebuilt
+Morse stack as FGH100M. Its only carrier-specific inputs are
+`zephyr/boards/xiao_nrf54l15_hc01.overlay` and the
+`bcf_HC01_V2_3V3.mbin` calibration selected by `zephyr/hc01.conf`.
+
 ## FGH200M nRF54L15
 
 Build the nRF54L15/MM8108 target with:
@@ -104,7 +117,7 @@ comes first. Each batch also includes a fresh HT-HC33 battery reading from its
 GPIO20 controlled divider and GPIO1 ADC input. Its status entry also includes
 the direct HaLow peers observed in the last two minutes, keyed by the peer's
 Appwrite device ID and radio MAC, with RSSI when the Morse driver provides it.
-The QoS 1 JSON payload sent to
+The QoS 0 JSON payload sent to
 `projects/<projectId>/devices/<serial>/telemetry/status` is an array:
 
 ```json

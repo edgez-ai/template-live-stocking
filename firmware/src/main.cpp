@@ -920,7 +920,10 @@ void telemetry_publish_task(void *) {
       std::snprintf(topic, sizeof(topic),
                     "projects/%s/devices/%s/telemetry/%s",
                     mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
-      message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+      // Telemetry is periodic and may be dropped during an outage. QoS 0 keeps
+      // stalled publishes out of the MQTT retransmission outbox so they cannot
+      // exhaust the heap needed for TLS reconnection.
+      message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 0, 0);
       if (message_id >= 0)
         ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
     }

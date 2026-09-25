@@ -213,6 +213,11 @@ function firmwareVersionOf(row?: Telemetry) {
   } catch { return ""; }
 }
 
+function sameFirmwareVersion(running: string, latest: string) {
+  const normalize = (value: string) => value.trim().replace(/^v/i, "");
+  return Boolean(running && latest) && normalize(running) === normalize(latest);
+}
+
 const appConfig = Constants.expoConfig?.extra as AppConfig | undefined;
 if (!appConfig) throw new Error("Expo Appwrite configuration is missing");
 const config: AppConfig = {
@@ -224,8 +229,10 @@ const config: AppConfig = {
 };
 const endpoint = config.appwriteEndpoint.replace(/\/+$/, "");
 const otaRepositoryUrl = (config.otaRepositoryUrl || "").replace(/\.git$/, "").replace(/\/$/, "");
-const otaImageUrl = /^https:\/\/github\.com\/[^/]+\/[^/]+$/.test(otaRepositoryUrl)
-  ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
+const otaRepositoryMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(otaRepositoryUrl);
+const otaImageUrl = otaRepositoryMatch ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
+const otaLatestReleaseApiUrl = otaRepositoryMatch
+  ? `https://api.github.com/repos/${otaRepositoryMatch[1]}/${otaRepositoryMatch[2]}/releases/latest` : "";
 const cachePrefix = `live-stocking:${config.appwriteProjectId}:`;
 const lastUserCacheKey = `${cachePrefix}last-user`;
 const pendingSignOutKey = `${cachePrefix}pending-sign-out`;
@@ -594,6 +601,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
+  const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
   const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
   const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
   const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
@@ -737,6 +745,20 @@ export default function App() {
     })();
     return () => { active = false; };
   }, [refresh]);
+  useEffect(() => {
+    if (!otaLatestReleaseApiUrl) return;
+    let active = true;
+    void fetch(otaLatestReleaseApiUrl, { headers: { Accept: "application/vnd.github+json" } })
+      .then((response) => {
+        if (!response.ok) throw new Error("Could not read the latest firmware release.");
+        return response.json() as Promise<{ tag_name?: unknown }>;
+      })
+      .then((release) => {
+        if (active && typeof release.tag_name === "string") setLatestFirmwareVersion(release.tag_name);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
   useEffect(() => {
     if (!user) return;
     const timer = setInterval(() => {
@@ -1017,6 +1039,11 @@ export default function App() {
   }
 
   function requestFirmwareUpdate(device: Device) {
+    const runningVersion = firmwareVersionOf(latestTelemetryByDevice.get(device.$id));
+    if (sameFirmwareVersion(runningVersion, latestFirmwareVersion)) {
+      Alert.alert("Firmware is up to date", `This device is already running ${latestFirmwareVersion}.`);
+      return;
+    }
     if (otaUpdates.some((update) => update.deviceId === device.$id && update.status === "pending")) {
       setError("An OTA update is already pending for this device.");
       return;
@@ -1242,6 +1269,7 @@ export default function App() {
   const detailTopology = detailDevice ? topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === detailDevice.$id || link.peerDeviceId === detailDevice.$id)) : [];
   const detailOtaUpdate = detailDevice ? otaUpdates.find((update) => update.deviceId === detailDevice.$id) : undefined;
   const detailOtaPending = Boolean(detailDevice && otaUpdates.some((update) => update.deviceId === detailDevice.$id && update.status === "pending"));
+  const detailFirmwareCurrent = sameFirmwareVersion(detailFirmwareVersion, latestFirmwareVersion);
   const currentFarm = farms.find((farm) => farm.$id === currentFarmId);
   const activeTeamId = currentFarm?.teamId;
   useEffect(() => {
@@ -1460,7 +1488,7 @@ export default function App() {
             {historyStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{historyStats.min.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{historyStats.average.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{historyStats.max.toFixed(2)} V</Text></View></View> : null}
             <Text style={styles.sensorNote}>Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</Text>
             <TopologyCard device={detailDevice} links={detailTopology} />
-            {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text>{detailOtaUpdate ? <Text style={styles.otaDescription}>Latest update: {detailOtaUpdate.status.toUpperCase()}{detailOtaUpdate.detail ? ` · ${detailOtaUpdate.detail}` : ""}{detailOtaUpdate.reportedAt ? ` · ${relativeTime(detailOtaUpdate.reportedAt)}` : ""}</Text> : null}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : detailOtaPending ? "UPDATE PENDING" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
+            {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text>{detailOtaUpdate ? <Text style={styles.otaDescription}>Latest update: {detailOtaUpdate.status.toUpperCase()}{detailOtaUpdate.detail ? ` · ${detailOtaUpdate.detail}` : ""}{detailOtaUpdate.reportedAt ? ` · ${relativeTime(detailOtaUpdate.reportedAt)}` : ""}</Text> : null}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : detailOtaPending ? "UPDATE PENDING" : detailFirmwareCurrent ? "UP TO DATE" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
             <View style={styles.dangerZone}><Text style={styles.dangerTitle}>DEVICE ACCESS</Text><Text style={styles.dangerDescription}>Deleting this device revokes its MQTT credential. Historical telemetry is retained.</Text><Pressable style={[styles.deleteButton, offline && styles.disabledButton]} onPress={() => requestDeleteDevice(detailDevice)} disabled={busy || offline}><Text style={styles.deleteButtonText}>{busy ? "DELETING…" : "DELETE DEVICE"}</Text></Pressable></View>
           </ScrollView>
         </> : null}

@@ -26,8 +26,10 @@ const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
-const otaImageUrl = /^https:\/\/github\.com\/[^/]+\/[^/]+$/.test(otaRepositoryUrl)
-  ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
+const otaRepositoryMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(otaRepositoryUrl);
+const otaImageUrl = otaRepositoryMatch ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
+const otaLatestReleaseApiUrl = otaRepositoryMatch
+  ? `https://api.github.com/repos/${otaRepositoryMatch[1]}/${otaRepositoryMatch[2]}/releases/latest` : "";
 const historyRanges: { key: HistoryRange; label: string; duration: number }[] = [
   { key: "30m", label: "30 min", duration: 30 * 60 * 1000 },
   { key: "1h", label: "1 hour", duration: 60 * 60 * 1000 },
@@ -62,6 +64,11 @@ function firmwareVersionOf(row?: Telemetry) {
     const value = (JSON.parse(row.payload) as { firmwareVersion?: unknown }).firmwareVersion;
     return typeof value === "string" ? value : "";
   } catch { return ""; }
+}
+
+function sameFirmwareVersion(running: string, latest: string) {
+  const normalize = (value: string) => value.trim().replace(/^v/i, "");
+  return Boolean(running && latest) && normalize(running) === normalize(latest);
 }
 
 function statusOf(device: Device, latest?: Telemetry) {
@@ -206,6 +213,7 @@ export default function Home() {
   const [deleting, setDeleting] = useState(false);
   const [otaDeviceId, setOtaDeviceId] = useState("");
   const [otaMessage, setOtaMessage] = useState("");
+  const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(true);
@@ -228,6 +236,21 @@ export default function Home() {
     account.get().then(async (current) => { setUser(current); await refresh(); })
       .catch(() => undefined).finally(() => setBusy(false));
   }, [refresh]);
+
+  useEffect(() => {
+    if (!otaLatestReleaseApiUrl) return;
+    let active = true;
+    void fetch(otaLatestReleaseApiUrl, { headers: { Accept: "application/vnd.github+json" } })
+      .then((response) => {
+        if (!response.ok) throw new Error("Could not read the latest firmware release.");
+        return response.json() as Promise<{ tag_name?: unknown }>;
+      })
+      .then((release) => {
+        if (active && typeof release.tag_name === "string") setLatestFirmwareVersion(release.tag_name);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -288,6 +311,10 @@ export default function Home() {
 
   async function updateSelectedDevice() {
     if (!selectedDevice) return;
+    if (selectedFirmwareCurrent) {
+      setOtaMessage(`Already running the latest firmware (${latestFirmwareVersion}).`);
+      return;
+    }
     if (selectedOtaPending) {
       setOtaMessage("An OTA update is already pending for this device.");
       return;
@@ -323,6 +350,7 @@ export default function Home() {
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
   const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
+  const selectedFirmwareCurrent = sameFirmwareVersion(selectedFirmwareVersion, latestFirmwareVersion);
   const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
   const historyStats = useMemo(() => {
@@ -376,7 +404,7 @@ export default function Home() {
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
             <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
             <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
-            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : "Update HT-HC33"}</button></div>}
+            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>
