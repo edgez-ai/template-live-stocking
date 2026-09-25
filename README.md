@@ -8,6 +8,22 @@ provisioning-specific responsibility.
 [![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-live-stocking&template_owner=edgez-ai)
 [![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-live-stocking)
 
+## Limitations
+
+This template is intentionally a simple demonstration rather than a
+production-ready deployment:
+
+| Capability | This demo | EdgeZ Enterprise |
+| --- | --- | --- |
+| Network topology | Simple sensor → relay node → Wi-Fi → MQTT path | Multi-hop, full-mesh architecture |
+| Internet connectivity | Single Wi-Fi gateway | Multiple internet gateways |
+| Device power model | Always on | Low-power PAwR-based operation |
+| Communication | Simple uplink telemetry | Reliable bidirectional communication |
+| Deployment readiness | Demonstration only | Production-ready with enterprise support |
+
+Need the enterprise capabilities? Contact us to discuss your architecture,
+hardware integration, and deployment requirements.
+
 ## Repository layout
 
 | Folder | Purpose |
