@@ -7,6 +7,8 @@
  *   KEY            -> P2.03, active-low with pull-up
  *   IMU_SCL        -> P2.06 (TWIM21 SCL)
  *   IMU_SDA        -> P2.08 (TWIM21 SDA)
+ *   ADC_VBAT       -> P1.13 (AIN6, 100k/100k divider)
+ *   ADC_VBAT_EN    -> P1.14 (active-high divider enable)
  */
 
 / {
@@ -28,6 +30,8 @@
 	zephyr,user {
 		halow-power-en-gpios = <&gpio2 0 GPIO_ACTIVE_HIGH>;
 		key-gpios = <&gpio2 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+		battery-enable-gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;
+		io-channels = <&adc 6>;
 	};
 };
 
