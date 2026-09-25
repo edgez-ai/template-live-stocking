@@ -143,13 +143,15 @@ run when a GitHub Release is published and can each be started independently
 with **Run workflow**. Firmware produces `live-stocking-flash.bin` for flashing
 at address `0x0`, `live-stocking-ota.bin` as the app-only OTA payload, and
 `live-stocking-nrf54l15.hex` for the nRF54L15/MM6108 FGH100M carrier,
+`live-stocking-nrf54l15-sense.hex` for the official XIAO nRF54L15 Sense with
+the FGH100M shield,
 `live-stocking-hc01.hex` for the nRF54L15/MM6108 HT-HC01 carrier, and
 `live-stocking-fgh200m.hex` for the nRF54L15/MM8108 FGH200M carrier. Mobile
-produces `live-stocking-signed.apk` and `live-stocking-unsigned.apk`. These seven
+produces `live-stocking-signed.apk` and `live-stocking-unsigned.apk`. These eight
 files are attached to a GitHub Release; the workflow-run artifacts contain the
 same files. All nRF54L15 jobs use the source-free, dual-chip package checked
-into `firmware/modules/mm-iot-zephyr-prebuilt`; it selects MM6108 for FGH100M
-and HT-HC01, and MM8108 for FGH200M, without another repository checkout.
+into `firmware/modules/mm-iot-zephyr-prebuilt`; it selects MM6108 for FGH100M,
+Sense and HT-HC01, and MM8108 for FGH200M, without another repository checkout.
 
 The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
 and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.

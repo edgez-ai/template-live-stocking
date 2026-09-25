@@ -35,6 +35,20 @@ again; after the next successful configuration it turns off again. Hold USER
 for five seconds, then release it to erase the NVS storage partition and reboot
 unprovisioned. This clears the saved HaLow and MQTT configuration and any old BLE bonds.
 
+## Seeed XIAO nRF54L15 Sense
+
+Build the official XIAO nRF54L15 Sense with the FGH100M shield using:
+
+```sh
+pio run -e seeed-xiao-nrf54l15-sense
+```
+
+This target uses the onboard LSM6DS3TR-C and exposes Zephyr logs through the
+CMSIS-DAP virtual COM port. It uses the same MM6108 radio firmware, FGH100M BCF,
+and application as the KeepTeen target; its board-specific inputs are
+`zephyr/boards/xiao_nrf54l15_sense.overlay` and
+`zephyr/boards/xiao_nrf54l15_sense.conf`.
+
 ## Heltec HT-HC01 nRF54L15
 
 Build the nRF54L15/MM6108 HT-HC01 target with:

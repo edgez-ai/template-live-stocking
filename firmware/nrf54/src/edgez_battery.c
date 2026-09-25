@@ -11,18 +11,24 @@
 LOG_MODULE_REGISTER(edgez_battery, LOG_LEVEL_INF);
 
 #define BATTERY_NODE DT_PATH(zephyr_user)
+#define BATTERY_SUPPORTED \
+	(DT_NODE_HAS_PROP(BATTERY_NODE, io_channels) && \
+	 DT_NODE_HAS_PROP(BATTERY_NODE, battery_enable_gpios))
 #define BATTERY_DIVIDER_MULTIPLIER 2
 #define BATTERY_SAMPLE_INTERVAL_MS 15000
 
+#if BATTERY_SUPPORTED
 static const struct adc_dt_spec battery_adc = ADC_DT_SPEC_GET_BY_IDX(BATTERY_NODE, 0);
 static const struct gpio_dt_spec battery_enable =
 	GPIO_DT_SPEC_GET(BATTERY_NODE, battery_enable_gpios);
 static bool ready;
 static int32_t cached_mv;
 static int64_t last_sample_ms;
+#endif
 
 int edgez_battery_init(void)
 {
+#if BATTERY_SUPPORTED
 	int rc;
 
 	if (!adc_is_ready_dt(&battery_adc) || !gpio_is_ready_dt(&battery_enable)) {
@@ -37,10 +43,14 @@ int edgez_battery_init(void)
 	}
 	ready = true;
 	return 0;
+#else
+	return -ENOTSUP;
+#endif
 }
 
 int edgez_battery_read_mv(int32_t *millivolts)
 {
+#if BATTERY_SUPPORTED
 	struct adc_sequence sequence = {0};
 	int16_t raw = 0;
 	int32_t input_mv;
@@ -75,4 +85,8 @@ int edgez_battery_read_mv(int32_t *millivolts)
 	*millivolts = cached_mv;
 	LOG_DBG("Battery voltage %d mV", cached_mv);
 	return 0;
+#else
+	ARG_UNUSED(millivolts);
+	return -ENOTSUP;
+#endif
 }
