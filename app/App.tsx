@@ -47,14 +47,17 @@ type SettingsTab = "team" | "areas" | "rules";
 type FlashRelease = { tag: string; name: string; url: string; size: number; sha256: string };
 type FlashStage = { label: string; message: string };
 type FlashTimeoutMinutes = 10 | 15 | 20 | 30;
-type FlashTarget = "ht-hc33" | "nrf54l15-hc01";
+type FlashTarget = "ht-hc33" | "nrf54l15-hc01" | "nrf54l15-sense" | "nrf54l15-fgh200m";
+type FlashMethod = "esp32" | "jlink" | "openocd";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 const defaultAreaColor = "#E88D29";
 const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
 const flashSdk = new EdgezMeshSdk();
-const flashTargets: { key: FlashTarget; label: string; detail: string; assetName: string }[] = [
-  { key: "ht-hc33", label: "HT-HC33", detail: "ESP32-S3 companion · esptool", assetName: "live-stocking-flash.bin" },
-  { key: "nrf54l15-hc01", label: "nRF54L15 + HT-HC01", detail: "nRF54L15 application · J-Link SWD", assetName: "live-stocking-hc01.hex" },
+const flashTargets: { key: FlashTarget; label: string; detail: string; assetName: string; method: FlashMethod }[] = [
+  { key: "ht-hc33", label: "HT-HC33", detail: "ESP32-S3 companion · esptool", assetName: "live-stocking-flash.bin", method: "esp32" },
+  { key: "nrf54l15-hc01", label: "nRF54L15 + HT-HC01", detail: "nRF54L15 application · J-Link SWD", assetName: "live-stocking-hc01.hex", method: "jlink" },
+  { key: "nrf54l15-sense", label: "XIAO nRF54L15 Sense + FGH100M", detail: "Official XIAO board · CMSIS-DAP/OpenOCD", assetName: "live-stocking-nrf54l15-sense.hex", method: "openocd" },
+  { key: "nrf54l15-fgh200m", label: "nRF54L15 + FGH200M", detail: "MM8108 application · J-Link SWD", assetName: "live-stocking-fgh200m.hex", method: "jlink" },
 ];
 const esp32FlashBaudRates: { value: EdgezEsp32FlashBaud; label: string; detail: string }[] = [
   { value: 115200, label: "115200", detail: "Most reliable" },
@@ -682,6 +685,7 @@ export default function App() {
   const [appUpdateChecking, setAppUpdateChecking] = useState(false);
   const [flasherOpen, setFlasherOpen] = useState(false);
   const [flashTarget, setFlashTarget] = useState<FlashTarget>("ht-hc33");
+  const [flashTargetOpen, setFlashTargetOpen] = useState(false);
   const [flashDevices, setFlashDevices] = useState<EdgezUsbDevice[]>([]);
   const [flashBusId, setFlashBusId] = useState("");
   const [flashBaudRate, setFlashBaudRate] = useState<EdgezEsp32FlashBaud>(460800);
@@ -708,6 +712,7 @@ export default function App() {
   const refreshUserId = useRef<string | null>(null);
   const appUpdateCheckInFlight = useRef(false);
   const latestFlashRelease = latestFlashReleases[flashTarget] || null;
+  const selectedFlashTarget = flashTargets.find(({ key }) => key === flashTarget) || flashTargets[0];
 
   useEffect(() => {
     void markAppBundleUpdateHealthy()
@@ -778,6 +783,7 @@ export default function App() {
     setFlashStage(null);
     setFlashElapsedSeconds(0);
     setFlashMessages([]);
+    setFlashTargetOpen(false);
     setFlashBaudOpen(false);
     setFlashAckWindowOpen(false);
     setFlashTimeoutOpen(false);
@@ -831,7 +837,7 @@ export default function App() {
           setFlashStage({ label: labels[status.state], message: status.message || "Flash runtime is working…" });
         },
       };
-      if (flashTarget === "ht-hc33") {
+      if (selectedFlashTarget.method === "esp32") {
         await flashSdk.flashEsp32ReleaseFirmware({
           ...common,
           chip: "esp32s3",
@@ -839,10 +845,12 @@ export default function App() {
           ackWindow: flashAckWindow,
           esptoolConfig: flashEsptoolConfig,
         });
+      } else if (selectedFlashTarget.method === "openocd") {
+        await flashSdk.flashNrf54OpenOcdReleaseFirmware(common);
       } else {
         await flashSdk.flashNrf54JLinkReleaseFirmware(common);
       }
-      Alert.alert("Flashing complete", `${flashTargets.find(({ key }) => key === flashTarget)?.label || flashTarget} firmware was written successfully.`);
+      Alert.alert("Flashing complete", `${selectedFlashTarget.label} firmware was written successfully.`);
     } catch (caught) { setFlashError(messageOf(caught)); }
     finally { setFlashing(false); setFlashJobId(""); }
   }
@@ -1579,8 +1587,12 @@ export default function App() {
         <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
           <Text style={styles.dialogHelp}>Connect the target or its debug probe to this Android phone with a USB-C data cable. The organization runtime downloads and verifies the matching image from this deployment&apos;s latest GitHub release; the phone carries only control and USB traffic.</Text>
           <Text style={styles.fieldLabel}>HARDWARE</Text>
-          <View style={styles.optionList}>{flashTargets.map((target) => <Pressable key={target.key} style={[styles.optionRow, flashTarget === target.key && styles.farmRowSelected]} onPress={() => { setFlashTarget(target.key); setFlashDevices([]); setFlashBusId(""); setFlashError(""); }} disabled={flashing} accessibilityRole="radio" accessibilityState={{ selected: flashTarget === target.key }}><Text style={styles.deviceNameDark}>{target.label}</Text><Text style={styles.muted}>{target.detail}</Text></Pressable>)}</View>
-          <View style={styles.flashWarning}><Text style={styles.flashWarningTitle}>{flashTarget === "ht-hc33" ? "FULL RELEASE IMAGE" : "J-LINK SWD IMAGE"}</Text><Text style={styles.flashWarningText}>{flashTarget === "ht-hc33" ? <>This flow uses <Text style={styles.flashWarningCode}>live-stocking-flash.bin</Text> from release {latestFlashRelease?.tag || "metadata loading…"} and writes the full ESP32-S3 image at address 0x0. It never uses the OTA-only image.</> : <>This flow uses <Text style={styles.flashWarningCode}>live-stocking-hc01.hex</Text> from release {latestFlashRelease?.tag || "metadata loading…"}. The runtime flashes the nRF54L15 over J-Link SWD using its fixed, operator-controlled profile.</>}</Text></View>
+          <Pressable style={styles.farmRow} onPress={() => setFlashTargetOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashTargetOpen }}>
+            <Text style={styles.deviceNameDark}>{selectedFlashTarget.label}</Text>
+            <Text style={styles.muted}>{selectedFlashTarget.detail} · {flashTargetOpen ? "CLOSE" : "CHANGE"}</Text>
+          </Pressable>
+          {flashTargetOpen && <View style={styles.optionList}>{flashTargets.map((target) => <Pressable key={target.key} style={[styles.optionRow, flashTarget === target.key && styles.farmRowSelected]} onPress={() => { setFlashTarget(target.key); setFlashTargetOpen(false); setFlashDevices([]); setFlashBusId(""); setFlashError(""); }} disabled={flashing} accessibilityRole="radio" accessibilityState={{ selected: flashTarget === target.key }}><Text style={styles.deviceNameDark}>{target.label}</Text><Text style={styles.muted}>{target.detail}</Text></Pressable>)}</View>}
+          <View style={styles.flashWarning}><Text style={styles.flashWarningTitle}>{selectedFlashTarget.method === "esp32" ? "FULL RELEASE IMAGE" : selectedFlashTarget.method === "openocd" ? "CMSIS-DAP IMAGE" : "J-LINK SWD IMAGE"}</Text><Text style={styles.flashWarningText}>{selectedFlashTarget.method === "esp32" ? <>This flow uses <Text style={styles.flashWarningCode}>{selectedFlashTarget.assetName}</Text> from release {latestFlashRelease?.tag || "metadata loading…"} and writes the full ESP32-S3 image at address 0x0. It never uses the OTA-only image.</> : <>This flow uses <Text style={styles.flashWarningCode}>{selectedFlashTarget.assetName}</Text> from release {latestFlashRelease?.tag || "metadata loading…"}. The runtime flashes the nRF54L15 over {selectedFlashTarget.method === "openocd" ? "CMSIS-DAP/OpenOCD" : "J-Link SWD"} using its fixed, operator-controlled profile.</>}</Text></View>
           {flashTarget === "ht-hc33" && <><Text style={styles.fieldLabel}>FLASH SPEED</Text>
           <Pressable style={styles.farmRow} onPress={() => setFlashBaudOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashBaudOpen }}>
             <Text style={styles.deviceNameDark}>{flashBaudRate.toLocaleString()} baud</Text>
@@ -1619,7 +1631,7 @@ export default function App() {
           {flashError ? <Text style={styles.dialogError}>{flashError}</Text> : null}
           {offline && <Text style={styles.dialogError}>Connect to the internet before flashing.</Text>}
           {!currentFarm && <Text style={styles.dialogError}>Select or create a farm to authorize an organization flash session.</Text>}
-          <Pressable style={[styles.primary, (!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing) && styles.disabledButton]} onPress={() => void startUsbFlash()} disabled={!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing}><Text style={styles.primaryText}>{flashing ? "FLASHING… DO NOT DISCONNECT" : `FLASH ${flashTargets.find(({ key }) => key === flashTarget)?.label || "DEVICE"}`}</Text></Pressable>
+          <Pressable style={[styles.primary, (!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing) && styles.disabledButton]} onPress={() => void startUsbFlash()} disabled={!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing}><Text style={styles.primaryText}>{flashing ? "FLASHING… DO NOT DISCONNECT" : `FLASH ${selectedFlashTarget.label}`}</Text></Pressable>
           {flashing && <Pressable style={styles.outlineButton} onPress={() => void cancelUsbFlash()}><Text style={styles.outlineButtonText}>CANCEL FLASH</Text></Pressable>}
         </ScrollView>
       </SafeAreaView>
