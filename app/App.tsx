@@ -737,10 +737,6 @@ export default function App() {
         firmwareUrl: latestFlashRelease.url,
         sha256: latestFlashRelease.sha256,
         jobId,
-        // Match Android DevTools: keep USB/IP attached independently of one
-        // flash command so another tool (or a serial monitor) can open the
-        // exported device until the operator closes the flasher.
-        keepTunnelOpen: true,
         onProgress: (status) => {
           setFlashProgress(status);
           if (status.message) setFlashMessages((messages) => [...messages, status.message!].slice(-8));
