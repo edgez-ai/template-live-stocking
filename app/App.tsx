@@ -7,7 +7,7 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, Teams } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
-import { checkAndInstallAppBundleUpdate, EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons, markAppBundleUpdateHealthy } from "@edgez/react-native-sdk";
+import { checkAppBundleUpdate, EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons, installAppBundleUpdate, markAppBundleUpdateHealthy } from "@edgez/react-native-sdk";
 import type { EdgezEsp32Chip, EdgezEsp32FlashAckWindow, EdgezEsp32FlashBaud, EdgezEsptoolConfig, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef, EdgezUsbDevice, EdgezUsbFlashStatus } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
@@ -680,6 +680,7 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [dashboardView, setDashboardView] = useState<DashboardView>("map");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [appUpdateChecking, setAppUpdateChecking] = useState(false);
   const [flasherOpen, setFlasherOpen] = useState(false);
   const [flashDevices, setFlashDevices] = useState<EdgezUsbDevice[]>([]);
   const [flashBusId, setFlashBusId] = useState("");
@@ -706,16 +707,69 @@ export default function App() {
   const telemetryRef = useRef<Telemetry[]>([]);
   const refreshInFlight = useRef<Promise<Farm[]> | null>(null);
   const refreshUserId = useRef<string | null>(null);
+  const appUpdateCheckInFlight = useRef(false);
 
   useEffect(() => {
-    if (!otaRepositoryUrl) return;
     void markAppBundleUpdateHealthy()
-      .then(() => checkAndInstallAppBundleUpdate({
+      .catch((caught) => console.warn("Could not mark app bundle update healthy", caught));
+  }, []);
+
+  async function checkForAppUpdate() {
+    setMenuOpen(false);
+    if (appUpdateCheckInFlight.current) return;
+    if (!otaRepositoryUrl) {
+      Alert.alert("Updates unavailable", "This app does not have a GitHub release repository configured.");
+      return;
+    }
+    appUpdateCheckInFlight.current = true;
+    setAppUpdateChecking(true);
+    try {
+      const result = await checkAppBundleUpdate({
         repositoryUrl: otaRepositoryUrl,
         otaBaseUrl: config.otaProxyUrl,
-      }))
-      .catch((caught) => console.warn("App bundle update check failed", caught));
-  }, []);
+      });
+      if (result.state === "current") {
+        Alert.alert(
+          result.status?.pendingRestart ? "Update ready" : "App is up to date",
+          result.status?.pendingRestart
+            ? "Close and reopen the app to use the downloaded update."
+            : `You already have the latest app bundle${result.manifest?.releaseTag ? ` (${result.manifest.releaseTag})` : ""}.`,
+        );
+        return;
+      }
+      if (result.state === "incompatible") {
+        Alert.alert("App update required", "The latest bundle requires a newer native app. Install the latest APK first.");
+        return;
+      }
+      if (result.state === "rejected") {
+        Alert.alert("Update unavailable", "This bundle was rolled back after a failed launch and will not be installed again.");
+        return;
+      }
+      if (result.state !== "available" || !result.manifest || !result.bundleUrl) {
+        Alert.alert("Updates unavailable", "Bundle updates are not supported on this device.");
+        return;
+      }
+      const manifest = result.manifest;
+      const bundleUrl = result.bundleUrl;
+      const accepted = await new Promise<boolean>((resolve) => Alert.alert(
+        "App update available",
+        `${manifest.releaseTag} is available (${(manifest.size / 1024 / 1024).toFixed(1)} MB). Download it now?`,
+        [
+          { text: "Later", style: "cancel", onPress: () => resolve(false) },
+          { text: "Update", onPress: () => resolve(true) },
+        ],
+        { cancelable: true, onDismiss: () => resolve(false) },
+      ));
+      if (!accepted) return;
+      await installAppBundleUpdate(manifest, bundleUrl);
+      Alert.alert("Update downloaded", "Close and reopen the app to apply the update.");
+    } catch (caught) {
+      Alert.alert("Update check failed", messageOf(caught));
+    } finally {
+      appUpdateCheckInFlight.current = false;
+      setAppUpdateChecking(false);
+    }
+  }
 
   function openFlasher() {
     setMenuOpen(false);
@@ -1502,6 +1556,7 @@ export default function App() {
           <Pressable style={styles.menuItem} onPress={() => { setDashboardView(dashboardView === "map" ? "list" : "map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>{dashboardView === "map" ? "List view" : "Map view"}</Text></Pressable>
           <Pressable style={styles.menuItem} onPress={() => { setAlarmsOpen(true); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Alarms{geofenceAlarms.filter((alarm) => !alarm.acknowledged).length ? ` · ${geofenceAlarms.filter((alarm) => !alarm.acknowledged).length}` : ""}</Text></Pressable>
           {Platform.OS === "android" && <Pressable style={styles.menuItem} onPress={openFlasher} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Flash ESP32</Text></Pressable>}
+          {Platform.OS === "android" && <Pressable style={styles.menuItem} onPress={() => void checkForAppUpdate()} disabled={appUpdateChecking} accessibilityRole="menuitem" accessibilityState={{ disabled: appUpdateChecking }}><Text style={styles.menuItemText}>{appUpdateChecking ? "Checking for updates…" : "Check for updates"}</Text></Pressable>}
           <Pressable style={styles.menuItem} onPress={openSettings} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Settings · Farms</Text></Pressable>
           <View style={styles.menuDivider} />
           <Pressable style={styles.menuItem} onPress={() => void signOut().catch((caught) => setError(messageOf(caught)))} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Sign out</Text></Pressable>
