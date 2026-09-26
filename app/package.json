@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@edgez/react-native-sdk": "0.1.21",
+    "@edgez/react-native-sdk": "0.1.22",
     "@expo/vector-icons": "^15.0.2",
     "@orbital-systems/react-native-esp-idf-provisioning": "^0.5.5",
     "@react-native-async-storage/async-storage": "^2.2.0",
