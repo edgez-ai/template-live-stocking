@@ -5,6 +5,11 @@
       "configSha256": "0d4d8a9c0a308471d1c6f53eb2ee38fe05b84678c21c606db7b3a6f802e0d434",
       "bcf": "bcf_fgh100mhaamd.mbin"
     },
+    "nrf54l15/mm6108-sense": {
+      "archiveSha256": "eb074287f82b001c74af452724826ea223ccb7bf0820837ee99f8404ea5033c6",
+      "configSha256": "d35a36381d17adf04bb82b37244a8a0cd7a02ed889e72c577531d1a8b64ffa58",
+      "bcf": "bcf_fgh100mhaamd.mbin"
+    },
     "nrf54l15/mm8108": {
       "archiveSha256": "8b353e4e26cf5bbc68f5ade8725a855302120643153186d584215fe9c7dfa31d",
       "configSha256": "bcd3cd88d346787d60d06e614e598c53be8bbef33df643cfb80a0ef577b90c13",

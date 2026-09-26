@@ -16,6 +16,13 @@ MORSE_CHIP = env.GetProjectOption("custom_morse_chip", "mm6108").lower()
 if MORSE_CHIP not in ("mm6108", "mm8108"):
     print(f"ERROR: Unsupported custom_morse_chip: {MORSE_CHIP}")
     env.Exit(1)
+MORSE_PREBUILT_VARIANT = env.GetProjectOption("custom_morse_prebuilt_variant", "default").lower()
+if MORSE_PREBUILT_VARIANT not in ("default", "sense"):
+    print(f"ERROR: Unsupported custom_morse_prebuilt_variant: {MORSE_PREBUILT_VARIANT}")
+    env.Exit(1)
+if MORSE_PREBUILT_VARIANT == "sense" and MORSE_CHIP != "mm6108":
+    print("ERROR: The Sense prebuilt variant is only available for MM6108")
+    env.Exit(1)
 MORSE_FIRMWARE = "mm8108b2-rl.mbin" if MORSE_CHIP == "mm8108" else "mm6108.mbin"
 
 module_root = (PROJECT_DIR / "modules" / "mm-iot-zephyr").resolve()
@@ -35,7 +42,8 @@ if use_prebuilt:
     binary_dir = Path(env.GetProjectOption("custom_morse_prebuilt_dir", "modules/mm-iot-zephyr-prebuilt"))
     binary_root = binary_dir if binary_dir.is_absolute() else PROJECT_DIR / binary_dir
     mm_root = Path(os.environ.get("MMIOT_ZEPHYR_BINARY_ROOT", binary_root)).expanduser().resolve()
-    archive = mm_root / "zephyr" / "blobs" / "lib" / MORSE_CHIP / "arm-cortex-m33f" / "libmorse.a"
+    archive_profile = "mm6108-sense" if MORSE_PREBUILT_VARIANT == "sense" else MORSE_CHIP
+    archive = mm_root / "zephyr" / "blobs" / "lib" / archive_profile / "arm-cortex-m33f" / "libmorse.a"
     if not archive.is_file() or not (mm_root / "include/mmwlan.h").is_file():
         print(f"ERROR: Complete {MORSE_CHIP.upper()} binary Morse module not found at {mm_root}")
         env.Exit(1)
@@ -147,4 +155,8 @@ if not use_prebuilt and staged_bcf.exists():
 env["ENV"]["MORSE_SM_USE_APP_BINARIES"] = "1"
 os.environ["MORSE_SM_USE_APP_BINARIES"] = "1"
 
-print(f"Using Morse Zephyr module: {mm_root} ({MORSE_CHIP}, BCF {bcf_filename}, prebuilt={use_prebuilt})")
+print(
+    f"Using Morse Zephyr module: {mm_root} "
+    f"({MORSE_CHIP}, variant={MORSE_PREBUILT_VARIANT}, "
+    f"BCF {bcf_filename}, prebuilt={use_prebuilt})"
+)

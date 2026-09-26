@@ -63,5 +63,6 @@
 		busy-gpios = <&xiao_d 4 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
 		wakeup-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
 		resetn-gpios = <&xiao_d 0 GPIO_ACTIVE_LOW>;
+		/* The shield is always powered; it has no power-enable GPIO. */
 	};
 };
