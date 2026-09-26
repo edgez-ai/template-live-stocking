@@ -46,6 +46,10 @@ module.exports = function withEdgezBundleUpdates(config, options = {}) {
     fs.copyFileSync(path.join(__dirname, "..", "certificates", "github-edgez-biz.pem"), path.join(raw, "edgez_ota_ca.pem"));
     fs.writeFileSync(path.join(xml, "edgez_network_security_config.xml"), `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">localhost</domain>
+    <domain includeSubdomains="false">127.0.0.1</domain>
+  </domain-config>
   <domain-config>
     <domain includeSubdomains="false">github.edgez.biz</domain>
     <trust-anchors>
