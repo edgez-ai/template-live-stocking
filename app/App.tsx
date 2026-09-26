@@ -8,7 +8,7 @@ import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, 
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
 import { EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
-import type { EdgezEsp32Chip, EdgezEsp32FlashBaud, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef, EdgezUsbDevice, EdgezUsbFlashStatus } from "@edgez/react-native-sdk";
+import type { EdgezEsp32Chip, EdgezEsp32FlashAckWindow, EdgezEsp32FlashBaud, EdgezEsptoolConfig, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef, EdgezUsbDevice, EdgezUsbFlashStatus } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -46,6 +46,7 @@ type GeofenceGeometry = { center?: { latitude: number; longitude: number }; radi
 type SettingsTab = "team" | "areas" | "rules";
 type FlashRelease = { tag: string; name: string; url: string; size: number; sha256: string };
 type FlashStage = { label: string; message: string };
+type FlashTimeoutMinutes = 10 | 15 | 20 | 30;
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 const defaultAreaColor = "#E88D29";
 const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
@@ -60,6 +61,17 @@ const esp32FlashBaudRates: { value: EdgezEsp32FlashBaud; label: string; detail: 
   { value: 230400, label: "230400", detail: "Balanced" },
   { value: 460800, label: "460800", detail: "Fast · recommended" },
   { value: 921600, label: "921600", detail: "Fastest · link dependent" },
+];
+const esp32FlashAckWindows: { value: EdgezEsp32FlashAckWindow; detail: string }[] = [
+  { value: 1, detail: "Stock stop-and-wait" },
+  { value: 3, detail: "Conservative pipelining" },
+  { value: 5, detail: "Fast · recommended" },
+  { value: 8, detail: "Aggressive · link dependent" },
+];
+const esp32FlashTimeouts: FlashTimeoutMinutes[] = [10, 15, 20, 30];
+const esptoolConfigs: { value: EdgezEsptoolConfig; label: string; detail: string }[] = [
+  { value: "standard", label: "Standard", detail: "Short serial response timeouts" },
+  { value: "high-latency", label: "High-latency", detail: "Recommended for remote USB" },
 ];
 const iconGlyphs: Record<EdgezMapIcon, React.ComponentProps<typeof MaterialCommunityIcons>["name"]> = {
   sheep: "sheep", cow: "cow", goat: "sheep", horse: "horse", dog: "dog", person: "account",
@@ -674,6 +686,12 @@ export default function App() {
   const [flashChip, setFlashChip] = useState<EdgezEsp32Chip>("esp32s3");
   const [flashBaudRate, setFlashBaudRate] = useState<EdgezEsp32FlashBaud>(460800);
   const [flashBaudOpen, setFlashBaudOpen] = useState(false);
+  const [flashAckWindow, setFlashAckWindow] = useState<EdgezEsp32FlashAckWindow>(5);
+  const [flashAckWindowOpen, setFlashAckWindowOpen] = useState(false);
+  const [flashTimeoutMinutes, setFlashTimeoutMinutes] = useState<FlashTimeoutMinutes>(30);
+  const [flashTimeoutOpen, setFlashTimeoutOpen] = useState(false);
+  const [flashEsptoolConfig, setFlashEsptoolConfig] = useState<EdgezEsptoolConfig>("high-latency");
+  const [flashEsptoolConfigOpen, setFlashEsptoolConfigOpen] = useState(false);
   const [flashScanning, setFlashScanning] = useState(false);
   const [flashing, setFlashing] = useState(false);
   const [flashJobId, setFlashJobId] = useState("");
@@ -697,6 +715,9 @@ export default function App() {
     setFlashElapsedSeconds(0);
     setFlashMessages([]);
     setFlashBaudOpen(false);
+    setFlashAckWindowOpen(false);
+    setFlashTimeoutOpen(false);
+    setFlashEsptoolConfigOpen(false);
     setFlasherOpen(true);
   }
 
@@ -734,9 +755,12 @@ export default function App() {
         busId: flashBusId,
         chip: flashChip,
         baudRate: flashBaudRate,
+        ackWindow: flashAckWindow,
+        esptoolConfig: flashEsptoolConfig,
         firmwareUrl: latestFlashRelease.url,
         sha256: latestFlashRelease.sha256,
         jobId,
+        flashTimeoutMs: flashTimeoutMinutes * 60_000,
         onProgress: (status) => {
           setFlashProgress(status);
           if (status.message) setFlashMessages((messages) => [...messages, status.message!].slice(-8));
@@ -1488,6 +1512,24 @@ export default function App() {
             <Text style={styles.muted}>{esp32FlashBaudRates.find(({ value }) => value === flashBaudRate)?.detail} · {flashBaudOpen ? "CLOSE" : "CHANGE"}</Text>
           </Pressable>
           {flashBaudOpen && <View style={styles.optionList}>{esp32FlashBaudRates.map((choice) => <Pressable key={choice.value} style={[styles.optionRow, choice.value === flashBaudRate && styles.farmRowSelected]} onPress={() => { setFlashBaudRate(choice.value); setFlashBaudOpen(false); }} accessibilityRole="radio" accessibilityState={{ selected: choice.value === flashBaudRate }}><Text style={styles.deviceNameDark}>{choice.label} baud</Text><Text style={styles.muted}>{choice.detail}</Text></Pressable>)}</View>}
+          <Text style={styles.fieldLabel}>ACK WINDOW</Text>
+          <Pressable style={styles.farmRow} onPress={() => setFlashAckWindowOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashAckWindowOpen }}>
+            <Text style={styles.deviceNameDark}>{flashAckWindow} blocks</Text>
+            <Text style={styles.muted}>{esp32FlashAckWindows.find(({ value }) => value === flashAckWindow)?.detail} · {flashAckWindowOpen ? "CLOSE" : "CHANGE"}</Text>
+          </Pressable>
+          {flashAckWindowOpen && <View style={styles.optionList}>{esp32FlashAckWindows.map((choice) => <Pressable key={choice.value} style={[styles.optionRow, choice.value === flashAckWindow && styles.farmRowSelected]} onPress={() => { setFlashAckWindow(choice.value); setFlashAckWindowOpen(false); }} accessibilityRole="radio" accessibilityState={{ selected: choice.value === flashAckWindow }}><Text style={styles.deviceNameDark}>{choice.value} blocks</Text><Text style={styles.muted}>{choice.detail}</Text></Pressable>)}</View>}
+          <Text style={styles.fieldLabel}>FLASH TIMEOUT</Text>
+          <Pressable style={styles.farmRow} onPress={() => setFlashTimeoutOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashTimeoutOpen }}>
+            <Text style={styles.deviceNameDark}>{flashTimeoutMinutes} minutes</Text>
+            <Text style={styles.muted}>Server execution limit · {flashTimeoutOpen ? "CLOSE" : "CHANGE"}</Text>
+          </Pressable>
+          {flashTimeoutOpen && <View style={styles.optionList}>{esp32FlashTimeouts.map((minutes) => <Pressable key={minutes} style={[styles.optionRow, minutes === flashTimeoutMinutes && styles.farmRowSelected]} onPress={() => { setFlashTimeoutMinutes(minutes); setFlashTimeoutOpen(false); }} accessibilityRole="radio" accessibilityState={{ selected: minutes === flashTimeoutMinutes }}><Text style={styles.deviceNameDark}>{minutes} minutes</Text><Text style={styles.muted}>{minutes === 30 ? "Maximum · recommended" : "Stop stalled jobs sooner"}</Text></Pressable>)}</View>}
+          <Text style={styles.fieldLabel}>ESPTOOL CONFIG</Text>
+          <Pressable style={styles.farmRow} onPress={() => setFlashEsptoolConfigOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashEsptoolConfigOpen }}>
+            <Text style={styles.deviceNameDark}>{esptoolConfigs.find(({ value }) => value === flashEsptoolConfig)?.label}</Text>
+            <Text style={styles.muted}>{esptoolConfigs.find(({ value }) => value === flashEsptoolConfig)?.detail} · {flashEsptoolConfigOpen ? "CLOSE" : "CHANGE"}</Text>
+          </Pressable>
+          {flashEsptoolConfigOpen && <View style={styles.optionList}>{esptoolConfigs.map((choice) => <Pressable key={choice.value} style={[styles.optionRow, choice.value === flashEsptoolConfig && styles.farmRowSelected]} onPress={() => { setFlashEsptoolConfig(choice.value); setFlashEsptoolConfigOpen(false); }} accessibilityRole="radio" accessibilityState={{ selected: choice.value === flashEsptoolConfig }}><Text style={styles.deviceNameDark}>{choice.label}</Text><Text style={styles.muted}>{choice.detail}</Text></Pressable>)}</View>}
           <Text style={styles.fieldLabel}>FIRMWARE</Text>
           <View style={[styles.farmRow, !latestFlashRelease?.sha256 && styles.disabledButton]}><Text style={styles.deviceNameDark}>{latestFlashRelease ? `${latestFlashRelease.tag} · ${latestFlashRelease.name} · ${(latestFlashRelease.size / 1024 / 1024).toFixed(2)} MiB` : "Loading latest GitHub release…"}</Text>{latestFlashRelease?.sha256 && <Text style={styles.flashHash} numberOfLines={1}>GitHub SHA-256 {latestFlashRelease.sha256}</Text>}</View>
           <Text style={styles.fieldLabel}>USB DEVICE</Text>
