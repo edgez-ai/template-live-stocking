@@ -32,7 +32,7 @@ const teamInviteUrl = process.env.APPWRITE_TEAM_INVITE_URL ||
   `https://${appName}-${projectId.slice(0, 8)}.sites.${domainSuffix}/invite.html`;
 const vcsRepositoryUrl = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL ||
   (process.env.GITHUB_REPOSITORY ? `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${process.env.GITHUB_REPOSITORY}` : "");
-const bundleRuntimeVersion = process.env.EDGEZ_BUNDLE_RUNTIME_VERSION || "live-stocking-android-1";
+const bundleRuntimeVersion = process.env.EDGEZ_BUNDLE_RUNTIME_VERSION || "live-stocking-android-2";
 const otaProxyUrl = process.env.EDGEZ_OTA_PROXY_URL || "https://github.edgez.biz";
 
 module.exports = {

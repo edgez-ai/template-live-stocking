@@ -36,7 +36,7 @@ jobs:
       APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID || secrets.APPWRITE_PROJECT_ID }}
       APPWRITE_PROJECT_NAME: ${{ vars.APPWRITE_PROJECT_NAME }}
       APPWRITE_TEAM_INVITE_URL: ${{ vars.APPWRITE_TEAM_INVITE_URL }}
-      EDGEZ_BUNDLE_RUNTIME_VERSION: live-stocking-android-1
+      EDGEZ_BUNDLE_RUNTIME_VERSION: live-stocking-android-2
       CI: "1"
       NODE_ENV: production
     steps:
