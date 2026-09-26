@@ -7,8 +7,8 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, Teams } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
-import { EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
-import type { EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
+import { EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
+import type { EdgezEsp32Chip, EdgezEsp32FlashBaud, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef, EdgezUsbDevice, EdgezUsbFlashStatus } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -44,9 +44,23 @@ type VoltagePoint = { timestamp: number; value: number };
 type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
 type GeofenceGeometry = { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
 type SettingsTab = "team" | "areas" | "rules";
+type FlashRelease = { tag: string; name: string; url: string; size: number; sha256: string };
+type FlashStage = { label: string; message: string };
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 const defaultAreaColor = "#E88D29";
 const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
+const flashSdk = new EdgezMeshSdk();
+const esp32Chips: { key: EdgezEsp32Chip; label: string }[] = [
+  { key: "esp32s3", label: "ESP32-S3" },
+  { key: "esp32", label: "ESP32" },
+  { key: "esp32c3", label: "ESP32-C3" },
+];
+const esp32FlashBaudRates: { value: EdgezEsp32FlashBaud; label: string; detail: string }[] = [
+  { value: 115200, label: "115200", detail: "Most reliable" },
+  { value: 230400, label: "230400", detail: "Balanced" },
+  { value: 460800, label: "460800", detail: "Fast · recommended" },
+  { value: 921600, label: "921600", detail: "Fastest · link dependent" },
+];
 const iconGlyphs: Record<EdgezMapIcon, React.ComponentProps<typeof MaterialCommunityIcons>["name"]> = {
   sheep: "sheep", cow: "cow", goat: "sheep", horse: "horse", dog: "dog", person: "account",
   tractor: "tractor", truck: "truck", car: "car", drone: "drone", router: "router-wireless",
@@ -205,6 +219,13 @@ function telemetryCoordinates(row?: Telemetry) {
     ? { latitude, longitude } : null;
 }
 
+function deviceMapNodes(devices: Device[], telemetry: Telemetry[]): EdgezMapNode[] {
+  return devices.flatMap((device) => {
+    const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
+    return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.metadata?.icon }] : [];
+  });
+}
+
 function firmwareVersionOf(row?: Telemetry) {
   if (!row) return "";
   try {
@@ -231,6 +252,7 @@ const endpoint = config.appwriteEndpoint.replace(/\/+$/, "");
 const otaRepositoryUrl = (config.otaRepositoryUrl || "").replace(/\.git$/, "").replace(/\/$/, "");
 const otaRepositoryMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(otaRepositoryUrl);
 const otaImageUrl = otaRepositoryMatch ? `${otaRepositoryUrl}/releases/latest/download/live-stocking-ota.bin` : "";
+const flashImageName = "live-stocking-flash.bin";
 const otaLatestReleaseApiUrl = otaRepositoryMatch
   ? `https://api.github.com/repos/${otaRepositoryMatch[1]}/${otaRepositoryMatch[2]}/releases/latest` : "";
 const cachePrefix = `live-stocking:${config.appwriteProjectId}:`;
@@ -442,7 +464,7 @@ function FarmLocationPicker({ location, country, device = false, onCancel, onSel
   </SafeAreaView>;
 }
 
-function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft; country: string; onCancel: () => void; onSave: (draft: AreaDraft) => void }) {
+function AreaMapEditor({ draft, country, areas, editingAreaId, devices, telemetry, onCancel, onSave }: { draft: AreaDraft; country: string; areas: GeofenceArea[]; editingAreaId?: string; devices: Device[]; telemetry: Telemetry[]; onCancel: () => void; onSave: (draft: AreaDraft) => void }) {
   const map = useRef<EdgezOrganicMapRef>(null);
   const initial = useMemo(() => coordinatesFromLocation(draft.location) ?? countryMapCenters[country] ?? { latitude: 59.3293, longitude: 18.0686 }, [draft.location, country]);
   const [center, setCenter] = useState(initial);
@@ -469,10 +491,15 @@ function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft;
     points: boundaryPoints.length >= 3 ? [...boundaryPoints, boundaryPoints[0]] : boundaryPoints,
     color: areaColor(draft.color),
   }] : [];
+  const existingAreaLines = useMemo<EdgezMapLine[]>(() => areas
+    .filter((area) => area.$id !== editingAreaId)
+    .map(geofenceLine)
+    .filter((line): line is EdgezMapLine => line !== null), [areas, editingAreaId]);
+  const markers = useMemo(() => deviceMapNodes(devices, telemetry), [devices, telemetry]);
   return <SafeAreaView style={styles.dialogPage}>
     <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>EDIT AREA ON MAP</Text><Text style={styles.dialogTitle}>{draft.name || "New area"}</Text></View><Pressable onPress={onCancel}><Text style={styles.close}>BACK</Text></Pressable></View>
     <View style={styles.locationMap}>
-      <EdgezOrganicMap ref={map} nodes={[]} lines={previewLines} centerLatitude={initial.latitude} centerLongitude={initial.longitude} zoom={16} enableMapDownloads style={styles.map} onMapReady={() => map.current?.getCamera()} onCameraChanged={(nextCamera) => setCenter({ latitude: nextCamera.latitude, longitude: nextCamera.longitude })} />
+      <EdgezOrganicMap ref={map} nodes={markers} lines={[...existingAreaLines, ...previewLines]} centerLatitude={initial.latitude} centerLongitude={initial.longitude} zoom={16} enableMapDownloads style={styles.map} onMapReady={() => map.current?.getCamera()} onCameraChanged={(nextCamera) => setCenter({ latitude: nextCamera.latitude, longitude: nextCamera.longitude })} />
       <View pointerEvents="none" style={styles.mapCrosshair}><Text style={styles.mapCrosshairText}>＋</Text></View>
       <View style={styles.areaMapControls}>
         {draft.shape === "circle" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>RADIUS · {primary} m</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, -10)}><Text style={styles.areaControlText}>−</Text></Pressable><Pressable style={styles.areaControl} onPress={() => resize(setPrimary, 10)}><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
@@ -481,7 +508,7 @@ function AreaMapEditor({ draft, country, onCancel, onSave }: { draft: AreaDraft;
         {draft.shape === "polygon" && <View style={styles.areaDimension}><Text style={styles.areaControlLabel}>POINTS · {vertexCount}</Text><View style={styles.areaControlButtons}><Pressable style={styles.areaControl} onPress={removeVertex} disabled={!vertexCount} accessibilityLabel="Undo last point"><Text style={styles.areaControlText}>↶</Text></Pressable><Pressable style={styles.areaControl} onPress={addVertex} accessibilityLabel="Add point at crosshair"><Text style={styles.areaControlText}>+</Text></Pressable></View></View>}
       </View>
     </View>
-    <View style={styles.locationFooter}><Text style={styles.dialogHelp}>{draft.shape === "polygon" ? "Pan until the crosshair marks a corner, then tap +. Add at least three corners; ↶ removes the last one." : "Pan the map to position the area and use the controls to set its dimensions."}</Text><Text style={styles.muted}>{center.latitude.toFixed(6)}, {center.longitude.toFixed(6)}</Text>{draft.shape === "polygon" && <Text style={styles.muted}>{vertexCount} polygon points</Text>}<Pressable style={[styles.primary, draft.shape === "polygon" && distinctVertexCount < 3 && styles.disabledButton]} disabled={draft.shape === "polygon" && distinctVertexCount < 3} onPress={() => onSave({ ...draft, location: `${center.latitude.toFixed(6)}, ${center.longitude.toFixed(6)}`, primary: String(primary), secondary: String(secondary), vertices })}><Text style={styles.primaryText}>USE AREA POSITION</Text></Pressable></View>
+    <View style={styles.locationFooter}><Text style={styles.dialogHelp}>{draft.shape === "polygon" ? "Pan until the crosshair marks a corner, then tap +. Add at least three corners; ↶ removes the last one." : "Pan the map to position the area and use the controls to set its dimensions."} Existing areas and located devices remain visible for context.</Text><Text style={styles.muted}>{center.latitude.toFixed(6)}, {center.longitude.toFixed(6)}</Text>{draft.shape === "polygon" && <Text style={styles.muted}>{vertexCount} polygon points</Text>}<Pressable style={[styles.primary, draft.shape === "polygon" && distinctVertexCount < 3 && styles.disabledButton]} disabled={draft.shape === "polygon" && distinctVertexCount < 3} onPress={() => onSave({ ...draft, location: `${center.latitude.toFixed(6)}, ${center.longitude.toFixed(6)}`, primary: String(primary), secondary: String(secondary), vertices })}><Text style={styles.primaryText}>USE AREA POSITION</Text></Pressable></View>
   </SafeAreaView>;
 }
 
@@ -492,11 +519,7 @@ function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Dev
   const [mapError, setMapError] = useState("");
   const farmCenter = coordinatesFromLocation(location ?? "");
   const lines = useMemo<EdgezMapLine[]>(() => areas.map(geofenceLine).filter((line): line is EdgezMapLine => line !== null), [areas]);
-  const markers = useMemo<EdgezMapNode[]>(() =>
-    devices.flatMap((device) => {
-      const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
-      return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.metadata?.icon }] : [];
-    }), [devices, telemetry]);
+  const markers = useMemo(() => deviceMapNodes(devices, telemetry), [devices, telemetry]);
 
   return <View style={styles.mapCard}>
     <EdgezOrganicMap
@@ -602,6 +625,7 @@ export default function App() {
   const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
   const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
+  const [latestFlashRelease, setLatestFlashRelease] = useState<FlashRelease | null>(null);
   const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
   const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
   const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
@@ -644,12 +668,99 @@ export default function App() {
   const [offline, setOffline] = useState(false);
   const [dashboardView, setDashboardView] = useState<DashboardView>("map");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [flasherOpen, setFlasherOpen] = useState(false);
+  const [flashDevices, setFlashDevices] = useState<EdgezUsbDevice[]>([]);
+  const [flashBusId, setFlashBusId] = useState("");
+  const [flashChip, setFlashChip] = useState<EdgezEsp32Chip>("esp32s3");
+  const [flashBaudRate, setFlashBaudRate] = useState<EdgezEsp32FlashBaud>(460800);
+  const [flashBaudOpen, setFlashBaudOpen] = useState(false);
+  const [flashScanning, setFlashScanning] = useState(false);
+  const [flashing, setFlashing] = useState(false);
+  const [flashJobId, setFlashJobId] = useState("");
+  const [flashProgress, setFlashProgress] = useState<EdgezUsbFlashStatus | null>(null);
+  const [flashStage, setFlashStage] = useState<FlashStage | null>(null);
+  const [flashElapsedSeconds, setFlashElapsedSeconds] = useState(0);
+  const [flashMessages, setFlashMessages] = useState<string[]>([]);
+  const [flashError, setFlashError] = useState("");
   const activeUserId = useRef<string | null>(null);
   const farmsRef = useRef<Farm[]>([]);
   const devicesRef = useRef<Device[]>([]);
   const telemetryRef = useRef<Telemetry[]>([]);
   const refreshInFlight = useRef<Promise<Farm[]> | null>(null);
   const refreshUserId = useRef<string | null>(null);
+
+  function openFlasher() {
+    setMenuOpen(false);
+    setFlashError("");
+    setFlashProgress(null);
+    setFlashStage(null);
+    setFlashElapsedSeconds(0);
+    setFlashMessages([]);
+    setFlashBaudOpen(false);
+    setFlasherOpen(true);
+  }
+
+  async function closeFlasher() {
+    if (flashing) return;
+    setFlasherOpen(false);
+    await flashSdk.stopUsbIpServer().catch(() => undefined);
+  }
+
+  async function discoverFlashDevices() {
+    setFlashScanning(true); setFlashError(""); setFlashDevices([]); setFlashBusId("");
+    try {
+      const discovered = await flashSdk.discoverUsbDevices();
+      setFlashDevices(discovered);
+      setFlashBusId(discovered[0]?.busId || "");
+    } catch (caught) { setFlashError(messageOf(caught)); }
+    finally { setFlashScanning(false); }
+  }
+
+  async function startEsp32Flash() {
+    if (!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing) return;
+    const jobId = `esp32-${Date.now().toString(36)}`;
+    setFlashing(true); setFlashJobId(jobId); setFlashProgress(null); setFlashError("");
+    setFlashElapsedSeconds(0);
+    setFlashMessages([]);
+    setFlashStage({ label: "AUTHENTICATING", message: "Creating a short-lived user token…" });
+    try {
+      const jwt = (await account.createJWT()).jwt;
+      setFlashStage({ label: "STARTING RUNTIME", message: "Preparing the organization USB flash runtime…" });
+      await flashSdk.flashEsp32ReleaseFirmware({
+        endpoint,
+        projectId: config.appwriteProjectId,
+        teamId: currentFarm.teamId,
+        jwt,
+        busId: flashBusId,
+        chip: flashChip,
+        baudRate: flashBaudRate,
+        firmwareUrl: latestFlashRelease.url,
+        sha256: latestFlashRelease.sha256,
+        jobId,
+        // Match Android DevTools: keep USB/IP attached independently of one
+        // flash command so another tool (or a serial monitor) can open the
+        // exported device until the operator closes the flasher.
+        keepTunnelOpen: true,
+        onProgress: (status) => {
+          setFlashProgress(status);
+          if (status.message) setFlashMessages((messages) => [...messages, status.message!].slice(-8));
+          const labels: Record<EdgezUsbFlashStatus["state"], string> = {
+            downloading: "DOWNLOADING FIRMWARE", uploading: "UPLOADING FIRMWARE", verified: "FIRMWARE VERIFIED",
+            flashing: "FLASHING DEVICE", complete: "COMPLETE", failed: "FAILED", cancelled: "CANCELLED",
+          };
+          setFlashStage({ label: labels[status.state], message: status.message || "Flash runtime is working…" });
+        },
+      });
+      Alert.alert("Flashing complete", `${esp32Chips.find(({ key }) => key === flashChip)?.label || flashChip} firmware was written successfully.`);
+    } catch (caught) { setFlashError(messageOf(caught)); }
+    finally { setFlashing(false); setFlashJobId(""); }
+  }
+
+  async function cancelEsp32Flash() {
+    if (!flashJobId) return;
+    try { await flashSdk.cancelUsbFlash(flashJobId); }
+    catch (caught) { setFlashError(messageOf(caught)); }
+  }
 
   const refresh = useCallback((current: CurrentUser): Promise<Farm[]> => {
     if (refreshInFlight.current && refreshUserId.current === current.$id) return refreshInFlight.current;
@@ -751,10 +862,16 @@ export default function App() {
     void fetch(otaLatestReleaseApiUrl, { headers: { Accept: "application/vnd.github+json" } })
       .then((response) => {
         if (!response.ok) throw new Error("Could not read the latest firmware release.");
-        return response.json() as Promise<{ tag_name?: unknown }>;
+        return response.json() as Promise<{ tag_name?: unknown; assets?: { name?: unknown; browser_download_url?: unknown; size?: unknown; digest?: unknown }[] }>;
       })
       .then((release) => {
-        if (active && typeof release.tag_name === "string") setLatestFirmwareVersion(release.tag_name);
+        if (!active || typeof release.tag_name !== "string") return;
+        setLatestFirmwareVersion(release.tag_name);
+        const asset = release.assets?.find((candidate) => candidate.name === flashImageName);
+        if (asset && typeof asset.browser_download_url === "string" && typeof asset.size === "number") {
+          const digest = typeof asset.digest === "string" ? asset.digest.replace(/^sha256:/i, "") : "";
+          setLatestFlashRelease({ tag: release.tag_name, name: flashImageName, url: asset.browser_download_url, size: asset.size, sha256: digest });
+        } else setLatestFlashRelease(null);
       })
       .catch(() => undefined);
     return () => { active = false; };
@@ -775,6 +892,22 @@ export default function App() {
   useEffect(() => {
     if (user && farms.some((farm) => farm.$id === currentFarmId)) void cacheSelectedFarm(user.$id, currentFarmId);
   }, [user?.$id, farms, currentFarmId]);
+  useEffect(() => flashSdk.subscribe((event) => {
+    if (event.type !== "usb" || !event.usbTunnelState) return;
+    if (event.usbTunnelState === "connecting") {
+      setFlashStage({ label: "CONNECTING", message: "Opening the secure WebSocket to the USB runtime…" });
+    } else if (event.usbTunnelState === "connected") {
+      setFlashStage({ label: "USB CONNECTED", message: "USB tunnel is ready; sending the flash request…" });
+    } else if (event.usbTunnelState === "failed" || event.usbTunnelState === "disconnected") {
+      setFlashStage({ label: "CONNECTION LOST", message: event.usbTunnelMessage || "The USB runtime connection closed." });
+    }
+  }), []);
+  useEffect(() => {
+    if (!flashing) return;
+    const startedAt = Date.now() - flashElapsedSeconds * 1000;
+    const timer = setInterval(() => setFlashElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [flashing]);
   useEffect(() => {
     if (!detailDevice) return;
     let active = true;
@@ -1338,15 +1471,49 @@ export default function App() {
         {menuOpen && <View style={styles.dropdownMenu}>
           <Pressable style={styles.menuItem} onPress={() => { setDashboardView(dashboardView === "map" ? "list" : "map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>{dashboardView === "map" ? "List view" : "Map view"}</Text></Pressable>
           <Pressable style={styles.menuItem} onPress={() => { setAlarmsOpen(true); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Alarms{geofenceAlarms.filter((alarm) => !alarm.acknowledged).length ? ` · ${geofenceAlarms.filter((alarm) => !alarm.acknowledged).length}` : ""}</Text></Pressable>
+          {Platform.OS === "android" && <Pressable style={styles.menuItem} onPress={openFlasher} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Flash ESP32</Text></Pressable>}
           <Pressable style={styles.menuItem} onPress={openSettings} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Settings · Farms</Text></Pressable>
           <View style={styles.menuDivider} />
           <Pressable style={styles.menuItem} onPress={() => void signOut().catch((caught) => setError(messageOf(caught)))} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Sign out</Text></Pressable>
         </View>}
       </View>
     </View>}
+    <Modal visible={flasherOpen && Boolean(user)} animationType="slide" onRequestClose={() => void closeFlasher()}>
+      <SafeAreaView style={styles.dialogPage}>
+        <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>USB-C FIRMWARE</Text><Text style={styles.dialogTitle}>Flash ESP32</Text></View><Pressable onPress={() => void closeFlasher()} disabled={flashing}><Text style={styles.close}>CLOSE</Text></Pressable></View>
+        <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
+          <Text style={styles.dialogHelp}>Connect the board to this Android phone with a USB-C data cable. The organization runtime downloads and verifies the full image from this deployment&apos;s latest GitHub release; the phone carries only control and USB traffic.</Text>
+          <View style={styles.flashWarning}><Text style={styles.flashWarningTitle}>FULL RELEASE IMAGE</Text><Text style={styles.flashWarningText}>This flow uses <Text style={styles.flashWarningCode}>{flashImageName}</Text> from release {latestFlashRelease?.tag || "metadata loading…"} and writes it at address 0x0. It never uses the OTA-only image.</Text></View>
+          <Text style={styles.fieldLabel}>CHIP</Text>
+          <View style={styles.settingsActions}>{esp32Chips.map((chip) => <Pressable key={chip.key} style={[styles.smallOption, flashChip === chip.key && styles.farmRowSelected]} onPress={() => setFlashChip(chip.key)} disabled={flashing} accessibilityRole="radio" accessibilityState={{ selected: flashChip === chip.key }}><Text style={styles.deviceNameDark}>{chip.label}</Text></Pressable>)}</View>
+          <Text style={styles.fieldLabel}>FLASH SPEED</Text>
+          <Pressable style={styles.farmRow} onPress={() => setFlashBaudOpen((open) => !open)} disabled={flashing} accessibilityRole="button" accessibilityState={{ expanded: flashBaudOpen }}>
+            <Text style={styles.deviceNameDark}>{flashBaudRate.toLocaleString()} baud</Text>
+            <Text style={styles.muted}>{esp32FlashBaudRates.find(({ value }) => value === flashBaudRate)?.detail} · {flashBaudOpen ? "CLOSE" : "CHANGE"}</Text>
+          </Pressable>
+          {flashBaudOpen && <View style={styles.optionList}>{esp32FlashBaudRates.map((choice) => <Pressable key={choice.value} style={[styles.optionRow, choice.value === flashBaudRate && styles.farmRowSelected]} onPress={() => { setFlashBaudRate(choice.value); setFlashBaudOpen(false); }} accessibilityRole="radio" accessibilityState={{ selected: choice.value === flashBaudRate }}><Text style={styles.deviceNameDark}>{choice.label} baud</Text><Text style={styles.muted}>{choice.detail}</Text></Pressable>)}</View>}
+          <Text style={styles.fieldLabel}>FIRMWARE</Text>
+          <View style={[styles.farmRow, !latestFlashRelease?.sha256 && styles.disabledButton]}><Text style={styles.deviceNameDark}>{latestFlashRelease ? `${latestFlashRelease.tag} · ${latestFlashRelease.name} · ${(latestFlashRelease.size / 1024 / 1024).toFixed(2)} MiB` : "Loading latest GitHub release…"}</Text>{latestFlashRelease?.sha256 && <Text style={styles.flashHash} numberOfLines={1}>GitHub SHA-256 {latestFlashRelease.sha256}</Text>}</View>
+          <Text style={styles.fieldLabel}>USB DEVICE</Text>
+          <Pressable style={styles.outlineButton} onPress={() => void discoverFlashDevices()} disabled={flashing || flashScanning}><Text style={styles.outlineButtonText}>{flashScanning ? "WAITING FOR USB DEVICE…" : "FIND CONNECTED DEVICE"}</Text></Pressable>
+          {flashDevices.map((device) => <Pressable key={device.busId} style={[styles.farmRow, flashBusId === device.busId && styles.farmRowSelected]} onPress={() => setFlashBusId(device.busId)} disabled={flashing} accessibilityRole="radio" accessibilityState={{ selected: flashBusId === device.busId }}><Text style={styles.deviceNameDark}>{device.label}</Text><Text style={styles.muted}>USB bus {device.busId}</Text></Pressable>)}
+          {flashStage && <View style={styles.flashProgress} accessibilityRole="progressbar">
+            <View style={styles.flashProgressHeader}><Text style={styles.deviceNameDark}>{flashStage.label}</Text><Text style={styles.flashElapsed}>{Math.floor(flashElapsedSeconds / 60)}:{String(flashElapsedSeconds % 60).padStart(2, "0")}</Text></View>
+            <Text style={styles.muted}>{flashProgress?.size ? `${Math.min(100, Math.round(100 * (flashProgress.received || 0) / flashProgress.size))}% · ` : ""}{flashStage.message}</Text>
+            {flashing && <ActivityIndicator size="small" color="#087f73" />}
+            {flashMessages.length > 1 && <View style={styles.flashLog}>{flashMessages.map((message, index) => <Text key={`${index}-${message}`} style={styles.flashLogLine}>{message}</Text>)}</View>}
+          </View>}
+          {flashError ? <Text style={styles.dialogError}>{flashError}</Text> : null}
+          {offline && <Text style={styles.dialogError}>Connect to the internet before flashing.</Text>}
+          {!currentFarm && <Text style={styles.dialogError}>Select or create a farm to authorize an organization flash session.</Text>}
+          <Pressable style={[styles.primary, (!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing) && styles.disabledButton]} onPress={() => void startEsp32Flash()} disabled={!latestFlashRelease?.sha256 || !flashBusId || !currentFarm || offline || flashing}><Text style={styles.primaryText}>{flashing ? "FLASHING… DO NOT DISCONNECT" : `FLASH ${esp32Chips.find(({ key }) => key === flashChip)?.label || "ESP32"}`}</Text></Pressable>
+          {flashing && <Pressable style={styles.outlineButton} onPress={() => void cancelEsp32Flash()}><Text style={styles.outlineButtonText}>CANCEL FLASH</Text></Pressable>}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
     <Modal visible={alarmsOpen && Boolean(user)} animationType="slide" onRequestClose={() => setAlarmsOpen(false)}><SafeAreaView style={styles.dialogPage}><View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>FARM SAFETY</Text><Text style={styles.dialogTitle}>Alarms</Text></View><Pressable onPress={() => setAlarmsOpen(false)}><Text style={styles.close}>CLOSE</Text></Pressable></View><ScrollView contentContainerStyle={styles.dialogContent}>{geofenceAlarms.length ? geofenceAlarms.map((alarm) => <View key={alarm.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{visibleDevices.find((device) => device.$id === alarm.deviceId)?.name || alarm.deviceId} · {alarm.event.toUpperCase()}</Text><Text style={styles.muted}>{geofenceAreas.find((area) => area.$id === alarm.areaId)?.name || "Area"} · {alarm.acknowledged ? "ACKNOWLEDGED" : "ACTIVE"}</Text><Text style={styles.muted}>{new Date(alarm.raisedAt).toLocaleString()}</Text></View>{!alarm.acknowledged && <Pressable onPress={() => void tables.updateRow<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, rowId: alarm.$id, data: { acknowledged: true, acknowledgedAt: new Date().toISOString() } }).then((updated) => setGeofenceAlarms((alarms) => alarms.map((item) => item.$id === updated.$id ? updated : item))).catch((caught) => setError(messageOf(caught)))}><Text style={styles.removeMemberText}>ACK</Text></Pressable>}</View>) : <Text style={styles.empty}>No active alarms.</Text>}</ScrollView></SafeAreaView></Modal>
     <Modal visible={settingsOpen && Boolean(user)} animationType="slide" onRequestClose={() => locationPickerOpen ? setLocationPickerOpen(false) : farmManagerOpen ? setFarmManagerOpen(false) : setSettingsOpen(false)}>
-      {areaPickerOpen ? <AreaMapEditor draft={areaDraft} country={currentFarm?.country || ""} onCancel={() => setAreaPickerOpen(false)} onSave={(draft) => { setAreaDraft(draft); setAreaPickerOpen(false); }} /> : locationPickerOpen ? <FarmLocationPicker location={farmDraft.location} country={farmDraft.country} onCancel={() => setLocationPickerOpen(false)} onSelect={(location) => { setFarmDraft({ ...farmDraft, location }); setLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
+      {areaPickerOpen ? <AreaMapEditor draft={areaDraft} country={currentFarm?.country || ""} areas={geofenceAreas} editingAreaId={areaEditingId === "new" ? undefined : areaEditingId || undefined} devices={visibleDevices} telemetry={telemetry} onCancel={() => setAreaPickerOpen(false)} onSave={(draft) => { setAreaDraft(draft); setAreaPickerOpen(false); }} /> : locationPickerOpen ? <FarmLocationPicker location={farmDraft.location} country={farmDraft.country} onCancel={() => setLocationPickerOpen(false)} onSelect={(location) => { setFarmDraft({ ...farmDraft, location }); setLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
         <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>SETTINGS</Text><Text style={styles.dialogTitle}>{farmManagerOpen ? "Farm management" : "Farm settings"}</Text></View><Pressable onPress={() => farmManagerOpen ? setFarmManagerOpen(false) : setSettingsOpen(false)}><Text style={styles.close}>{farmManagerOpen ? "BACK" : "CLOSE"}</Text></Pressable></View>
         <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
           {farmManagerOpen ? <>
@@ -1517,6 +1684,7 @@ const styles = StyleSheet.create({
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },
   wifiHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, rescan: { color: "#0a8c87", fontSize: 10, fontWeight: "900" }, wifiNetwork: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, wifiNetworkSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" }, signal: { color: "#59716f", fontSize: 10, fontWeight: "700" },
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
+  flashWarning: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#e8b5aa", backgroundColor: "#fff4f1" }, flashWarningTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, flashWarningText: { color: "#7f5b53", fontSize: 11, lineHeight: 16, marginTop: 5 }, flashWarningCode: { fontWeight: "900" }, flashHash: { color: "#718783", fontSize: 9, fontFamily: Platform.OS === "android" ? "monospace" : undefined }, flashProgress: { padding: 14, borderRadius: 12, backgroundColor: "#e9f7f5", gap: 8 }, flashProgressHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, flashElapsed: { color: "#087f73", fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }, flashLog: { paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#a8cfca", gap: 3 }, flashLogLine: { color: "#315e59", fontSize: 9, lineHeight: 13, fontFamily: Platform.OS === "android" ? "monospace" : undefined },
   sectionLabel: { color: "#7d9a97", fontSize: 10, fontWeight: "900", letterSpacing: 1.2, marginTop: 6 }, deviceCard: { padding: 18, borderRadius: 18, backgroundColor: "#f7faf9" }, deviceCardHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, deviceCardName: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, deviceSerial: { color: "#718783", fontSize: 10, fontWeight: "700", letterSpacing: .7, marginTop: 3 }, statusBadge: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 20, backgroundColor: "#e7efed" }, statusDot: { width: 7, height: 7, borderRadius: 4 }, statusOnline: { backgroundColor: "#16a085" }, statusOffline: { backgroundColor: "#9badaa" }, statusText: { color: "#4d6965", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, latestRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 24 }, latestLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, latestValue: { color: "#0a3037", fontSize: 39, lineHeight: 45, fontWeight: "900", letterSpacing: -1.5 }, cardArrow: { color: "#0a8c87", fontSize: 36, lineHeight: 42, fontWeight: "300" }, lastSeen: { color: "#718783", fontSize: 10, marginTop: 5 },
   detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, statsRow: { flexDirection: "row", gap: 10 }, stat: { flex: 1, padding: 13, borderRadius: 14, backgroundColor: "white" }, statLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, statValue: { color: "#0a3037", fontSize: 19, fontWeight: "900", marginTop: 4 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, otaZone: { padding: 16, borderWidth: 1, borderColor: "#b8d9d5", borderRadius: 14, backgroundColor: "#f4fbfa" }, otaTitle: { color: "#0a6f6b", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, otaDescription: { color: "#59716f", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, otaButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, otaButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
   topologyCard: { padding: 16, borderRadius: 18, backgroundColor: "white", gap: 12 }, topologyHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }, topologyCount: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, topologyRoot: { flexDirection: "row", alignItems: "center", gap: 10, padding: 11, borderRadius: 12, backgroundColor: "#e9f7f5" }, topologyRootIcon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: "#0a3037" }, topologyNodeName: { color: "#0a3037", fontSize: 12, fontWeight: "900" }, topologyNodeMeta: { color: "#718783", fontSize: 8, marginTop: 2 }, topologyLinkRow: { minHeight: 52, flexDirection: "row", alignItems: "center" }, topologyRail: { width: 50, alignSelf: "stretch", position: "relative" }, topologyVertical: { position: "absolute", left: 18, top: -12, bottom: 26, width: 2, backgroundColor: "#8fcac4" }, topologyHorizontal: { position: "absolute", left: 18, top: 25, width: 25, height: 2, backgroundColor: "#8fcac4" }, topologyPeerDot: { position: "absolute", left: 39, top: 19, width: 14, height: 14, borderRadius: 7, borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "white" }, topologyPeerInfo: { flex: 1, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#f3f8f6" }, topologyEmpty: { paddingVertical: 18, color: "#718783", fontSize: 10, textAlign: "center" },

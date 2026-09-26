@@ -68,6 +68,20 @@ For HT-HC33 devices it also shows the running firmware version and can publish
 an MQTT OTA command for `live-stocking-ota.bin` from the latest release of the
 repository that built the app. The action is available only while online.
 
+On Android, **Menu → Flash ESP32** provides recovery and factory flashing over
+USB-C. Choose the exact ESP32 variant, download and verify
+`live-stocking-flash.bin` from this deployment repository's latest GitHub
+release, allow USB access, and select the connected board. The app creates a
+short-lived Appwrite JWT and organization-scoped flash session, then sends the
+release asset URL and GitHub-published SHA-256 to the runtime. The runtime
+downloads and verifies the image; the phone carries only control and USB/IP
+traffic. The server writes the merged image at address `0x0`; the OTA-only
+`live-stocking-ota.bin` is never used by this flow. Flashing requires an active
+network connection and membership in the selected farm's Appwrite team.
+Choose 115200, 230400, 460800, or 921600 baud per flash. The default 460800
+setting is the recommended balance; use 115200 when a phone, cable, or USB
+adapter is unreliable.
+
 New Devices grant read access to farm team members and update/delete access to
 farm team owners. Telemetry inherits the Device read permission.
 Its Expo deep-link scheme is `edgez-devtools`, so application links begin with
