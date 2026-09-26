@@ -32,6 +32,8 @@ const teamInviteUrl = process.env.APPWRITE_TEAM_INVITE_URL ||
   `https://${appName}-${projectId.slice(0, 8)}.sites.${domainSuffix}/invite.html`;
 const vcsRepositoryUrl = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL ||
   (process.env.GITHUB_REPOSITORY ? `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${process.env.GITHUB_REPOSITORY}` : "");
+const bundleRuntimeVersion = process.env.EDGEZ_BUNDLE_RUNTIME_VERSION || "live-stocking-android-1";
+const otaProxyUrl = process.env.EDGEZ_OTA_PROXY_URL || "https://github.edgez.biz";
 
 module.exports = {
   expo: {
@@ -47,6 +49,7 @@ module.exports = {
       ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
       "react-native-ble-plx",
       "./plugins/withOrganicMaps",
+      ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
       "./plugins/withUnsignedRelease",
     ],
     android: { package: platform },
@@ -64,6 +67,8 @@ module.exports = {
       geofenceRuleTableId,
       geofenceAlarmTableId,
       otaRepositoryUrl: vcsRepositoryUrl.replace(/\.git$/, "").replace(/\/$/, ""),
+      otaProxyUrl,
+      bundleRuntimeVersion,
     },
   },
 };

@@ -4,6 +4,16 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to receive the mobile artifacts (empty uses latest)
+        required: false
+        type: string
+      source_ref:
+        description: Git ref containing the app code to build
+        required: true
+        default: main
+        type: string
 
 permissions:
   contents: write
@@ -21,10 +31,25 @@ jobs:
       APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID || secrets.APPWRITE_PROJECT_ID }}
       APPWRITE_PROJECT_NAME: ${{ vars.APPWRITE_PROJECT_NAME }}
       APPWRITE_TEAM_INVITE_URL: ${{ vars.APPWRITE_TEAM_INVITE_URL }}
+      EDGEZ_BUNDLE_RUNTIME_VERSION: live-stocking-android-1
       CI: "1"
       NODE_ENV: production
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
+      - name: Select existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh release view --json tagName --jq .tagName)"
+          fi
+          gh release view "$tag" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Check Appwrite project ID
         run: |
           if [[ -z "$APPWRITE_PROJECT_ID" ]]; then
@@ -60,6 +85,18 @@ jobs:
       - name: Build unsigned APK
         working-directory: app/android
         run: ./gradlew assembleRelease --no-daemon
+      - name: Package React Native bundle update
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p dist/mobile
+          cp app/android/app/build/generated/assets/react/release/index.android.bundle dist/mobile/live-stocking.android.bundle
+          node app/scripts/create-app-bundle-manifest.mjs \
+            dist/mobile/live-stocking.android.bundle \
+            dist/mobile/live-stocking-update.payload \
+            "$RELEASE_TAG" \
+            "$(git rev-parse HEAD)" \
+            "$EDGEZ_BUNDLE_RUNTIME_VERSION"
       - name: Sign release APK
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -69,9 +106,14 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: live-stocking-mobile
-          path: dist/mobile/*.apk
+          path: dist/mobile/*
       - name: Attach mobile builds to release
-        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/mobile/live-stocking-signed.apk dist/mobile/live-stocking-unsigned.apk --clobber
+        run: |
+          gh release upload "${{ steps.release.outputs.tag }}" \
+            dist/mobile/live-stocking-signed.apk \
+            dist/mobile/live-stocking-unsigned.apk \
+            dist/mobile/live-stocking.android.bundle \
+            dist/mobile/live-stocking-update.json \
+            --clobber

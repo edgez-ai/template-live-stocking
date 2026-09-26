@@ -7,7 +7,7 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Account, Client, ID, Models, Permission, Query, Role, Roles, TablesDB, Teams } from "react-native-appwrite";
 import { ESPDevice, ESPProvisionManager, ESPSecurity, ESPTransport } from "@orbital-systems/react-native-esp-idf-provisioning";
 import type { ESPWifiList } from "@orbital-systems/react-native-esp-idf-provisioning";
-import { EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons } from "@edgez/react-native-sdk";
+import { checkAndInstallAppBundleUpdate, EdgezMeshSdk, EdgezOrganicMap, edgezMapIcons, markAppBundleUpdateHealthy } from "@edgez/react-native-sdk";
 import type { EdgezEsp32Chip, EdgezEsp32FlashAckWindow, EdgezEsp32FlashBaud, EdgezEsptoolConfig, EdgezMapDownloadUpdate, EdgezMapIcon, EdgezMapLine, EdgezMapNode, EdgezOrganicMapRef, EdgezUsbDevice, EdgezUsbFlashStatus } from "@edgez/react-native-sdk";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
@@ -36,7 +36,7 @@ type GeofenceArea = Models.Row & { farmId: string; name: string; shape: Geofence
 type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
 type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "receivedAt">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -706,6 +706,16 @@ export default function App() {
   const telemetryRef = useRef<Telemetry[]>([]);
   const refreshInFlight = useRef<Promise<Farm[]> | null>(null);
   const refreshUserId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!otaRepositoryUrl) return;
+    void markAppBundleUpdateHealthy()
+      .then(() => checkAndInstallAppBundleUpdate({
+        repositoryUrl: otaRepositoryUrl,
+        otaBaseUrl: config.otaProxyUrl,
+      }))
+      .catch((caught) => console.warn("App bundle update check failed", caught));
+  }, []);
 
   function openFlasher() {
     setMenuOpen(false);
