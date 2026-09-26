@@ -14,6 +14,11 @@ on:
         required: true
         default: main
         type: string
+      build_apk:
+        description: Also build and attach signed and unsigned APKs
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -82,9 +87,9 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Build unsigned APK
+      - name: Build React Native release bundle
         working-directory: app/android
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew createBundleReleaseJsAndAssets --no-daemon
       - name: Package React Native bundle update
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -97,7 +102,18 @@ jobs:
             "$RELEASE_TAG" \
             "$(git rev-parse HEAD)" \
             "$EDGEZ_BUNDLE_RUNTIME_VERSION"
+      - name: Sign React Native bundle manifest
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: bash app/scripts/sign-app-bundle-manifest.sh
+      - name: Build unsigned APK
+        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
+        working-directory: app/android
+        run: ./gradlew assembleRelease --no-daemon
       - name: Sign release APK
+        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -111,9 +127,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ steps.release.outputs.tag }}" \
-            dist/mobile/live-stocking-signed.apk \
-            dist/mobile/live-stocking-unsigned.apk \
-            dist/mobile/live-stocking.android.bundle \
-            dist/mobile/live-stocking-update.json \
-            --clobber
+          files=(
+            dist/mobile/live-stocking.android.bundle
+            dist/mobile/live-stocking-update.json
+          )
+          if [[ -f dist/mobile/live-stocking-signed.apk ]]; then
+            files+=(dist/mobile/live-stocking-signed.apk dist/mobile/live-stocking-unsigned.apk)
+          fi
+          gh release upload "${{ steps.release.outputs.tag }}" "${files[@]}" --clobber

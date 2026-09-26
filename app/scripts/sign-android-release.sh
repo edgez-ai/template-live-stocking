@@ -31,10 +31,7 @@ signed="dist/mobile/live-stocking-signed.apk"
 temp_dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 aligned="$temp_dir/live-stocking-aligned.apk"
 keystore="$temp_dir/live-stocking-upload.jks"
-bundle_payload="dist/mobile/live-stocking-update.payload"
-bundle_signature="$temp_dir/live-stocking-update.signature"
-bundle_manifest="dist/mobile/live-stocking-update.json"
-trap 'rm -f "$aligned" "$keystore" "$bundle_signature" "$bundle_payload"' EXIT
+trap 'rm -f "$aligned" "$keystore"' EXIT
 
 cp "${apks[0]}" "$unsigned"
 if "$apksigner" verify "$unsigned" >/dev/null 2>&1; then
@@ -52,17 +49,3 @@ python3 -c 'import base64, os, sys; sys.stdout.buffer.write(base64.b64decode(os.
   --out "$signed" \
   "$aligned"
 "$apksigner" verify --verbose --print-certs "$signed"
-
-if [[ ! -s "$bundle_payload" ]]; then
-  echo "React Native bundle update payload is missing" >&2
-  exit 1
-fi
-java app/scripts/SignAppBundleManifest.java \
-  "$keystore" \
-  "$ANDROID_KEY_ALIAS" \
-  "$bundle_payload" \
-  "$bundle_signature"
-node app/scripts/wrap-app-bundle-manifest.mjs \
-  "$bundle_payload" \
-  "$bundle_signature" \
-  "$bundle_manifest"
