@@ -6,12 +6,13 @@
   "scripts": {
     "start": "expo start --dev-client",
     "android": "node ./scripts/start-remote-android.mjs",
+    "android:debug": "NODE_ENV=development expo run:android --variant debug",
+    "android:debug:build": "NODE_ENV=development ./android/gradlew -p android assembleDebug --console=plain",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@edgez/react-native-sdk": "0.1.25",
+    "@edgez/react-native-sdk": "0.1.29",
     "@expo/vector-icons": "^15.0.2",
-    "@orbital-systems/react-native-esp-idf-provisioning": "^0.5.5",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "base64-js": "^1.5.1",
     "expo": "~57.0.24",
@@ -22,7 +23,6 @@
     "react": "19.2.3",
     "react-native": "0.86.3",
     "react-native-appwrite": "^0.20.0",
-    "react-native-ble-plx": "^3.5.1",
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {

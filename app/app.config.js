@@ -46,8 +46,7 @@ module.exports = {
     plugins: [
       "expo-status-bar",
       ["expo-location", { locationWhenInUsePermission: "Use your current location when placing a device on the farm map." }],
-      ["@orbital-systems/react-native-esp-idf-provisioning", { transport: "ble" }],
-      "react-native-ble-plx",
+      "@edgez/react-native-sdk",
       "./plugins/withOrganicMaps",
       ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
       "./plugins/withUnsignedRelease",

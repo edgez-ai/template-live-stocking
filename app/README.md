@@ -1,7 +1,10 @@
 # Mobile companion
 
-The Expo app is the only device-onboarding client. It scans `PROV_` ESP32 and
-nRF54 BLE advertisements plus `PROV_` H7608 SoftAPs and derives the serial. The nRF54 advertises service
+The Expo app supplies the customizable onboarding UI while
+`@edgez/react-native-sdk` owns device discovery, BLE and SoftAP transport,
+protocol details, payload normalization, and native provisioning dependencies.
+It scans `PROV_` ESP32 and nRF54 BLE advertisements plus `PROV_` H7608 SoftAPs
+and derives the serial. The nRF54 advertises service
 `FFF0` so the app can route it to the direct `mqtt-config` endpoint. For ESP32, after the operator selects a device,
 the example proof of possession (PoP) `abcd1234` is prefilled to match the
 firmware and the value shown on its OLED. The app establishes an ESP-IDF
@@ -65,13 +68,16 @@ The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.
 
-H7608 onboarding uses the same upstream-Wi-Fi choice flow as ESP32 onboarding. Android
-discovers the gateway's `PROV_<serial>` Wi-Fi network and requests a local-only,
-app-scoped connection. The operator approves the Android Wi-Fi dialog once;
-cellular remains the default Internet path while the app creates the Appwrite
-credential and sends it with the farm's HaLow mesh settings to the gateway. The
+H7608 onboarding uses the same upstream-Wi-Fi choice flow as ESP32 onboarding.
+The SDK uses `@orbital-systems/react-native-esp-idf-provisioning` for both the
+ESP32 BLE and H7608 SoftAP transports. Android discovers the gateway's
+`PROV_<serial>` Wi-Fi network and the operator approves the Wi-Fi connection.
+The app sends the Appwrite credential and farm's HaLow mesh settings through
+the SDK's UI-independent provisioning API. The
 name entered in the device-details screen becomes the H7608's post-provisioning
-Wi-Fi AP SSID.
+Wi-Fi AP SSID. The Expo config lists only `@edgez/react-native-sdk` for
+provisioning; its config plugin installs and configures the BLE and ESP-IDF
+BLE/SoftAP native capabilities.
 For HT-HC33 devices it also shows the running firmware version and can publish
 an MQTT OTA command for `live-stocking-ota.bin` from the latest release of the
 repository that built the app. The action is available only while online.
@@ -97,6 +103,10 @@ Its Expo deep-link scheme is `edgez-devtools`, so application links begin with
 
 BLE provisioning and Organic Maps use native modules and do not run in stock
 Expo Go. A development client must be rebuilt after adding these modules.
+Copy `.env.example` to `.env` and set the local Appwrite project and domain
+values. `npm run android:debug` builds, installs, and launches the debug app on
+a connected device; `npm run android:debug:build` builds the debug APK without
+installing it.
 `npm run android` starts Metro, forwards its port, and opens the project through
 `edgez-devtools://` in EdgeZ Android DevTools on `127.0.0.1:5555`. It does not
 run Gradle or build an APK. Override `ANDROID_SERIAL` or `EXPO_PORT` when needed.
