@@ -1,7 +1,7 @@
 # Mobile companion
 
 The Expo app is the only device-onboarding client. It scans `PROV_` ESP32 and
-nRF54 BLE advertisements and derives the serial. The nRF54 advertises service
+nRF54 BLE advertisements plus `PROV_` H7608 SoftAPs and derives the serial. The nRF54 advertises service
 `FFF0` so the app can route it to the direct `mqtt-config` endpoint. For ESP32, after the operator selects a device,
 the example proof of possession (PoP) `abcd1234` is prefilled to match the
 firmware and the value shown on its OLED. The app establishes an ESP-IDF
@@ -64,6 +64,14 @@ two minutes old.
 The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.
+
+H7608 onboarding uses the same upstream-Wi-Fi choice flow as ESP32 onboarding. Android
+discovers the gateway's `PROV_<serial>` Wi-Fi network and requests a local-only,
+app-scoped connection. The operator approves the Android Wi-Fi dialog once;
+cellular remains the default Internet path while the app creates the Appwrite
+credential and sends it with the farm's HaLow mesh settings to the gateway. The
+name entered in the device-details screen becomes the H7608's post-provisioning
+Wi-Fi AP SSID.
 For HT-HC33 devices it also shows the running firmware version and can publish
 an MQTT OTA command for `live-stocking-ota.bin` from the latest release of the
 repository that built the app. The action is available only while online.
