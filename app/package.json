@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@edgez/react-native-sdk": "0.1.29",
+    "@edgez/react-native-sdk": "0.1.32",
     "@expo/vector-icons": "^15.0.2",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "base64-js": "^1.5.1",

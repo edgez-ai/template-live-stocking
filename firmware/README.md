@@ -187,6 +187,61 @@ inactive OTA slot, and restarts only after ESP-IDF validates the image. OTA
 progress is published on `telemetry/ota`. Normal gateway status telemetry and
 OTA progress both include the running ESP-IDF application `firmwareVersion`.
 
+The HT-HC33 also accepts one unified local-sensor Lua program on
+`projects/<projectId>/devices/<serial>/commands/script`. The script is carried
+directly in the MQTT JSON payload and may use I2C, UART, RS485, or more than one
+interface. Installing a script requires both the program and its sampling
+interval:
+
+```json
+{
+  "action": "download",
+  "requestId": "script-configuration-id",
+  "intervalSeconds": 30,
+  "script": "return {{type=1,float_value=21.5},{type=2,float_value=48.0}}"
+}
+```
+
+`set` is accepted as an alias for `download`, and `interval` is accepted as an
+alias for `intervalSeconds`; in both cases the script itself remains in this
+MQTT message and is never fetched from a URL. The return value is either one
+sensor table or an array of up to nine sensor
+tables. Each table uses the HaLow/MQTT sensor schema: `type` from 1 through 12
+and exactly one of `bool_value`, `int_value`, or `float_value`. There is no
+LwM2M object/resource result format. The saved script runs immediately after a
+successful install and then every `intervalSeconds` (5 through 86400). Its
+readings enter the same MQTT telemetry queue as local status and relayed HaLow
+beacons. `run` executes the saved program once, and `delete` removes it; both
+also require a `requestId`.
+
+Script command results publish to
+`projects/<projectId>/devices/<serial>/telemetry/script` as JSON containing the
+same `requestId`, a `status`, the firmware version, and an `error` string on
+failure. Syntax errors, runtime errors, persistence failures, invalid results,
+and invalid commands are reported there.
+
+The Lua hardware functions retain the existing device API names:
+`i2c_connect`, `i2c_set_rx_size`, `i2c_write`, `i2c_read_chunk`;
+`uart_connect`, `uart_set_rx_size`, `uart_write`, `uart_read_chunk`;
+and `rs485_connect`, `rs485_write`, `rs485_read_chunk`, with matching
+`*_safe_close`, `*_reset_rx_cursor`, and `*_sleep` helpers. Modbus/byte helpers
+include `util_crc8`, `util_bytes_to_hex`,
+`util_build_read_holding_request`, `util_extract_modbus_frame`, and
+`util_decode_bcd_32`. I2C and UART share GPIO19/GPIO20 and therefore cannot be
+open simultaneously; the runtime closes the other interface when switching.
+
+Large binary samples use the compatible global-buffer helpers from the
+reference firmware: `util_init_global_buffer([capacity])`,
+`util_append_global_buffer(bytes)`, and
+`util_write_global_buffer_at(offset, bytes)`. Capacity is capped at 16 KiB.
+After a successful script run, sensor tables publish through normal telemetry,
+while non-empty global-buffer data publishes separately on
+`projects/<projectId>/devices/<serial>/telemetry/script/blob`. Each JSON message
+contains `executionId`, zero-based `chunkIndex`, `chunkCount`, `totalBytes`,
+`encoding: "base64"`, and `data`. Raw chunks are 1536 bytes so the server can
+reassemble the original binary buffer by execution ID without enlarging the
+sensor record format.
+
 This target is the Heltec HT-HC33. It has no dependency on the WiFi LoRa 32 V3
 SSD1306 display or its I2C/Vext pins; provisioning, HaLow, MQTT, and reset status
 are reported on the serial monitor at 115200 baud.

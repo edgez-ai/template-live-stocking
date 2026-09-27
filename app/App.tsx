@@ -33,6 +33,7 @@ type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwrite
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
+type UpstreamConnection = "wifi" | "ethernet" | "none";
 type VoltagePoint = { timestamp: number; value: number };
 type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
 type GeofenceGeometry = { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
@@ -268,6 +269,7 @@ const pendingSignOutKey = `${cachePrefix}pending-sign-out`;
 const snapshotCacheKey = (userId: string) => `${cachePrefix}snapshot:${userId}`;
 const selectedFarmCacheKey = (userId: string) => `${cachePrefix}selected-farm:${userId}`;
 const provisioningPop = "abcd1234";
+const validDeviceWifiPassword = (value: string) => /^[\x20-\x7e]{8,63}$/.test(value);
 const provisioningManager = new EdgezProvisioningManager();
 const client = new Client().setEndpoint(endpoint).setProject(config.appwriteProjectId).setPlatform(config.appwritePlatform);
 const account = new Account(client);
@@ -609,6 +611,7 @@ export default function App() {
   const [bleDevices, setBleDevices] = useState<ProvisioningDevice[]>([]);
   const [selectedBleDevice, setSelectedBleDevice] = useState<ProvisioningDevice | null>(null);
   const [proofOfPossession, setProofOfPossession] = useState(provisioningPop);
+  const [deviceWifiPassword, setDeviceWifiPassword] = useState("");
   const [bleConnected, setBleConnected] = useState(false);
   const [name, setName] = useState("");
   const [deviceIcon, setDeviceIcon] = useState<EdgezMapIcon>("tracker");
@@ -616,7 +619,9 @@ export default function App() {
   const [deviceLocationChoice, setDeviceLocationChoice] = useState<DeviceLocationChoice>("none");
   const [deviceLocation, setDeviceLocation] = useState("");
   const [deviceLocationPickerOpen, setDeviceLocationPickerOpen] = useState(false);
-  const [useUpstreamWifi, setUseUpstreamWifi] = useState<boolean | null>(null);
+  const [upstreamConnection, setUpstreamConnection] = useState<UpstreamConnection | null>(null);
+  const [upstreamWifiScanning, setUpstreamWifiScanning] = useState(false);
+  const upstreamScanGeneration = useRef(0);
   const [upstreamSsid, setUpstreamSsid] = useState("");
   const [upstreamPassword, setUpstreamPassword] = useState("");
   const [upstreamNetworks, setUpstreamNetworks] = useState<EdgezProvisioningWifiNetwork[]>([]);
@@ -1014,11 +1019,10 @@ export default function App() {
     setBusy(true); setError(""); setProvisioningStatus("Scanning for ESP32, nRF54, and H7608 devices…");
     try {
       if (selectedBleDevice) await provisioningManager.disconnect(selectedBleDevice);
-      setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false);
+      setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false);
       const result = await provisioningManager.scan();
       const valid = result.devices;
       setBleDevices(valid);
-      if (!valid.length && result.warnings.length) throw new Error(result.warnings.join("\n"));
       setProvisioningStatus(valid.length ? "Select a device to provision." : "No provisioning devices found over Bluetooth or Wi-Fi.");
     } catch (caught) { setError(messageOf(caught)); }
     finally { setBusy(false); }
@@ -1029,7 +1033,8 @@ export default function App() {
     if (!currentFarmId) { openSettings(); return; }
     setMenuOpen(false);
     if (selectedBleDevice) void provisioningManager.disconnect(selectedBleDevice);
-    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUseUpstreamWifi(null); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
+    upstreamScanGeneration.current += 1;
+    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUpstreamConnection(null); setUpstreamWifiScanning(false); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
     setError(""); setProvisioningStatus("Start by scanning for a device in provisioning mode.");
     setProvisioningStep(1);
     setProvisioningDialogOpen(true);
@@ -1037,6 +1042,8 @@ export default function App() {
 
   function closeProvisioningDialog() {
     if (busy) return;
+    upstreamScanGeneration.current += 1;
+    setUpstreamWifiScanning(false);
     if (selectedBleDevice) void provisioningManager.disconnect(selectedBleDevice);
     setSelectedBleDevice(null); setBleConnected(false);
     setDeviceLocationPickerOpen(false);
@@ -1074,6 +1081,7 @@ export default function App() {
     setDeviceLocationChoice(previousLocation ? "map" : "none");
     setDeviceLocation(previousLocation ? `${previousLocation.latitude.toFixed(6)}, ${previousLocation.longitude.toFixed(6)}` : "");
     setProofOfPossession(provisioningPop);
+    setDeviceWifiPassword("");
     setBleConnected(false);
     setProvisioningStatus(`Confirm the details for ${device.name}.`);
     setProvisioningStep(2);
@@ -1092,14 +1100,14 @@ export default function App() {
   }
 
   async function connectForProvisioning() {
-    if (!selectedBleDevice || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim())) return;
+    if (!selectedBleDevice || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim()) || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))) return;
     setBusy(true); setError("");
     try {
       setProvisioningStatus(selectedBleDevice.transport === "softap" ? `Connecting to the ${selectedBleDevice.name} provisioning SoftAP…` : selectedBleDevice.requiresProofOfPossession ? `Authenticating ${selectedBleDevice.name} with the provided PoP…` : `Connecting to ${selectedBleDevice.name}…`);
       await provisioningManager.connect(selectedBleDevice, selectedBleDevice.requiresProofOfPossession ? proofOfPossession.trim() : undefined);
       setBleConnected(true);
       if (!selectedBleDevice.supportsUpstreamWifi) {
-        setUseUpstreamWifi(false);
+        setUpstreamConnection("none");
         setProvisioningStatus("The device uses HaLow for its upstream connection. Confirm its farm configuration.");
         setProvisioningStep(4);
       } else {
@@ -1114,22 +1122,36 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
-  async function chooseUpstreamWifi(enabled: boolean) {
-    setUseUpstreamWifi(enabled);
+  async function chooseUpstreamWifi() {
+    const generation = ++upstreamScanGeneration.current;
+    setUpstreamConnection("wifi");
     setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
-    if (!enabled || !selectedBleDevice || !selectedBleDevice.supportsUpstreamWifi) return;
-    setBusy(true); setError(""); setProvisioningStatus("Scanning nearby Wi-Fi networks…");
+    if (!selectedBleDevice || !selectedBleDevice.supportsUpstreamWifi) return;
+    setUpstreamWifiScanning(true); setError(""); setProvisioningStatus("Scanning nearby Wi-Fi networks…");
     try {
       const networks = await provisioningManager.scanUpstreamWifi(selectedBleDevice);
+      if (generation !== upstreamScanGeneration.current) return;
       setUpstreamNetworks(networks.filter((network) => Boolean(network.ssid)).sort((a, b) => b.rssi - a.rssi));
       setProvisioningStatus("Choose the device's upstream Wi-Fi network.");
-    } catch (caught) { setError(messageOf(caught)); setProvisioningStatus("Wi-Fi scan failed. Retry or choose no Wi-Fi."); }
-    finally { setBusy(false); }
+    } catch (caught) {
+      if (generation !== upstreamScanGeneration.current) return;
+      setError(messageOf(caught)); setProvisioningStatus("Wi-Fi scan failed. Retry, use Ethernet, or choose no upstream connection.");
+    } finally { if (generation === upstreamScanGeneration.current) setUpstreamWifiScanning(false); }
+  }
+
+  function chooseNonWifiUpstream(connection: "ethernet" | "none") {
+    upstreamScanGeneration.current += 1;
+    setUpstreamWifiScanning(false);
+    setUpstreamConnection(connection);
+    setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]); setError("");
+    setProvisioningStatus(connection === "ethernet" ? "Ethernet selected for the upstream connection." : "No upstream connection selected.");
+    setProvisioningStep(4);
   }
 
   async function provisionDevice() {
     const farm = farms.find((candidate) => candidate.$id === currentFarmId);
     if (!user || offline || !farm || !selectedBleDevice || !bleConnected) return;
+    if (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword)) { setError("The new device Wi-Fi password must be 8 to 63 printable characters."); return; }
     setBusy(true); setError(""); setProvisioningStatus("Preparing the device credential…");
     try {
       const serial = selectedBleDevice.serial;
@@ -1159,6 +1181,9 @@ export default function App() {
         });
       }
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
+      if (mqtt.username !== serial) {
+        throw new Error(`The server returned MQTT username ${mqtt.username}, but this device advertises serial ${serial}.`);
+      }
 
       setProvisioningStatus(selectedBleDevice.supportsDeviceGps
         ? `Saving ${farm.name} configuration and waiting for NVS confirmation…`
@@ -1173,18 +1198,19 @@ export default function App() {
         passphrase: farm.meshPassphrase,
         country: farm.country,
         halowChannel: farm.halowChannel,
-        wifiUpstream: useUpstreamWifi === true,
+        wifiUpstream: upstreamConnection === "wifi",
         deviceName: name.trim(),
+        softapPassword: selectedBleDevice.kind === "h7608" ? deviceWifiPassword : undefined,
         useDeviceGps: deviceLocationChoice === "gps",
         ...(coordinates ?? (selectedBleDevice.supportsDeviceGps ? {} : { latitude: null, longitude: null })),
       };
       await provisioningManager.configure(
         selectedBleDevice,
         provisioningInput,
-        useUpstreamWifi && selectedBleDevice.supportsUpstreamWifi ? { ssid: upstreamSsid, passphrase: upstreamPassword } : undefined,
+        upstreamConnection === "wifi" && selectedBleDevice.supportsUpstreamWifi ? { ssid: upstreamSsid, passphrase: upstreamPassword } : undefined,
       );
       setProvisioningStatus(`Provisioned ${serial}.`);
-      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
+      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
       setProvisioningDialogOpen(false);
       await refresh(user);
     } catch (caught) { setError(messageOf(caught)); setProvisioningStatus("Provisioning did not complete."); }
@@ -1248,7 +1274,7 @@ export default function App() {
     }
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
   }
 
   function openSettings() {
@@ -1651,7 +1677,7 @@ export default function App() {
     <Modal visible={provisioningDialogOpen} animationType="slide" onRequestClose={() => deviceLocationPickerOpen ? setDeviceLocationPickerOpen(false) : closeProvisioningDialog()}>
       {deviceLocationPickerOpen ? <FarmLocationPicker device location={deviceLocation || currentFarm?.location || ""} country={currentFarm?.country || ""} onCancel={() => setDeviceLocationPickerOpen(false)} onSelect={(location) => { setDeviceLocation(location); setDeviceLocationChoice("map"); setDeviceLocationPickerOpen(false); }} /> : <SafeAreaView style={styles.dialogPage}>
         <KeyboardAvoidingView style={styles.dialogScreen} behavior={Platform.OS === "ios" ? "padding" : undefined} accessibilityViewIsModal>
-          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {selectedBleDevice && !selectedBleDevice.supportsUpstreamWifi ? (provisioningStep === 4 ? 3 : provisioningStep) : provisioningStep} OF {selectedBleDevice && !selectedBleDevice.supportsUpstreamWifi ? 3 : 4}</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : provisioningStep === 3 ? "Upstream Wi-Fi" : "Confirm setup"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
+          <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>STEP {selectedBleDevice && !selectedBleDevice.supportsUpstreamWifi ? (provisioningStep === 4 ? 3 : provisioningStep) : provisioningStep} OF {selectedBleDevice && !selectedBleDevice.supportsUpstreamWifi ? 3 : 4}</Text><Text style={styles.dialogTitle}>{provisioningStep === 1 ? "Choose device" : provisioningStep === 2 ? "Device details" : provisioningStep === 3 ? "Upstream connection" : "Confirm setup"}</Text></View><Pressable onPress={closeProvisioningDialog} disabled={busy}><Text style={styles.close}>CLOSE</Text></Pressable></View>
           <ScrollView contentContainerStyle={styles.dialogContent} keyboardShouldPersistTaps="handled">
             {provisioningStep === 1 && <>
               <Text style={styles.dialogHelp}>Put the ESP32 in provisioning mode, power on the nRF54, or start an unconfigured H7608. The scan checks Bluetooth and nearby provisioning Wi-Fi.</Text>
@@ -1669,14 +1695,16 @@ export default function App() {
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               {selectedBleDevice.supportsDeviceGps && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this device</Text></Pressable>}
-              {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "SOFTAP PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Provisioning Wi-Fi password" : "PoP shown on the device"} autoCapitalize="none" autoCorrect={false} secureTextEntry={selectedBleDevice.transport === "softap"} /></>}
-              <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim())}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
+              {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "CURRENT PROVISIONING WI-FI PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Factory provisioning password" : "PoP shown on the device"} autoCapitalize="none" autoCorrect={false} secureTextEntry={selectedBleDevice.transport === "softap"} /></>}
+              {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><TextInput style={styles.inputLight} value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" autoCapitalize="none" autoCorrect={false} secureTextEntry maxLength={63} /><Text style={styles.fieldHint}>This replaces the factory password when the device finishes provisioning.</Text></>}
+              <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim()) || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
-              <Text style={styles.dialogHelp}>Will this device use regular Wi-Fi for its upstream connection? It will receive the farm mesh settings either way.</Text>
-              <Pressable style={styles.farmRow} onPress={() => void chooseUpstreamWifi(true)} disabled={busy}><Text style={styles.deviceNameDark}>Yes, connect to Wi-Fi</Text></Pressable>
-              <Pressable style={styles.farmRow} onPress={() => { void chooseUpstreamWifi(false); setProvisioningStep(4); }} disabled={busy}><Text style={styles.deviceNameDark}>No upstream Wi-Fi</Text></Pressable>
-              {useUpstreamWifi && <>
+              <Text style={styles.dialogHelp}>Choose how this device reaches its upstream network. It will receive the farm mesh settings either way.</Text>
+              <Pressable style={[styles.farmRow, upstreamConnection === "wifi" && styles.farmRowSelected]} onPress={() => void chooseUpstreamWifi()} disabled={busy || upstreamWifiScanning}><Text style={styles.deviceNameDark}>{upstreamWifiScanning ? "Scanning Wi-Fi networks…" : "Connect to Wi-Fi"}</Text></Pressable>
+              {selectedBleDevice.kind === "h7608" && <Pressable style={[styles.farmRow, upstreamConnection === "ethernet" && styles.farmRowSelected]} onPress={() => chooseNonWifiUpstream("ethernet")} disabled={busy}><Text style={styles.deviceNameDark}>Use Ethernet</Text><Text style={styles.muted}>Use the H7608 Ethernet WAN port</Text></Pressable>}
+              <Pressable style={[styles.farmRow, upstreamConnection === "none" && styles.farmRowSelected]} onPress={() => chooseNonWifiUpstream("none")} disabled={busy}><Text style={styles.deviceNameDark}>No upstream connection</Text></Pressable>
+              {upstreamConnection === "wifi" && <>
                 {upstreamNetworks.map((network) => <Pressable key={`${network.ssid}-${network.bssid || ""}`} style={[styles.farmRow, upstreamSsid === network.ssid && styles.farmRowSelected]} onPress={() => { setUpstreamSsid(network.ssid); setUpstreamPassword(""); }} disabled={busy}><Text style={styles.deviceNameDark}>{network.ssid}</Text><Text style={styles.muted}>{network.rssi} dBm</Text></Pressable>)}
                 <Text style={styles.fieldLabel}>WI-FI SSID</Text>
                 <TextInput style={styles.inputLight} value={upstreamSsid} onChangeText={setUpstreamSsid} placeholder="Network name" maxLength={32} />
@@ -1687,8 +1715,8 @@ export default function App() {
             </>}
             {provisioningStep === 4 && selectedBleDevice && <>
               <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{currentFarm?.name}</Text><Text style={styles.muted}>{currentFarm?.location}, {currentFarm?.country} · Channel {currentFarm?.halowChannel}</Text><Text style={styles.muted}>Mesh ID: {currentFarm?.meshId}</Text><Text style={styles.muted}>Device location: {deviceLocationChoice === "none" ? "None" : deviceLocationChoice === "gps" ? "Device GPS" : deviceLocation}</Text></View>
-              <Text style={styles.dialogHelp}>{!selectedBleDevice.supportsUpstreamWifi ? "HaLow upstream. " : useUpstreamWifi ? `Upstream Wi-Fi: ${upstreamSsid}. ` : "No upstream Wi-Fi. "}The app will send the mesh settings and MQTT credential to the device.</Text>
-              <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !bleConnected || !currentFarm}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
+              <Text style={styles.dialogHelp}>{!selectedBleDevice.supportsUpstreamWifi ? "HaLow upstream. " : upstreamConnection === "wifi" ? `Upstream Wi-Fi: ${upstreamSsid}. ` : upstreamConnection === "ethernet" ? "Ethernet upstream. " : "No upstream connection. "}The app will send the mesh settings and MQTT credential to the device.{selectedBleDevice.kind === "h7608" ? " Its local Wi-Fi AP will restart with the new name and password." : ""}</Text>
+              <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !bleConnected || !currentFarm || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep > 1 && <Pressable style={styles.backButton} onPress={previousProvisioningStep} disabled={busy}><Text style={styles.secondaryText}>BACK</Text></Pressable>}
             {provisioningStatus ? <Text style={styles.dialogStatus}>{provisioningStatus}</Text> : null}

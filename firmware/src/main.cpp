@@ -32,9 +32,11 @@
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_ble.h"
 #include "mbedtls/error.h"
+#include "mbedtls/base64.h"
 #include "mbedtls/x509_crt.h"
 #include "ota_proxy_cert.h"
 #include "pb_decode.h"
+#include "sensor_script.h"
 #include "usb_control.pb.h"
 
 namespace {
@@ -141,6 +143,96 @@ portMUX_TYPE topology_lock = portMUX_INITIALIZER_UNLOCKED;
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
 esp_err_t configure_mesh(cJSON *root);
+
+void enqueue_script_telemetry(const SensorScriptValue *values, size_t count) {
+  if (!values || !count || !telemetry_queue || !mqtt_config.client_id[0]) return;
+  RemoteBeacon reading{};
+  strlcpy(reading.client_id, mqtt_config.client_id, sizeof(reading.client_id));
+  for (size_t index = 0; index < count && reading.sensor_data_count < 9; ++index) {
+    auto &sensor = reading.sensor_data[reading.sensor_data_count++];
+    sensor.type = static_cast<ai_edgez_halow_SensorType>(values[index].type);
+    switch (values[index].kind) {
+      case SensorScriptValueKind::kBool:
+        sensor.which_value = ai_edgez_halow_SensorData_bool_value_tag;
+        sensor.value.bool_value = values[index].value.bool_value;
+        break;
+      case SensorScriptValueKind::kInt:
+        sensor.which_value = ai_edgez_halow_SensorData_int_value_tag;
+        sensor.value.int_value = values[index].value.int_value;
+        break;
+      case SensorScriptValueKind::kFloat:
+        sensor.which_value = ai_edgez_halow_SensorData_float_value_tag;
+        sensor.value.float_value = values[index].value.float_value;
+        break;
+    }
+  }
+  if (xQueueSend(telemetry_queue, &reading, pdMS_TO_TICKS(100)) != pdTRUE)
+    ESP_LOGW(kTag, "Sensor script telemetry queue full; record dropped");
+}
+
+void publish_script_status(const char *request_id, const char *status, const char *error) {
+  if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return;
+  cJSON *root = cJSON_CreateObject();
+  if (!root) return;
+  if (request_id && request_id[0]) cJSON_AddStringToObject(root, "requestId", request_id);
+  cJSON_AddStringToObject(root, "status", status ? status : "failed");
+  if (error && error[0]) cJSON_AddStringToObject(root, "error", error);
+  cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
+  char *payload = cJSON_PrintUnformatted(root);
+  if (payload) {
+    char topic[384]{};
+    std::snprintf(topic, sizeof(topic), "projects/%s/devices/%s/telemetry/script",
+                  mqtt_config.project_id, mqtt_config.username);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+    cJSON_free(payload);
+  }
+  cJSON_Delete(root);
+}
+
+void publish_script_blob(uint32_t execution_id, const uint8_t *data, size_t length) {
+  if (!data || !length || !mqtt_client ||
+      !(xEventGroupGetBits(state_events) & kMqttConnected)) return;
+  constexpr size_t kRawChunkSize = 1536;
+  constexpr size_t kEncodedChunkSize = ((kRawChunkSize + 2) / 3) * 4;
+  const size_t chunk_count = (length + kRawChunkSize - 1) / kRawChunkSize;
+  char encoded[kEncodedChunkSize + 1]{};
+  char topic[384]{};
+  std::snprintf(topic, sizeof(topic), "projects/%s/devices/%s/telemetry/script/blob",
+                mqtt_config.project_id, mqtt_config.username);
+  for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+    const size_t offset = chunk * kRawChunkSize;
+    const size_t raw_length = length - offset < kRawChunkSize ? length - offset : kRawChunkSize;
+    size_t encoded_length = 0;
+    if (mbedtls_base64_encode(reinterpret_cast<unsigned char *>(encoded), sizeof(encoded) - 1,
+                              &encoded_length, data + offset, raw_length) != 0) {
+      ESP_LOGE(kTag, "Could not encode script global buffer chunk %u",
+               static_cast<unsigned>(chunk));
+      return;
+    }
+    encoded[encoded_length] = '\0';
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "clientId", mqtt_config.client_id);
+    cJSON_AddNumberToObject(root, "executionId", execution_id);
+    cJSON_AddNumberToObject(root, "chunkIndex", chunk);
+    cJSON_AddNumberToObject(root, "chunkCount", chunk_count);
+    cJSON_AddNumberToObject(root, "totalBytes", length);
+    cJSON_AddStringToObject(root, "encoding", "base64");
+    cJSON_AddStringToObject(root, "data", encoded);
+    char *payload = cJSON_PrintUnformatted(root);
+    if (payload) {
+      const int message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 1, 0);
+      cJSON_free(payload);
+      if (message_id < 0) {
+        cJSON_Delete(root);
+        ESP_LOGE(kTag, "Could not publish script global buffer chunk %u",
+                 static_cast<unsigned>(chunk));
+        return;
+      }
+    }
+    cJSON_Delete(root);
+  }
+}
 
 bool valid_https_url(const char *url) {
   if (!url || std::strncmp(url, "https://", 8) != 0) return false;
@@ -842,6 +934,7 @@ void make_device_identity() {
 void mqtt_event_handler(void *, esp_event_base_t, int32_t, void *);
 
 esp_err_t read_battery_millivolts(int *battery_mv) {
+  if (!sensor_script_try_acquire_hardware()) return ESP_ERR_INVALID_STATE;
   // HT-HC33: GPIO20 enables the battery divider, and GPIO1 reads its midpoint.
   // R17 and R28 are both 100 kOhm, so VBAT is twice the calibrated ADC voltage.
   gpio_set_level(kBatteryAdcControl, 1);
@@ -858,6 +951,7 @@ esp_err_t read_battery_millivolts(int *battery_mv) {
   }
   gpio_set_level(kBatteryAdcControl, 0);
   if (result == ESP_OK) *battery_mv = (sum_mv / 16) * 2;
+  sensor_script_release_hardware();
   return result;
 }
 
@@ -941,6 +1035,7 @@ void start_mqtt() {
   config.credentials.client_id = mqtt_config.client_id;
   config.credentials.username = mqtt_config.username;
   config.credentials.authentication.password = mqtt_config.password;
+  config.buffer.size = 12288;
   mqtt_client = esp_mqtt_client_init(&config);
   if (!mqtt_client) {
     ESP_LOGE(kTag, "Could not create MQTT client");
@@ -971,6 +1066,12 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
     const int data_length = event->data_len < 512 ? event->data_len : 512;
     ESP_LOGI(kTag, "Command received topic=%.*s payload=%.*s",
              topic_length, event->topic, data_length, event->data);
+    const bool complete = event->current_data_offset == 0 && event->data_len == event->total_data_len;
+    if (complete && sensor_script_handle_mqtt_command(
+                        event->topic, event->topic_len, event->data, event->data_len,
+                        mqtt_config.project_id, mqtt_config.username)) {
+      return;
+    }
     handle_ota_command(event);
   }
 }
@@ -1095,6 +1196,8 @@ extern "C" void app_main() {
   telemetry_queue = xQueueCreate(32, sizeof(RemoteBeacon));
   ota_queue = xQueueCreate(1, sizeof(OtaCommand));
   ESP_ERROR_CHECK(beacon_queue && telemetry_queue && ota_queue ? ESP_OK : ESP_ERR_NO_MEM);
+  ESP_ERROR_CHECK(sensor_script_init(
+      enqueue_script_telemetry, publish_script_status, publish_script_blob));
   halow_set_beacon_callback(enqueue_beacon);
   ESP_ERROR_CHECK(xTaskCreate(remote_beacon_task, "remote_beacons", 4096, nullptr, 5, nullptr) == pdPASS
                       ? ESP_OK : ESP_ERR_NO_MEM);

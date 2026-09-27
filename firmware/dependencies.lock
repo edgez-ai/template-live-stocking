@@ -35,6 +35,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.2.4
+  georgik/lua:
+    component_hash: 10698fd2d729b63cca8b882e219c3fa3bd8a9adea26f814f2febb624d0385c23
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 5.5.0~7
   idf:
     source:
       type: idf
@@ -43,7 +53,8 @@ direct_dependencies:
 - espressif/cjson
 - espressif/mqtt
 - espressif/network_provisioning
+- georgik/lua
 - idf
-manifest_hash: ed947dd0c7b3b16c30fde2e7db4f1af85db1127c7e6ebfe524ebe5449fe57621
+manifest_hash: 037f85cce4625f7dee8808b1a5c94b2cc2944fa4e6bacf00127fb498dc844b1d
 target: esp32s3
 version: 2.0.0

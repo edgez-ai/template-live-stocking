@@ -68,7 +68,8 @@ The detail view can also delete the Device after native destructive
 confirmation. Appwrite removes its MQTT credential and route with the Device;
 existing telemetry rows are retained.
 
-H7608 onboarding uses the same upstream-Wi-Fi choice flow as ESP32 onboarding.
+H7608 onboarding lets the operator choose Wi-Fi, Ethernet, or no upstream
+connection. Ethernet and no-upstream choices bypass the Wi-Fi scan immediately.
 The SDK uses `@orbital-systems/react-native-esp-idf-provisioning` for both the
 ESP32 BLE and H7608 SoftAP transports. Android discovers the gateway's
 `PROV_<serial>` Wi-Fi network and the operator approves the Wi-Fi connection.

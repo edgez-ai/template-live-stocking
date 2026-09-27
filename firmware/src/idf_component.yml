@@ -1,4 +1,5 @@
 dependencies:
   espressif/cjson: "^1.7.19"
+  georgik/lua: "5.5.0~7"
   espressif/mqtt: "^1.0.0"
   espressif/network_provisioning: "^1.2.4"
