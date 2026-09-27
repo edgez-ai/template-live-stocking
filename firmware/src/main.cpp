@@ -12,6 +12,7 @@
 #include "halow_network.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
+#include "esp_bt.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
@@ -52,6 +53,8 @@ constexpr char kMqttBrokerUri[] = "mqtts://mqtt.edgez.ai:8883";
 constexpr TickType_t kGatewayTelemetryInterval = pdMS_TO_TICKS(30000);
 constexpr int64_t kTopologyPeerMaxAgeMs = 120000;
 constexpr size_t kMaxTopologyPeers = 16;
+constexpr size_t kBeaconQueueDepth = 8;
+constexpr size_t kTelemetryQueueDepth = 8;
 constexpr size_t kMaxOtaUrlLength = 512;
 constexpr size_t kMaxOtaRequestIdLength = 64;
 constexpr gpio_num_t kBatteryAdcControl = GPIO_NUM_20;
@@ -1036,6 +1039,9 @@ void start_mqtt() {
   config.credentials.username = mqtt_config.username;
   config.credentials.authentication.password = mqtt_config.password;
   config.buffer.size = 12288;
+  // Script commands need a large receive buffer, but outbound telemetry and
+  // command results are small. Avoid reserving a second 12 KiB MQTT buffer.
+  config.buffer.out_size = 4096;
   mqtt_client = esp_mqtt_client_init(&config);
   if (!mqtt_client) {
     ESP_LOGE(kTag, "Could not create MQTT client");
@@ -1102,6 +1108,7 @@ void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *
     } else if (event_id == NETWORK_PROV_END) {
       provisioning_active = false;
       network_prov_mgr_deinit();
+      esp_event_handler_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler);
       if (halow_config.wifi_upstream && halow_config.mesh_id[0]) {
         const esp_err_t result = start_halow_connection();
         if (result != ESP_OK) ESP_LOGE(kTag, "Could not start HaLow mesh: %s", esp_err_to_name(result));
@@ -1190,10 +1197,29 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   make_device_identity();
   ESP_LOGI(kTag, "Device serial: %s", device_serial);
+  const bool provisioned = load_halow_config();
+  if (provisioned) {
+    // BLE is needed only while provisioning. On normal boots its controller
+    // and host data can be returned to the heap before application tasks and
+    // MQTT/TLS start allocating memory. A provisioning reset reboots without
+    // saved settings, so BLE remains available on that boot.
+    const size_t heap_before = esp_get_free_heap_size();
+    const esp_err_t release_result = esp_bt_mem_release(ESP_BT_MODE_BTDM);
+    if (release_result == ESP_OK) {
+      ESP_LOGI(kTag, "Released unused BLE memory: %u bytes",
+               static_cast<unsigned>(esp_get_free_heap_size() - heap_before));
+    } else {
+      ESP_LOGW(kTag, "Could not release unused BLE memory: %s",
+               esp_err_to_name(release_result));
+    }
+  }
   state_events = xEventGroupCreate();
   ESP_ERROR_CHECK(state_events ? ESP_OK : ESP_ERR_NO_MEM);
-  beacon_queue = xQueueCreate(16, sizeof(BeaconFrame));
-  telemetry_queue = xQueueCreate(32, sizeof(RemoteBeacon));
+  // These queues absorb short radio/MQTT bursts. Larger depths permanently
+  // consume heap and offer little value because telemetry is intentionally
+  // dropped while the uplink is unavailable.
+  beacon_queue = xQueueCreate(kBeaconQueueDepth, sizeof(BeaconFrame));
+  telemetry_queue = xQueueCreate(kTelemetryQueueDepth, sizeof(RemoteBeacon));
   ota_queue = xQueueCreate(1, sizeof(OtaCommand));
   ESP_ERROR_CHECK(beacon_queue && telemetry_queue && ota_queue ? ESP_OK : ESP_ERR_NO_MEM);
   ESP_ERROR_CHECK(sensor_script_init(
@@ -1231,13 +1257,12 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(xTaskCreate(ota_task, "ota", 8192, nullptr, 6, nullptr) == pdPASS
                       ? ESP_OK : ESP_ERR_NO_MEM);
 
-  ESP_ERROR_CHECK(esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event_handler, nullptr));
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, event_handler, nullptr));
   esp_netif_create_default_wifi_sta();
   wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
-  if (load_halow_config()) {
+  if (provisioned) {
     show_device_status("HALOW STATUS", "CONNECTING WITH SAVED SETTINGS");
     if (halow_config.wifi_upstream) {
       ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -1246,6 +1271,10 @@ extern "C" void app_main() {
     }
     ESP_ERROR_CHECK(start_halow_connection());
   } else {
+    // Provisioning owns a sizeable transport stack. Do not register or
+    // initialize any of it on normal boots with saved device configuration.
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
     network_prov_mgr_config_t provisioning_config{};
     provisioning_config.scheme = network_prov_scheme_ble;
     provisioning_config.scheme_event_handler = NETWORK_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM;

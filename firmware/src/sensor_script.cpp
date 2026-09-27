@@ -8,6 +8,7 @@
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/uart.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -66,6 +67,15 @@ uint8_t *global_buffer;
 size_t global_buffer_capacity;
 size_t global_buffer_length;
 uint32_t execution_counter;
+
+struct ScriptExecutionContext {
+  const char *source;
+  size_t source_length;
+  SensorScriptValue values[9];
+  size_t value_count;
+};
+
+ScriptExecutionContext *current_execution;
 
 bool valid_interval(double value) {
   return value >= kMinIntervalSeconds && value <= kMaxIntervalSeconds &&
@@ -404,6 +414,28 @@ void register_functions(lua_State *state) {
   lua_register(state, "util_write_global_buffer_at", lua_util_write_global_buffer_at);
 }
 
+int initialize_script_state(lua_State *state) {
+  // Keep the runtime small. Sensor programs need the language base plus the
+  // table/string/math/time helpers, not package loading, files, debug, or I/O.
+  // This function is always called through lua_pcall so an allocation failure
+  // is returned to MQTT as a script error instead of invoking Lua's panic
+  // handler and rebooting the ESP32.
+  static const luaL_Reg libraries[] = {
+      {LUA_GNAME, luaopen_base},
+      {LUA_TABLIBNAME, luaopen_table},
+      {LUA_STRLIBNAME, luaopen_string},
+      {LUA_MATHLIBNAME, luaopen_math},
+      {LUA_OSLIBNAME, luaopen_os},
+      {nullptr, nullptr},
+  };
+  for (const luaL_Reg *library = libraries; library->func; ++library) {
+    luaL_requiref(state, library->name, library->func, 1);
+    lua_pop(state, 1);
+  }
+  register_functions(state);
+  return 0;
+}
+
 bool parse_sensor(lua_State *state, int index, SensorScriptValue *output) {
   if (!lua_istable(state, index)) return false;
   if (index < 0) index = lua_gettop(state) + index + 1;
@@ -439,6 +471,42 @@ bool parse_sensor(lua_State *state, int index, SensorScriptValue *output) {
   return found == 1;
 }
 
+int run_script_protected(lua_State *state) {
+  ScriptExecutionContext *execution = current_execution;
+  if (!execution) return luaL_error(state, "missing script execution context");
+
+  // Everything that can allocate through the Lua API, including decoding the
+  // returned sensor table, must remain inside this protected call. Otherwise
+  // an OOM in lua_getfield/lua_rawgeti invokes the panic handler and reboots.
+  initialize_script_state(state);
+  if (luaL_loadbuffer(state, execution->source, execution->source_length,
+                      "sensor_script") != LUA_OK) {
+    return lua_error(state);
+  }
+  lua_call(state, 0, 1);
+
+  if (lua_istable(state, -1)) {
+    SensorScriptValue single{};
+    if (parse_sensor(state, -1, &single)) {
+      execution->values[execution->value_count++] = single;
+    } else {
+      const size_t table_length = lua_rawlen(state, -1);
+      for (size_t index = 1; index <= table_length && execution->value_count < 9; ++index) {
+        lua_rawgeti(state, -1, index);
+        SensorScriptValue value{};
+        if (parse_sensor(state, -1, &value)) {
+          execution->values[execution->value_count++] = value;
+        } else {
+          ESP_LOGW(kTag, "Ignored invalid sensor result at index %u",
+                   static_cast<unsigned>(index));
+        }
+        lua_pop(state, 1);
+      }
+    }
+  }
+  return 0;
+}
+
 bool validate_script(const char *source, size_t length, char *error, size_t error_size) {
   lua_State *state = luaL_newstate();
   if (!state) {
@@ -466,6 +534,9 @@ bool execute_script(char *error, size_t error_size) {
   }
   global_buffer_length = 0;
   const uint32_t execution_id = ++execution_counter;
+  ESP_LOGI(kTag, "Lua heap before execution: free=%u largest=%u",
+           static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   lua_State *state = luaL_newstate();
   if (!state) {
     strlcpy(error, "could not create Lua state", error_size);
@@ -473,10 +544,11 @@ bool execute_script(char *error, size_t error_size) {
     xSemaphoreGive(hardware_mutex);
     return false;
   }
-  luaL_openlibs(state);
-  register_functions(state);
-  int result = luaL_loadbuffer(state, active_source, active_source_length, "sensor_script");
-  if (result == LUA_OK) result = lua_pcall(state, 0, 1, 0);
+  ScriptExecutionContext execution{active_source, active_source_length, {}, 0};
+  current_execution = &execution;
+  lua_pushcfunction(state, run_script_protected);
+  const int result = lua_pcall(state, 0, 0, 0);
+  current_execution = nullptr;
   if (result != LUA_OK) {
     const char *message = lua_tostring(state, -1);
     strlcpy(error, message ? message : "Lua execution failed", error_size);
@@ -486,36 +558,20 @@ bool execute_script(char *error, size_t error_size) {
     xSemaphoreGive(hardware_mutex);
     return false;
   }
-  SensorScriptValue values[9]{};
-  size_t count = 0;
-  if (lua_istable(state, -1)) {
-    SensorScriptValue single{};
-    if (parse_sensor(state, -1, &single)) {
-      values[count++] = single;
-    } else {
-      const size_t table_length = lua_rawlen(state, -1);
-      for (size_t index = 1; index <= table_length && count < 9; ++index) {
-        lua_rawgeti(state, -1, index);
-        SensorScriptValue value{};
-        if (parse_sensor(state, -1, &value)) values[count++] = value;
-        else ESP_LOGW(kTag, "Ignored invalid sensor result at index %u", static_cast<unsigned>(index));
-        lua_pop(state, 1);
-      }
-    }
-  }
   lua_close(state);
   close_script_interfaces();
   xSemaphoreGive(hardware_mutex);
-  if (count && result_callback) {
-    result_callback(values, count);
-    ESP_LOGI(kTag, "Lua script produced %u MQTT sensor values", static_cast<unsigned>(count));
+  if (execution.value_count && result_callback) {
+    result_callback(execution.values, execution.value_count);
+    ESP_LOGI(kTag, "Lua script produced %u MQTT sensor values",
+             static_cast<unsigned>(execution.value_count));
   }
   if (global_buffer_length && blob_callback) {
     blob_callback(execution_id, global_buffer, global_buffer_length);
     ESP_LOGI(kTag, "Lua script produced %u-byte global buffer",
              static_cast<unsigned>(global_buffer_length));
   }
-  if (count || global_buffer_length) return true;
+  if (execution.value_count || global_buffer_length) return true;
   {
     strlcpy(error, "script returned no sensor values or global buffer data", error_size);
     ESP_LOGW(kTag, "%s", error);
@@ -684,7 +740,13 @@ bool sensor_script_handle_mqtt_command(const char *topic, size_t topic_length,
         ? std::strlen(source_json->valuestring) : 0;
     valid = length > 0 && length <= kMaxScriptSize && cJSON_IsNumber(interval_json) &&
         valid_interval(interval_json->valuedouble);
-    if (valid) command->source = strdup(source_json->valuestring);
+    if (valid) {
+      // Transfer cJSON's decoded string to the worker instead of duplicating
+      // the entire script. This removes up to 8 KiB from the peak heap usage
+      // while an MQTT deployment command is being parsed.
+      command->source = source_json->valuestring;
+      source_json->valuestring = nullptr;
+    }
     valid = valid && command->source;
   } else if (valid && std::strcmp(action_json->valuestring, "run") == 0) {
     command->action = CommandAction::kRun;

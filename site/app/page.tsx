@@ -43,6 +43,18 @@ function errorMessage(error: unknown) {
 }
 
 const batteryVoltageSensorType = 12;
+const temperatureSensorType = 1;
+const randomTemperatureIntervalSeconds = 30;
+const randomTemperatureScript = `math.randomseed((os.time() % 100000) + math.floor((os.clock() or 0) * 1000))
+
+local value = math.random(180, 320) / 10
+
+return {
+  {
+    type = 1,
+    float_value = value,
+  },
+}`;
 
 function voltageOf(row: Telemetry) {
   try {
@@ -55,6 +67,14 @@ function voltageOf(row: Telemetry) {
     const legacyMillivolts = Number(payload.batteryVoltageMv);
     return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 2500 && legacyMillivolts <= 5000
       ? legacyMillivolts / 1000 : null;
+  } catch { return null; }
+}
+
+function temperatureOf(row: Telemetry) {
+  try {
+    const payload = JSON.parse(row.payload) as SensorPayload;
+    const value = payload.sensors?.find((sensor) => sensor?.type === temperatureSensorType)?.value;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
   } catch { return null; }
 }
 
@@ -93,12 +113,12 @@ function prettyPayload(payload: string) {
   catch { return payload; }
 }
 
-function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: number }) {
+function SensorChart({ points, duration, unit, decimals, label, emptyMessage, temperature = false }: { points: VoltagePoint[]; duration: number; unit: string; decimals: number; label: string; emptyMessage: string; temperature?: boolean }) {
   const width = 720;
   const height = 260;
   const inset = 28;
   const sampled = points.length <= 240 ? points : points.filter((_, index) => index % Math.ceil(points.length / 240) === 0 || index === points.length - 1);
-  if (!points.length) return <div className="chart-empty">No battery voltage data in this range.</div>;
+  if (!points.length) return <div className="chart-empty">{emptyMessage}</div>;
   const values = points.map((point) => point.value);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
@@ -115,12 +135,12 @@ function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: 
   const last = coordinates[coordinates.length - 1];
 
   return <div className="chart-wrap">
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Battery voltage history line chart">
+    <svg className={`chart ${temperature ? "temperature-chart" : ""}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} history line chart`}>
       {[0, 1, 2, 3].map((line) => <line key={line} className="chart-grid" x1={inset} x2={width - inset} y1={inset + line * (height - inset * 2) / 3} y2={inset + line * (height - inset * 2) / 3} />)}
       <polyline className="chart-line" points={path} />
       <circle className="chart-dot" cx={last.x} cy={last.y} r="5" />
-      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(2)} V</text>
-      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(2)} V</text>
+      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(decimals)} {unit}</text>
+      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(decimals)} {unit}</text>
     </svg>
   </div>;
 }
@@ -197,6 +217,27 @@ async function sendOtaCommand(deviceId: string) {
   }
 }
 
+async function sendRandomTemperatureScript(deviceId: string, requestId: string) {
+  const jwt = await account.createJWT();
+  const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
+    body: JSON.stringify({
+      command: "script",
+      payload: {
+        action: "download",
+        requestId,
+        intervalSeconds: randomTemperatureIntervalSeconds,
+        script: randomTemperatureScript,
+      },
+    }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { message?: string };
+    throw new Error(payload.message || "Could not deploy the sensor script.");
+  }
+}
+
 export default function Home() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -207,12 +248,15 @@ export default function Home() {
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
   const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
+  const [temperatureHistoryPoints, setTemperatureHistoryPoints] = useState<VoltagePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [otaDeviceId, setOtaDeviceId] = useState("");
   const [otaMessage, setOtaMessage] = useState("");
+  const [scriptDeviceId, setScriptDeviceId] = useState("");
+  const [scriptMessage, setScriptMessage] = useState("");
   const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -263,18 +307,23 @@ export default function Home() {
   }, [devices]);
 
   useEffect(() => {
-    if (!selectedDeviceId) { setHistoryPoints([]); return; }
+    if (!selectedDeviceId) { setHistoryPoints([]); setTemperatureHistoryPoints([]); return; }
     let active = true;
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
-    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]);
+    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
     tables.listRows({
       databaseId,
       tableId: telemetryTableId,
       queries: [Query.equal("deviceId", selectedDeviceId), Query.greaterThanEqual("receivedAt", new Date(Date.now() - duration).toISOString()), Query.orderAsc("receivedAt"), Query.limit(5000)],
     }).then((result) => {
       if (!active) return;
-      setHistoryPoints((result.rows as unknown as Telemetry[]).flatMap((row) => {
+      const rows = result.rows as unknown as Telemetry[];
+      setHistoryPoints(rows.flatMap((row) => {
         const value = voltageOf(row);
+        return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
+      }));
+      setTemperatureHistoryPoints(rows.flatMap((row) => {
+        const value = temperatureOf(row);
         return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
       }));
     }).catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
@@ -328,6 +377,17 @@ export default function Home() {
     finally { setOtaDeviceId(""); }
   }
 
+  async function deployRandomTemperatureSensor() {
+    if (!selectedDevice) return;
+    if (!window.confirm(`Replace the active sensor script on ${selectedDevice.name} with the random temperature sample?`)) return;
+    setScriptDeviceId(selectedDevice.$id); setScriptMessage(""); setError("");
+    try {
+      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique());
+      setScriptMessage(`Command sent. The first random temperature reading should arrive now, then every ${randomTemperatureIntervalSeconds} seconds.`);
+    } catch (caught) { setError(errorMessage(caught)); }
+    finally { setScriptDeviceId(""); }
+  }
+
   const latestVoltageByDevice = useMemo(() => {
     const latest = new Map<string, { row: Telemetry; value: number }>();
     for (const row of telemetry) {
@@ -342,8 +402,18 @@ export default function Home() {
     for (const row of telemetry) if (!latest.has(row.deviceId)) latest.set(row.deviceId, row);
     return latest;
   }, [telemetry]);
+  const latestTemperatureByDevice = useMemo(() => {
+    const latest = new Map<string, { row: Telemetry; value: number }>();
+    for (const row of telemetry) {
+      if (latest.has(row.deviceId)) continue;
+      const value = temperatureOf(row);
+      if (value !== null) latest.set(row.deviceId, { row, value });
+    }
+    return latest;
+  }, [telemetry]);
   const selectedDevice = devices.find((device) => device.$id === selectedDeviceId);
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
+  const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
   const selectedFirmwareVersion = firmwareVersionOf(selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined);
   const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
@@ -358,11 +428,17 @@ export default function Home() {
     const values = historyPoints.map((point) => point.value);
     return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
   }, [historyPoints]);
+  const temperatureHistoryStats = useMemo(() => {
+    if (!temperatureHistoryPoints.length) return null;
+    const values = temperatureHistoryPoints.map((point) => point.value);
+    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
+  }, [temperatureHistoryPoints]);
 
   function selectDevice(device: Device) {
     setSelectedDeviceId(device.$id);
     setHistoryRange("1h");
     setDeleteConfirm(false);
+    setScriptMessage("");
     setMobileDetailOpen(true);
   }
 
@@ -400,10 +476,14 @@ export default function Home() {
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing telemetry rows are not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
-            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>Device battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><VoltageChart points={historyPoints} duration={activeRange.duration} /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
+            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>Device battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><SensorChart points={historyPoints} duration={activeRange.duration} unit="V" decimals={2} label="Battery voltage" emptyMessage="No battery voltage data in this range." /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
             {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
             <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
+            <div className="metric-card temperature-metric"><span>TEMPERATURE · SENSOR TYPE 1</span><strong>{selectedTemperature ? `${selectedTemperature.value.toFixed(1)} °C` : "—"}</strong><small>{selectedTemperature ? `Updated ${relativeTime(selectedTemperature.row.receivedAt)}` : "No temperature readings received"}</small></div>
+            <div className="chart-card"><header><div><h3>Temperature history</h3><p>Unified Lua sensor · {temperatureHistoryPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><SensorChart points={temperatureHistoryPoints} duration={activeRange.duration} unit="°C" decimals={1} label="Temperature" emptyMessage="No temperature data in this range." temperature /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
+            {temperatureHistoryStats && <div className="stats temperature-stats"><div><span>MIN</span><strong>{temperatureHistoryStats.min.toFixed(1)} °C</strong></div><div><span>AVERAGE</span><strong>{temperatureHistoryStats.average.toFixed(1)} °C</strong></div><div><span>MAX</span><strong>{temperatureHistoryStats.max.toFixed(1)} °C</strong></div></div>}
             <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
+            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="sensor-script-card"><div><h3>Random temperature sensor</h3><p>Installs a Lua sample derived from the EdgeZ sensor definition. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the currently installed unified sensor script.</p>{selectedTemperature && <small>Latest temperature: {selectedTemperature.value.toFixed(1)} °C · {relativeTime(selectedTemperature.row.receivedAt)}</small>}{scriptMessage && <small>{scriptMessage}</small>}</div><button onClick={() => void deployRandomTemperatureSensor()} disabled={selectedStatus !== "Online" || scriptDeviceId === selectedDevice.$id}>{scriptDeviceId === selectedDevice.$id ? "Deploying…" : "Deploy sensor script"}</button></div>}
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}

@@ -210,7 +210,18 @@ function geofenceLine(area: GeofenceArea): EdgezMapLine | null {
   } catch { return null; }
 }
 
-const sensorType = { latitude: 3, longitude: 4, batteryVoltage: 12 } as const;
+const sensorType = { temperature: 1, latitude: 3, longitude: 4, batteryVoltage: 12 } as const;
+const randomTemperatureIntervalSeconds = 30;
+const randomTemperatureScript = `math.randomseed((os.time() % 100000) + math.floor((os.clock() or 0) * 1000))
+
+local value = math.random(180, 320) / 10
+
+return {
+  {
+    type = 1,
+    float_value = value,
+  },
+}`;
 type SensorPayload = { sensors?: { type?: unknown; value?: unknown }[] };
 
 function sensorValue(payload: SensorPayload, type: number) {
@@ -334,11 +345,25 @@ function voltageOf(row: Telemetry) {
   } catch { return null; }
 }
 
+function temperatureOf(row: Telemetry) {
+  try { return sensorValue(JSON.parse(row.payload) as SensorPayload, sensorType.temperature); }
+  catch { return null; }
+}
+
 function cachedVoltagePoints(rows: Telemetry[], deviceId: string, duration: number): VoltagePoint[] {
   const since = Date.now() - duration;
   return rows.filter((row) => row.deviceId === deviceId && new Date(row.receivedAt).getTime() >= since)
     .flatMap((row) => {
       const value = voltageOf(row);
+      return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
+    }).sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function cachedTemperaturePoints(rows: Telemetry[], deviceId: string, duration: number): VoltagePoint[] {
+  const since = Date.now() - duration;
+  return rows.filter((row) => row.deviceId === deviceId && new Date(row.receivedAt).getTime() >= since)
+    .flatMap((row) => {
+      const value = temperatureOf(row);
       return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
     }).sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -360,7 +385,7 @@ function isRecentTopology(link: TopologyLink) {
   return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
 }
 
-function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: number }) {
+function SensorChart({ points, duration, unit, decimals, emptyMessage, color = "#0a8c87" }: { points: VoltagePoint[]; duration: number; unit: string; decimals: number; emptyMessage: string; color?: string }) {
   const [width, setWidth] = useState(0);
   const height = 210;
   const inset = 18;
@@ -390,11 +415,11 @@ function VoltageChart({ points, duration }: { points: VoltagePoint[]; duration: 
       const previous = coordinates[index];
       const length = Math.hypot(point.x - previous.x, point.y - previous.y);
       const angle = Math.atan2(point.y - previous.y, point.x - previous.x);
-      return <View key={`${sampled[index + 1].timestamp}-${index}`} style={[styles.chartLine, { left: (previous.x + point.x) / 2 - length / 2, top: (previous.y + point.y) / 2 - 1, width: length, transform: [{ rotateZ: `${angle}rad` }] }]} />;
+      return <View key={`${sampled[index + 1].timestamp}-${index}`} style={[styles.chartLine, { backgroundColor: color, left: (previous.x + point.x) / 2 - length / 2, top: (previous.y + point.y) / 2 - 1, width: length, transform: [{ rotateZ: `${angle}rad` }] }]} />;
     })}
-    {coordinates.length ? <View style={[styles.chartDot, { left: coordinates[coordinates.length - 1].x - 4, top: coordinates[coordinates.length - 1].y - 4 }]} /> : null}
-    {!points.length ? <Text style={styles.chartEmpty}>No battery voltage data in this range.</Text> : null}
-    {points.length ? <><Text style={styles.chartMax}>{rawMax.toFixed(2)} V</Text><Text style={styles.chartMin}>{rawMin.toFixed(2)} V</Text></> : null}
+    {coordinates.length ? <View style={[styles.chartDot, { backgroundColor: color, left: coordinates[coordinates.length - 1].x - 4, top: coordinates[coordinates.length - 1].y - 4 }]} /> : null}
+    {!points.length ? <Text style={styles.chartEmpty}>{emptyMessage}</Text> : null}
+    {points.length ? <><Text style={styles.chartMax}>{rawMax.toFixed(decimals)} {unit}</Text><Text style={styles.chartMin}>{rawMin.toFixed(decimals)} {unit}</Text></> : null}
   </View>;
 }
 
@@ -633,8 +658,10 @@ export default function App() {
   const [detailColor, setDetailColor] = useState<MapMarkerColor>("blue");
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
   const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
+  const [temperatureHistoryPoints, setTemperatureHistoryPoints] = useState<VoltagePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [scriptDeployingDeviceId, setScriptDeployingDeviceId] = useState("");
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [offline, setOffline] = useState(false);
@@ -974,22 +1001,28 @@ export default function App() {
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
     if (offline) {
       setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration));
+      setTemperatureHistoryPoints(cachedTemperaturePoints(telemetryRef.current, detailDevice.$id, duration));
       setHistoryLoading(false); setHistoryError("");
       return;
     }
-    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]);
+    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
     tables.listRows({
       databaseId: config.databaseId,
       tableId: config.telemetryTableId,
       queries: [Query.equal("deviceId", detailDevice.$id), Query.greaterThanEqual("receivedAt", new Date(Date.now() - duration).toISOString()), Query.orderAsc("receivedAt"), Query.limit(5000)],
     }).then((result) => {
       if (!active) return;
-      const points = (result.rows as unknown as Telemetry[]).flatMap((row) => {
+      const rows = result.rows as unknown as Telemetry[];
+      const points = rows.flatMap((row) => {
         const value = voltageOf(row);
         return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
       });
       setHistoryPoints(points);
-    }).catch((caught) => { if (active) { setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration)); setHistoryError(messageOf(caught)); } })
+      setTemperatureHistoryPoints(rows.flatMap((row) => {
+        const value = temperatureOf(row);
+        return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
+      }));
+    }).catch((caught) => { if (active) { setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration)); setTemperatureHistoryPoints(cachedTemperaturePoints(telemetryRef.current, detailDevice.$id, duration)); setHistoryError(messageOf(caught)); } })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
   }, [detailDevice, historyRange, offline]);
@@ -1258,6 +1291,32 @@ export default function App() {
     ]);
   }
 
+  function requestRandomTemperatureSensor(device: Device) {
+    Alert.alert(
+      "Deploy random temperature sensor",
+      `Replace the active sensor script on ${device.name}? The sample runs immediately and then every ${randomTemperatureIntervalSeconds} seconds.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Deploy", onPress: () => void (async () => {
+          setScriptDeployingDeviceId(device.$id); setError("");
+          try {
+            await deviceApi(`/${encodeURIComponent(device.$id)}/commands`, "POST", {
+              command: "script",
+              payload: {
+                action: "download",
+                requestId: ID.unique(),
+                intervalSeconds: randomTemperatureIntervalSeconds,
+                script: randomTemperatureScript,
+              },
+            });
+            Alert.alert("Sensor script sent", `The first reading should arrive now, then every ${randomTemperatureIntervalSeconds} seconds.`);
+          } catch (caught) { setError(messageOf(caught)); }
+          finally { setScriptDeployingDeviceId(""); }
+        })() },
+      ],
+    );
+  }
+
   async function signOut() {
     setMenuOpen(false);
     if (selectedBleDevice) await provisioningManager.disconnect(selectedBleDevice);
@@ -1450,14 +1509,29 @@ export default function App() {
     for (const row of telemetry) if (!latest.has(row.deviceId)) latest.set(row.deviceId, row);
     return latest;
   }, [telemetry]);
+  const latestTemperatureByDevice = useMemo(() => {
+    const latest = new Map<string, { row: Telemetry; value: number }>();
+    for (const row of telemetry) {
+      if (latest.has(row.deviceId)) continue;
+      const value = temperatureOf(row);
+      if (value !== null) latest.set(row.deviceId, { row, value });
+    }
+    return latest;
+  }, [telemetry]);
   const historyStats = useMemo(() => {
     if (!historyPoints.length) return null;
     const values = historyPoints.map((point) => point.value);
     return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
   }, [historyPoints]);
+  const temperatureHistoryStats = useMemo(() => {
+    if (!temperatureHistoryPoints.length) return null;
+    const values = temperatureHistoryPoints.map((point) => point.value);
+    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
+  }, [temperatureHistoryPoints]);
   const activeHistoryRange = historyRanges.find((range) => range.key === historyRange)!;
   const activeHistoryDuration = activeHistoryRange.duration;
   const detailLatest = detailDevice ? latestVoltageByDevice.get(detailDevice.$id) : undefined;
+  const detailTemperature = detailDevice ? latestTemperatureByDevice.get(detailDevice.$id) : undefined;
   const detailStatus = detailDevice ? statusOf(detailDevice, latestTelemetryByDevice.get(detailDevice.$id)) : "";
   const detailFirmwareVersion = firmwareVersionOf(detailDevice ? latestTelemetryByDevice.get(detailDevice.$id) : undefined);
   const detailTopology = detailDevice ? topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === detailDevice.$id || link.peerDeviceId === detailDevice.$id)) : [];
@@ -1737,10 +1811,14 @@ export default function App() {
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>
             <View style={styles.rangeSelector}>{historyRanges.map((range) => <Pressable key={range.key} style={[styles.rangeButton, historyRange === range.key && styles.rangeButtonActive]} onPress={() => setHistoryRange(range.key)} disabled={historyLoading}><Text style={[styles.rangeButtonText, historyRange === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
-            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Battery voltage</Text><Text style={styles.chartSubtitle}>Device battery ADC · {historyPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View><VoltageChart points={historyPoints} duration={activeHistoryDuration} /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
+            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Battery voltage</Text><Text style={styles.chartSubtitle}>Device battery ADC · {historyPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View><SensorChart points={historyPoints} duration={activeHistoryDuration} unit="V" decimals={2} emptyMessage="No battery voltage data in this range." /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
             {historyStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{historyStats.min.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{historyStats.average.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{historyStats.max.toFixed(2)} V</Text></View></View> : null}
             <Text style={styles.sensorNote}>Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</Text>
+            <View style={[styles.detailLatest, styles.temperatureLatest]}><Text style={styles.temperatureMetricLabel}>TEMPERATURE · SENSOR TYPE 1</Text><Text style={styles.detailMetricValue}>{detailTemperature ? `${detailTemperature.value.toFixed(1)} °C` : "—"}</Text><Text style={styles.temperatureMetricTime}>{detailTemperature ? `Updated ${relativeTime(detailTemperature.row.receivedAt)}` : "No temperature readings received"}</Text></View>
+            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Temperature history</Text><Text style={styles.chartSubtitle}>Unified Lua sensor · {temperatureHistoryPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#d47a1f" /> : null}</View><SensorChart points={temperatureHistoryPoints} duration={activeHistoryDuration} unit="°C" decimals={1} emptyMessage="No temperature data in this range." color="#d47a1f" /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
+            {temperatureHistoryStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{temperatureHistoryStats.min.toFixed(1)} °C</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{temperatureHistoryStats.average.toFixed(1)} °C</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{temperatureHistoryStats.max.toFixed(1)} °C</Text></View></View> : null}
             <TopologyCard device={detailDevice} links={detailTopology} />
+            {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.sensorScriptZone}><Text style={styles.otaTitle}>RANDOM TEMPERATURE SENSOR</Text><Text style={styles.otaDescription}>Deploys the EdgeZ Lua sample as the device&apos;s unified sensor script. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the active script.</Text>{detailTemperature ? <Text style={styles.sensorScriptReading}>LATEST · {detailTemperature.value.toFixed(1)} °C · {relativeTime(detailTemperature.row.receivedAt)}</Text> : <Text style={styles.sensorScriptReading}>NO TEMPERATURE READING YET</Text>}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || scriptDeployingDeviceId === detailDevice.$id) && styles.disabledButton]} onPress={() => requestRandomTemperatureSensor(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || scriptDeployingDeviceId === detailDevice.$id}><Text style={styles.otaButtonText}>{scriptDeployingDeviceId === detailDevice.$id ? "DEPLOYING…" : "DEPLOY SENSOR SCRIPT"}</Text></Pressable></View> : null}
             {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text>{detailOtaUpdate ? <Text style={styles.otaDescription}>Latest update: {detailOtaUpdate.status.toUpperCase()}{detailOtaUpdate.detail ? ` · ${detailOtaUpdate.detail}` : ""}{detailOtaUpdate.reportedAt ? ` · ${relativeTime(detailOtaUpdate.reportedAt)}` : ""}</Text> : null}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : detailOtaPending ? "UPDATE PENDING" : detailFirmwareCurrent ? "UP TO DATE" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
             <View style={styles.dangerZone}><Text style={styles.dangerTitle}>DEVICE ACCESS</Text><Text style={styles.dangerDescription}>Deleting this device revokes its MQTT credential. Historical telemetry is retained.</Text><Pressable style={[styles.deleteButton, offline && styles.disabledButton]} onPress={() => requestDeleteDevice(detailDevice)} disabled={busy || offline}><Text style={styles.deleteButtonText}>{busy ? "DELETING…" : "DELETE DEVICE"}</Text></Pressable></View>
           </ScrollView>
@@ -1772,7 +1850,7 @@ const styles = StyleSheet.create({
   dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
   flashWarning: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#e8b5aa", backgroundColor: "#fff4f1" }, flashWarningTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, flashWarningText: { color: "#7f5b53", fontSize: 11, lineHeight: 16, marginTop: 5 }, flashWarningCode: { fontWeight: "900" }, flashHash: { color: "#718783", fontSize: 9, fontFamily: Platform.OS === "android" ? "monospace" : undefined }, flashProgress: { padding: 14, borderRadius: 12, backgroundColor: "#e9f7f5", gap: 8 }, flashProgressHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, flashElapsed: { color: "#087f73", fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }, flashLog: { paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#a8cfca", gap: 3 }, flashLogLine: { color: "#315e59", fontSize: 9, lineHeight: 13, fontFamily: Platform.OS === "android" ? "monospace" : undefined },
   sectionLabel: { color: "#7d9a97", fontSize: 10, fontWeight: "900", letterSpacing: 1.2, marginTop: 6 }, deviceCard: { padding: 18, borderRadius: 18, backgroundColor: "#f7faf9" }, deviceCardHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, deviceCardName: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, deviceSerial: { color: "#718783", fontSize: 10, fontWeight: "700", letterSpacing: .7, marginTop: 3 }, statusBadge: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 20, backgroundColor: "#e7efed" }, statusDot: { width: 7, height: 7, borderRadius: 4 }, statusOnline: { backgroundColor: "#16a085" }, statusOffline: { backgroundColor: "#9badaa" }, statusText: { color: "#4d6965", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, latestRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 24 }, latestLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, latestValue: { color: "#0a3037", fontSize: 39, lineHeight: 45, fontWeight: "900", letterSpacing: -1.5 }, cardArrow: { color: "#0a8c87", fontSize: 36, lineHeight: 42, fontWeight: "300" }, lastSeen: { color: "#718783", fontSize: 10, marginTop: 5 },
-  detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, statsRow: { flexDirection: "row", gap: 10 }, stat: { flex: 1, padding: 13, borderRadius: 14, backgroundColor: "white" }, statLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, statValue: { color: "#0a3037", fontSize: 19, fontWeight: "900", marginTop: 4 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, otaZone: { padding: 16, borderWidth: 1, borderColor: "#b8d9d5", borderRadius: 14, backgroundColor: "#f4fbfa" }, otaTitle: { color: "#0a6f6b", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, otaDescription: { color: "#59716f", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, otaButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, otaButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
+  detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, temperatureLatest: { backgroundColor: "#7a4b14" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, temperatureMetricLabel: { color: "#ffe0a3", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, temperatureMetricTime: { color: "#f2d4a8", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, statsRow: { flexDirection: "row", gap: 10 }, stat: { flex: 1, padding: 13, borderRadius: 14, backgroundColor: "white" }, statLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, statValue: { color: "#0a3037", fontSize: 19, fontWeight: "900", marginTop: 4 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, sensorScriptZone: { padding: 16, borderWidth: 1, borderColor: "#d9c89d", borderRadius: 14, backgroundColor: "#fffaf0" }, sensorScriptReading: { color: "#8d6b1f", fontSize: 9, fontWeight: "900", letterSpacing: .6, marginBottom: 11 }, otaZone: { padding: 16, borderWidth: 1, borderColor: "#b8d9d5", borderRadius: 14, backgroundColor: "#f4fbfa" }, otaTitle: { color: "#0a6f6b", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, otaDescription: { color: "#59716f", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, otaButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, otaButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
   topologyCard: { padding: 16, borderRadius: 18, backgroundColor: "white", gap: 12 }, topologyHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }, topologyCount: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, topologyRoot: { flexDirection: "row", alignItems: "center", gap: 10, padding: 11, borderRadius: 12, backgroundColor: "#e9f7f5" }, topologyRootIcon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: "#0a3037" }, topologyNodeName: { color: "#0a3037", fontSize: 12, fontWeight: "900" }, topologyNodeMeta: { color: "#718783", fontSize: 8, marginTop: 2 }, topologyLinkRow: { minHeight: 52, flexDirection: "row", alignItems: "center" }, topologyRail: { width: 50, alignSelf: "stretch", position: "relative" }, topologyVertical: { position: "absolute", left: 18, top: -12, bottom: 26, width: 2, backgroundColor: "#8fcac4" }, topologyHorizontal: { position: "absolute", left: 18, top: 25, width: 25, height: 2, backgroundColor: "#8fcac4" }, topologyPeerDot: { position: "absolute", left: 39, top: 19, width: 14, height: 14, borderRadius: 7, borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "white" }, topologyPeerInfo: { flex: 1, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#f3f8f6" }, topologyEmpty: { paddingVertical: 18, color: "#718783", fontSize: 10, textAlign: "center" },
   empty: { color: "#829d9a", textAlign: "center", padding: 28 }, error: { color: "#ffc0af", textAlign: "center", fontSize: 12, paddingVertical: 12 },
 });

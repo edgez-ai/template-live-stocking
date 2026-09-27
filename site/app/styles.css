@@ -68,6 +68,9 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .metric-card span { color: #69cfc7; font-size: 9px; font-weight: 900; letter-spacing: 1px; }
 .metric-card strong { font-size: 48px; line-height: 1.12; letter-spacing: -2px; }
 .metric-card small { color: #90aaa7; font-size: 10px; }
+.temperature-metric { margin-top: 18px; background: linear-gradient(135deg, #7a4b14, #a86418); }
+.temperature-metric span { color: #ffe0a3; }
+.temperature-metric small { color: #f2d4a8; }
 .range-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 22px 0 12px; }
 .range-row > span { color: #49635e; font-size: 9px; font-weight: 900; letter-spacing: .8px; }
 .range-row > div { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #d8e5e2; }
@@ -82,6 +85,8 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .chart-grid { stroke: #dce8e5; stroke-width: 1; }
 .chart-line { fill: none; stroke: #0a8c87; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 .chart-dot { fill: #ff8264; stroke: white; stroke-width: 3; }
+.temperature-chart .chart-line { stroke: #d47a1f; }
+.temperature-chart .chart-dot { fill: #f0a13e; }
 .chart-label { fill: #718783; font-size: 10px; font-weight: 800; }
 .chart-empty { display: grid; min-height: 230px; place-items: center; border-radius: 14px; color: #718783; background: #f3f8f6; font-size: 12px; }
 .chart-card > footer { display: flex; justify-content: space-between; margin-top: 7px; color: #718783; font-size: 9px; font-weight: 800; text-transform: uppercase; }
@@ -108,12 +113,13 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-node-label { fill: #0a3037; font-size: 11px; font-weight: 900; }
 .topology-node-meta { fill: #718783; font-size: 9px; }
 .topology-empty { margin-top: 12px; padding: 38px 20px; border-radius: 14px; color: #718783; background: #f3f8f6; font-size: 11px; text-align: center; }
-.ota-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px; border: 1px solid #b8d9d5; border-radius: 18px; background: #f4fbfa; }
-.ota-card h3 { margin: 0; color: #0a3037; font-size: 17px; }
-.ota-card p { margin: 5px 0 0; color: #59716f; font-size: 10px; line-height: 1.5; }
-.ota-card small { display: block; margin-top: 7px; color: #0a8c87; font-size: 9px; font-weight: 800; }
-.ota-card button { flex: none; padding: 12px 15px; border: 0; border-radius: 10px; color: white; background: #0a8c87; font-size: 9px; font-weight: 900; text-transform: uppercase; }
-.ota-card button:disabled { cursor: not-allowed; opacity: .45; }
+.ota-card, .sensor-script-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px; border: 1px solid #b8d9d5; border-radius: 18px; background: #f4fbfa; }
+.sensor-script-card { margin-top: 14px; border-color: #d9c89d; background: #fffaf0; }
+.ota-card h3, .sensor-script-card h3 { margin: 0; color: #0a3037; font-size: 17px; }
+.ota-card p, .sensor-script-card p { margin: 5px 0 0; color: #59716f; font-size: 10px; line-height: 1.5; }
+.ota-card small, .sensor-script-card small { display: block; margin-top: 7px; color: #0a8c87; font-size: 9px; font-weight: 800; }
+.ota-card button, .sensor-script-card button { flex: none; padding: 12px 15px; border: 0; border-radius: 10px; color: white; background: #0a8c87; font-size: 9px; font-weight: 900; text-transform: uppercase; }
+.ota-card button:disabled, .sensor-script-card button:disabled { cursor: not-allowed; opacity: .45; }
 .recent { display: grid; gap: 9px; }
 .recent h3 { margin-bottom: 3px; }
 .recent article { padding: 14px 16px; border-radius: 14px; background: white; }
@@ -162,6 +168,6 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
   .chart { min-height: 190px; }
   .chart-empty { min-height: 190px; }
   .recent article header { display: grid; gap: 3px; }
-  .ota-card { display: grid; }
-  .ota-card button { width: 100%; }
+  .ota-card, .sensor-script-card { display: grid; }
+  .ota-card button, .sensor-script-card button { width: 100%; }
 }
