@@ -2,85 +2,23 @@
 
 #include <cstring>
 
+#include "edgez_halow_events.h"
+#include "edgez_halow_radio.hpp"
 #include "esp_log.h"
-#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 extern "C" {
-#include "mmhal.h"
-#include "mmipal.h"
 #include "mmregdb.h"
 #include "mmwlan.h"
 }
 
 namespace {
 constexpr char kTag[] = "halow";
-bool radio_initialized;
-bool ip_initialized;
+HaLowInterface radio;
+bool radio_started;
 halow_ready_callback_t ready_callback;
 halow_beacon_callback_t beacon_callback;
-struct mmwlan_beacon_vendor_ie_filter beacon_filter{};
-struct BeaconRssi {
-  bool occupied;
-  uint8_t bssid[6];
-  int16_t rssi_dbm;
-  int64_t observed_ms;
-};
-constexpr size_t kBeaconRssiCapacity = 16;
-constexpr int64_t kBeaconRssiMaxAgeMs = 2 * 60 * 1000;
-BeaconRssi beacon_rssi[kBeaconRssiCapacity]{};
-
-void remember_beacon_rssi(const uint8_t bssid[6], int16_t rssi_dbm) {
-  if (!bssid) return;
-  const int64_t now_ms = esp_timer_get_time() / 1000;
-  BeaconRssi *slot = nullptr;
-  BeaconRssi *oldest = &beacon_rssi[0];
-  for (auto &entry : beacon_rssi) {
-    if (entry.occupied && std::memcmp(entry.bssid, bssid, sizeof(entry.bssid)) == 0) {
-      slot = &entry;
-      break;
-    }
-    if (!entry.occupied && !slot) slot = &entry;
-    if (entry.observed_ms < oldest->observed_ms) oldest = &entry;
-  }
-  if (!slot) slot = oldest;
-  slot->occupied = true;
-  std::memcpy(slot->bssid, bssid, sizeof(slot->bssid));
-  slot->rssi_dbm = rssi_dbm;
-  slot->observed_ms = now_ms;
-}
-
-bool beacon_rssi_for(const uint8_t bssid[6], int16_t *rssi_dbm) {
-  if (!bssid || !rssi_dbm) return false;
-  const int64_t now_ms = esp_timer_get_time() / 1000;
-  for (const auto &entry : beacon_rssi) {
-    if (entry.occupied && now_ms - entry.observed_ms <= kBeaconRssiMaxAgeMs &&
-        std::memcmp(entry.bssid, bssid, sizeof(entry.bssid)) == 0) {
-      *rssi_dbm = entry.rssi_dbm;
-      return true;
-    }
-  }
-  return false;
-}
-
-void on_mesh_scan_result(const struct mmwlan_scan_result *result, void *) {
-  if (result && result->bssid) remember_beacon_rssi(result->bssid, result->rssi);
-}
-
-void on_beacon_vendor_ie(const uint8_t *ies, uint32_t length,
-                         const uint8_t *bssid, void *) {
-  if (!beacon_callback || !ies) return;
-  int16_t rssi_dbm = 0;
-  bool rssi_valid = beacon_rssi_for(bssid, &rssi_dbm);
-  if (!rssi_valid && bssid) rssi_valid = mmwlan_get_mesh_peer_rssi(bssid, &rssi_dbm) == MMWLAN_SUCCESS;
-  for (size_t offset = 0; offset + 2 <= length;) {
-    const size_t ie_length = ies[offset + 1];
-    if (offset + 2 + ie_length > length) break;
-    if (ies[offset] == 221 && ie_length > 5 &&
-        std::memcmp(ies + offset + 2, "EdgeZ", 5) == 0) {
-      beacon_callback(ies + offset + 7, ie_length - 5, bssid, rssi_dbm, rssi_valid);
-    }
-    offset += 2 + ie_length;
-  }
-}
+halow_batman_callback_t batman_callback;
 
 const struct mmwlan_s1g_channel *find_channel(const char *country, uint8_t channel) {
   if (!country || std::strlen(country) != 2 || channel == 0) return nullptr;
@@ -92,33 +30,45 @@ const struct mmwlan_s1g_channel *find_channel(const char *country, uint8_t chann
   return nullptr;
 }
 
-esp_err_t initialize_radio(const char *country) {
-  if (radio_initialized) return ESP_OK;
-  mmhal_init();
-  mmwlan_init();
-  const auto *channels = mmwlan_lookup_regulatory_domain(get_regulatory_db(), country);
-  if (!channels) return ESP_ERR_NOT_FOUND;
-  const auto channel_status = mmwlan_set_channel_list(channels);
-  if (channel_status != MMWLAN_SUCCESS) return ESP_FAIL;
-  radio_initialized = true;
-  return ESP_OK;
+void deliver_beacon(const edgez_halow_event_t &event) {
+  if (!beacon_callback) return;
+  const uint8_t *ies = event.data.beacon.ies;
+  const size_t length = event.data.beacon.ies_len;
+  for (size_t offset = 0; offset + 2 <= length;) {
+    const size_t ie_length = ies[offset + 1];
+    if (offset + 2 + ie_length > length) break;
+    if (ies[offset] == 221 && ie_length > 5 &&
+        std::memcmp(ies + offset + 2, "EdgeZ", 5) == 0) {
+      beacon_callback(ies + offset + 7, ie_length - 5,
+                      event.data.beacon.bssid,
+                      static_cast<int16_t>(event.data.beacon.rssi_dbm), true);
+    }
+    offset += 2 + ie_length;
+  }
 }
 
-esp_err_t initialize_ip(const char *country) {
-  esp_err_t result = initialize_radio(country);
-  if (result != ESP_OK || ip_initialized) return result;
-  struct mmipal_init_args args = MMIPAL_INIT_ARGS_DEFAULT;
-  const auto ip_status = mmipal_init_on_existing_lwip(&args);
-  if (ip_status != MMIPAL_SUCCESS) return ESP_FAIL;
-  ip_initialized = true;
-  return ESP_OK;
-}
-
-void link_status(const struct mmipal_link_status *status) {
-  if (!status || status->link_state != MMIPAL_LINK_UP ||
-      status->ip_addr[0] == '\0' || std::strcmp(status->ip_addr, "0.0.0.0") == 0) return;
-  ESP_LOGI(kTag, "HaLow mesh ready at %s", status->ip_addr);
-  if (ready_callback) ready_callback();
+void event_task(void *) {
+  static edgez_halow_event_t event;
+  while (true) {
+    if (!edgez_halow_event_receive(&event, portMAX_DELAY)) continue;
+    switch (event.type) {
+      case EDGEZ_HALOW_EVENT_BEACON:
+        deliver_beacon(event);
+        break;
+      case EDGEZ_HALOW_EVENT_PEER_ADMISSION:
+        (void)edgez_halow_event_respond_peer_admission(event.request_id, true, 0);
+        break;
+      case EDGEZ_HALOW_EVENT_BATMAN_PAYLOAD:
+        if (batman_callback) {
+          batman_callback(event.data.batman_payload.originator,
+                          event.data.batman_payload.payload,
+                          event.data.batman_payload.payload_len);
+        }
+        break;
+      default:
+        break;
+    }
+  }
 }
 }  // namespace
 
@@ -130,59 +80,52 @@ void halow_set_beacon_callback(halow_beacon_callback_t callback) {
   beacon_callback = callback;
 }
 
+void halow_set_batman_callback(halow_batman_callback_t callback) {
+  batman_callback = callback;
+}
+
 bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
   return peer_mac && rssi_dbm &&
          mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
 }
 
+esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,
+                            size_t length) {
+  if (!radio_started || !destination || !data || !length) return ESP_ERR_INVALID_STATE;
+  const EdgezRadioError result = radio.sendBatmanPayloadTo(destination, data, length);
+  return result == EDGEZ_RADIO_OK ? ESP_OK :
+         result == EDGEZ_RADIO_RETRY ? ESP_ERR_TIMEOUT : ESP_FAIL;
+}
+
+esp_err_t halow_broadcast_batman(const uint8_t *data, size_t length) {
+  if (!radio_started || !data || !length) return ESP_ERR_INVALID_STATE;
+  const EdgezRadioError result = radio.sendBatmanBroadcastPayload(data, length);
+  return result == EDGEZ_RADIO_OK ? ESP_OK :
+         result == EDGEZ_RADIO_RETRY ? ESP_ERR_TIMEOUT : ESP_FAIL;
+}
+
 esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
                         const char *country, uint8_t channel, bool wifi_upstream,
                         halow_ready_callback_t on_ready) {
-  if (!mesh_id || !mesh_id[0] || std::strlen(mesh_id) > 32 ||
-      !passphrase || std::strlen(passphrase) < 8 || std::strlen(passphrase) > 63 ||
-      !find_channel(country, channel)) return ESP_ERR_INVALID_ARG;
-
-  esp_err_t result = initialize_ip(country);
-  if (result != ESP_OK) {
-    if (!wifi_upstream) return result;
-    ESP_LOGW(kTag, "MMIPAL attach failed (%d); booting HaLow for beacon reception", result);
-    struct mmwlan_boot_args boot_args = MMWLAN_BOOT_ARGS_INIT;
-    const auto boot_status = mmwlan_boot(&boot_args);
-    if (boot_status != MMWLAN_SUCCESS) return ESP_FAIL;
-  }
-  ready_callback = on_ready;
-  if (ip_initialized) mmipal_set_link_status_callback(link_status);
-  if (beacon_callback) {
-    beacon_filter.cb = on_beacon_vendor_ie;
-    beacon_filter.n_ouis = 1;
-    beacon_filter.ouis[0][0] = 'E';
-    beacon_filter.ouis[0][1] = 'd';
-    beacon_filter.ouis[0][2] = 'g';
-    const auto filter_status = mmwlan_update_beacon_vendor_ie_filter(&beacon_filter);
-    if (filter_status != MMWLAN_SUCCESS) {
-      ESP_LOGE(kTag, "Could not install EdgeZ beacon filter");
-      return ESP_FAIL;
-    }
-  }
-
+  (void)wifi_upstream;
   const auto *selected = find_channel(country, channel);
-  struct mmwlan_sta_args args = MMWLAN_STA_ARGS_INIT;
-  args.ssid_len = std::strlen(mesh_id);
-  std::memcpy(args.ssid, mesh_id, args.ssid_len);
-  args.passphrase_len = std::strlen(passphrase);
-  std::memcpy(args.passphrase, passphrase, args.passphrase_len + 1);
-  args.security_type = MMWLAN_SAE;
-  args.mesh_mode = true;
-  args.mesh_frequency_khz = selected->centre_freq_hz / 1000U;
-  args.mesh_bandwidth_mhz = selected->bw_mhz;
-  args.scan_rx_cb = on_mesh_scan_result;
-  args.scan_interval_base_s = 1;
-  args.scan_interval_limit_s = 8;
-  ESP_LOGI(kTag, "Joining mesh %s in %s on channel %u at %lu kHz / %u MHz",
-           mesh_id, country, channel,
-           static_cast<unsigned long>(args.mesh_frequency_khz),
-           static_cast<unsigned>(args.mesh_bandwidth_mhz));
-  const auto station_status = mmwlan_sta_enable(&args, nullptr);
-  if (station_status != MMWLAN_SUCCESS) return ESP_FAIL;
+  if (!mesh_id || !mesh_id[0] || std::strlen(mesh_id) > 32 || !passphrase ||
+      std::strlen(passphrase) < 8 || std::strlen(passphrase) > 63 || !selected)
+    return ESP_ERR_INVALID_ARG;
+  if (radio_started) return ESP_OK;
+  if (edgez_halow_event_queue_init() != ESP_OK) return ESP_ERR_NO_MEM;
+  if (xTaskCreate(event_task, "halow-events", 6144, nullptr, 7, nullptr) != pdPASS)
+    return ESP_ERR_NO_MEM;
+  radio.setCountryCode(country);
+  radio.setMeshId(mesh_id);
+  radio.setMeshSaePassphrase(passphrase);
+  radio.setMeshRadio(selected->centre_freq_hz / 1000U, selected->bw_mhz);
+  radio.setProactiveJoinEnabled(true);
+  radio.setRelayModeEnabled(true);
+  ready_callback = on_ready;
+  ESP_LOGI(kTag, "Starting BATMAN mesh %s in %s channel %u", mesh_id, country, channel);
+  if (!radio.init()) return ESP_FAIL;
+  radio_started = true;
+  if (ready_callback) ready_callback();
   return ESP_OK;
 }

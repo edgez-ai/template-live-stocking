@@ -59,13 +59,9 @@ class HaLowInterface
     EdgezRadioError sendBatmanPayloadTo(const uint8_t destination[6],
                                         const uint8_t *payload,
                                         size_t payload_len,
-                                        const uint8_t forced_next_hop[6] = nullptr,
-                                        uint8_t tid = 0,
-                                        uint32_t tx_ready_timeout_ms = 50);
+                                        const uint8_t forced_next_hop[6] = nullptr);
     EdgezRadioError sendBatmanBroadcastPayload(const uint8_t *payload,
-                                                size_t payload_len,
-                                                uint8_t tid = 0,
-                                                uint32_t tx_ready_timeout_ms = 50);
+                                                size_t payload_len);
     void receiveBatmanAdv(const uint8_t ethernet_source[6],
                           const uint8_t *payload,
                           size_t payload_len);

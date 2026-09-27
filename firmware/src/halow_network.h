@@ -9,10 +9,16 @@ using halow_ready_callback_t = void (*)();
 using halow_beacon_callback_t = void (*)(const uint8_t *data, size_t length,
                                          const uint8_t source_mac[6],
                                          int16_t rssi_dbm, bool rssi_valid);
+using halow_batman_callback_t = void (*)(const uint8_t originator[6],
+                                         const uint8_t *data, size_t length);
 
 bool halow_channel_supported(const char *country, uint8_t channel);
 void halow_set_beacon_callback(halow_beacon_callback_t callback);
+void halow_set_batman_callback(halow_batman_callback_t callback);
 bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm);
+esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,
+                            size_t length);
+esp_err_t halow_broadcast_batman(const uint8_t *data, size_t length);
 esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
                         const char *country, uint8_t channel, bool wifi_upstream,
                         halow_ready_callback_t on_ready);

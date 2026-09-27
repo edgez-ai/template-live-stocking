@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "mqtt_client.h"
+#include "mqtt_l2_relay.h"
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -137,6 +138,7 @@ char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
 bool halow_connect_started = false;
+bool mqtt_relay_started = false;
 QueueHandle_t beacon_queue;
 QueueHandle_t telemetry_queue;
 QueueHandle_t ota_queue;
@@ -146,6 +148,44 @@ portMUX_TYPE topology_lock = portMUX_INITIALIZER_UNLOCKED;
 void show_device_status(const char *title, const char *status);
 void start_mqtt();
 esp_err_t configure_mesh(cJSON *root);
+void handle_ota_command(const esp_mqtt_event_handle_t event);
+
+int publish_mqtt_direct(const char *topic, const void *payload, size_t length,
+                        int qos, bool retain) {
+  if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return -1;
+  return esp_mqtt_client_publish(mqtt_client, topic,
+                                 static_cast<const char *>(payload), length,
+                                 qos, retain);
+}
+
+void receive_relayed_mqtt_command(const char *topic, const uint8_t *payload,
+                                  size_t length) {
+  if (!topic || (!payload && length)) return;
+  const int topic_length = std::strlen(topic);
+  if (sensor_script_handle_mqtt_command(
+          topic, topic_length, reinterpret_cast<const char *>(payload), length,
+          mqtt_config.project_id, mqtt_config.username)) return;
+  esp_mqtt_event_t event{};
+  event.topic = const_cast<char *>(topic);
+  event.topic_len = topic_length;
+  event.data = reinterpret_cast<char *>(const_cast<uint8_t *>(payload));
+  event.data_len = length;
+  event.total_data_len = length;
+  event.current_data_offset = 0;
+  handle_ota_command(&event);
+}
+
+esp_err_t ensure_mqtt_relay() {
+  if (mqtt_relay_started) return ESP_OK;
+  const esp_err_t result = mqtt_l2_relay_init(
+      halow_config.wifi_upstream, device_serial, publish_mqtt_direct,
+      receive_relayed_mqtt_command);
+  if (result == ESP_OK) {
+    mqtt_relay_started = true;
+    halow_set_batman_callback(mqtt_l2_relay_receive);
+  }
+  return result;
+}
 
 void enqueue_script_telemetry(const SensorScriptValue *values, size_t count) {
   if (!values || !count || !telemetry_queue || !mqtt_config.client_id[0]) return;
@@ -489,11 +529,15 @@ void handle_ota_command(const esp_mqtt_event_handle_t event) {
 
 void halow_ready() {
   xEventGroupSetBits(state_events, kNetworkConnected);
-  show_device_status("HALOW CONNECTED",
-                     xEventGroupGetBits(state_events) & kMqttConfigured
-                         ? "CONNECTING MQTT"
-                         : "MQTT SETUP REQUIRED");
-  start_mqtt();
+  if (halow_config.wifi_upstream) {
+    show_device_status("HALOW CONNECTED",
+                       xEventGroupGetBits(state_events) & kMqttConfigured
+                           ? "CONNECTING MQTT"
+                           : "MQTT SETUP REQUIRED");
+    start_mqtt();
+  } else {
+    show_device_status("HALOW CONNECTED", "WAITING FOR MQTT GATEWAY");
+  }
 }
 
 void show_device_status(const char *title, const char *status) {
@@ -872,6 +916,8 @@ void connect_halow_task(void *) {
 
 esp_err_t start_halow_connection() {
   if (halow_connect_started) return ESP_OK;
+  esp_err_t result = ensure_mqtt_relay();
+  if (result != ESP_OK) return result;
   if (xTaskCreate(connect_halow_task, "halow-connect", 6144, nullptr, 5, nullptr) != pdPASS)
     return ESP_ERR_NO_MEM;
   halow_connect_started = true;
@@ -998,10 +1044,13 @@ void gateway_telemetry_task(void *) {
 
 void telemetry_publish_task(void *) {
   while (true) {
-    xEventGroupWaitBits(state_events, kMqttConnected, pdFALSE, pdTRUE, portMAX_DELAY);
+    const EventBits_t required = halow_config.wifi_upstream
+                                     ? kMqttConnected : kNetworkConnected;
+    xEventGroupWaitBits(state_events, required, pdFALSE, pdTRUE, portMAX_DELAY);
     RemoteBeacon remote{};
     if (xQueueReceive(telemetry_queue, &remote, portMAX_DELAY) != pdTRUE) continue;
-    if (!(xEventGroupGetBits(state_events) & kMqttConnected)) continue;
+    if (halow_config.wifi_upstream &&
+        !(xEventGroupGetBits(state_events) & kMqttConnected)) continue;
 
     cJSON *batch = cJSON_CreateArray();
     if (!batch) {
@@ -1012,7 +1061,8 @@ void telemetry_publish_task(void *) {
     append_remote_telemetry(batch, &remote, 1);
     char *payload = cJSON_PrintUnformatted(batch);
     int message_id = -1;
-    if (payload && (xEventGroupGetBits(state_events) & kMqttConnected)) {
+    if (payload && (!halow_config.wifi_upstream ||
+                    (xEventGroupGetBits(state_events) & kMqttConnected))) {
       char topic[384]{};
       std::snprintf(topic, sizeof(topic),
                     "projects/%s/devices/%s/telemetry/%s",
@@ -1020,7 +1070,7 @@ void telemetry_publish_task(void *) {
       // Telemetry is periodic and may be dropped during an outage. QoS 0 keeps
       // stalled publishes out of the MQTT retransmission outbox so they cannot
       // exhaust the heap needed for TLS reconnection.
-      message_id = esp_mqtt_client_publish(mqtt_client, topic, payload, 0, 0, 0);
+      message_id = mqtt_l2_relay_publish(topic, payload, std::strlen(payload), 0, false);
       if (message_id >= 0)
         ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
     }
@@ -1055,16 +1105,20 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
   auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
   if (event_id == MQTT_EVENT_CONNECTED) {
     xEventGroupSetBits(state_events, kMqttConnected);
+    mqtt_l2_relay_set_gateway_online(halow_config.wifi_upstream);
     show_device_status("MQTT CONNECTED", device_serial);
     char command_topic[384]{};
     std::snprintf(command_topic, sizeof(command_topic),
-                  "projects/%s/devices/%s/commands/#",
+                  halow_config.wifi_upstream
+                      ? "projects/%s/devices/+/commands/#"
+                      : "projects/%s/devices/%s/commands/#",
                   mqtt_config.project_id, mqtt_config.username);
     const int subscription_id = esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
     ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)", command_topic, subscription_id);
     publish_saved_ota_result();
   } else if (event_id == MQTT_EVENT_DISCONNECTED) {
     xEventGroupClearBits(state_events, kMqttConnected);
+    mqtt_l2_relay_set_gateway_online(false);
     show_device_status("MQTT STATUS", "DISCONNECTED - RETRYING");
     ESP_LOGW(kTag, "MQTT disconnected");
   } else if (event_id == MQTT_EVENT_DATA && event) {
@@ -1073,6 +1127,13 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
     ESP_LOGI(kTag, "Command received topic=%.*s payload=%.*s",
              topic_length, event->topic, data_length, event->data);
     const bool complete = event->current_data_offset == 0 && event->data_len == event->total_data_len;
+    if (complete) {
+      char topic[384]{};
+      if (event->topic_len > 0 && event->topic_len < static_cast<int>(sizeof(topic))) {
+        std::memcpy(topic, event->topic, event->topic_len);
+        if (mqtt_l2_relay_forward_command(topic, event->data, event->data_len, 1, false)) return;
+      }
+    }
     if (complete && sensor_script_handle_mqtt_command(
                         event->topic, event->topic_len, event->data, event->data_len,
                         mqtt_config.project_id, mqtt_config.username)) {

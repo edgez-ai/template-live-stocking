@@ -1,5 +1,5 @@
 idf_component_register(
-  SRCS "sensor_script.cpp" "main.cpp" "halow_network.cpp"
+  SRCS "sensor_script.cpp" "main.cpp" "halow_network.cpp" "mqtt_l2_relay.cpp"
        "../nrf54/src/usb_control.pb.c"
        "../nrf54/src/nanopb/pb_common.c"
        "../nrf54/src/nanopb/pb_decode.c"
