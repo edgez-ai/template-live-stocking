@@ -78,6 +78,8 @@
         { "key": "topic", "type": "varchar", "size": 320, "required": true, "array": false },
         { "key": "payload", "type": "varchar", "size": 10000, "required": true, "array": false },
         { "key": "location", "type": "point", "required": false, "array": false },
+        { "key": "icon", "type": "varchar", "size": 32, "required": false, "array": false },
+        { "key": "markerColor", "type": "varchar", "size": 32, "required": false, "array": false },
         { "key": "receivedAt", "type": "varchar", "size": 40, "required": true, "array": false }
       ],
       "indexes": [

@@ -48,6 +48,11 @@ export function installDatabase() {
   ensure("telemetry.location column",
     ["tables-db", "get-column", ...telemetry, "--key", "location"],
     ["tables-db", "create-point-column", ...telemetry, "--key", "location"]);
+  for (const [key, size] of [["icon", "32"], ["markerColor", "32"]]) {
+    ensure(`telemetry.${key} column`,
+      ["tables-db", "get-column", ...telemetry, "--key", key],
+      ["tables-db", "create-string-column", ...telemetry, "--key", key, "--size", size]);
+  }
   stringColumn("receivedAt", "40");
   ensure("telemetry received-at index",
     ["tables-db", "get-index", ...telemetry, "--key", "received-at"],

@@ -4,7 +4,7 @@ import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
-type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; receivedAt: string };
+type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";

@@ -313,6 +313,17 @@ function locationOf(payload) {
     ? { latitude, longitude } : null;
 }
 
+function mapAppearanceOf(device) {
+  const icon = typeof device.metadata?.icon === "string" && device.metadata.icon.length <= 32
+    ? device.metadata.icon : null;
+  const markerColor = typeof device.metadata?.markerColor === "string" && device.metadata.markerColor.length <= 32
+    ? device.metadata.markerColor : null;
+  return {
+    ...(icon ? { icon } : {}),
+    ...(markerColor ? { markerColor } : {}),
+  };
+}
+
 function localMeters(point, center, rotation = 0) {
   const latitude = (point.latitude - center.latitude) * 111320;
   const longitude = (point.longitude - center.longitude) * 111320 * Math.cos(center.latitude * Math.PI / 180);
@@ -547,6 +558,7 @@ export default async function main({ req, res, error, log = () => {} }) {
         payload: JSON.stringify(entry),
         receivedAt,
         ...(location ? { location: [location.longitude, location.latitude] } : {}),
+        ...mapAppearanceOf(target),
       }, readPermissions);
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);

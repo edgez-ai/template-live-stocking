@@ -21,14 +21,14 @@ type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowCha
 type CachedSnapshot = { version: 1; user: CurrentUser; farms: CachedFarm[]; devices: Device[]; telemetry: CachedTelemetry[] };
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
-type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; receivedAt: string };
+type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type GeofenceShape = "circle" | "oval" | "rectangle" | "polygon";
 type GeofenceArea = Models.Row & { farmId: string; name: string; shape: GeofenceShape; geometry: string };
 type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
 type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
-type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "location" | "receivedAt">;
+type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "location" | "icon" | "markerColor" | "receivedAt">;
 type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
@@ -363,8 +363,8 @@ async function cacheSnapshot(user: CurrentUser, farms: Farm[], devices: Device[]
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
   const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
     ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor } }));
-  const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, location, receivedAt }) =>
-    ({ $id, deviceId, serial, channel, topic, payload, location, receivedAt }));
+  const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, location, icon, markerColor, receivedAt }) =>
+    ({ $id, deviceId, serial, channel, topic, payload, location, icon, markerColor, receivedAt }));
   const safeUser: CurrentUser = { $id: user.$id, email: user.email, name: user.name, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
   try {
     await AsyncStorage.multiSet([

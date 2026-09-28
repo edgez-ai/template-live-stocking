@@ -15,9 +15,9 @@ const { default: main } = await import("./main.js");
 const gatewayId = "11111111-1111-4111-8111-111111111111";
 const remoteId = "22222222-2222-4222-8222-222222222222";
 const devices = new Map([
-  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", metadata: { farmId: "farm-a" },
+  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", metadata: { farmId: "farm-a", icon: "gateway", markerColor: "blue" },
     $permissions: ['read("team:farm-a")'] }],
-  [remoteId, { $id: remoteId, serial: "112233445566", metadata: { farmId: "farm-a" },
+  [remoteId, { $id: remoteId, serial: "112233445566", metadata: { farmId: "farm-a", icon: "tracker", markerColor: "orange" },
     $permissions: ['read("team:farm-a")'] }],
 ]);
 const originalFetch = globalThis.fetch;
@@ -133,6 +133,8 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
     [[gatewayId, "AABBCCDDEEFF"], [remoteId, "112233445566"]]);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
   assert.deepEqual(rows[1].data.location, [18, 59.3]);
+  assert.deepEqual({ icon: rows[1].data.icon, markerColor: rows[1].data.markerColor },
+    { icon: "tracker", markerColor: "orange" });
   assert.deepEqual(rows[1].permissions, devices.get(remoteId).$permissions);
   assert.equal(timeseriesWrites.length, 1);
   assert.match(timeseriesWrites[0].data, new RegExp(`device_${remoteId}.*sensor_battery_voltage=3\\.7`));

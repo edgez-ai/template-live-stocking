@@ -92,6 +92,8 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    The latest TablesDB telemetry row also stores the same fix in a spatially
    indexed `location` point using `[longitude, latitude]`, allowing queries such
    as `Query.distanceLessThan("location", [longitude, latitude], radiusMeters)`.
+   Its `icon` and `markerColor` fields mirror Device metadata so a spatial query
+   returns everything needed to draw the device marker.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
 
