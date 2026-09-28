@@ -1,7 +1,6 @@
 #include "mqtt_l2_relay.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -24,7 +23,12 @@ constexpr int64_t kGatewayMaxAgeUs = 15 * 1000000LL;
 constexpr size_t kPeerCount = 16;
 constexpr size_t kAssemblyCount = 4;
 
-enum class FrameType : uint8_t { kAdvertise = 1, kPublish = 2, kCommand = 3 };
+enum class FrameType : uint8_t {
+  kAdvertise = 1,
+  kPublish = 2,
+  kCommand = 3,
+  kPeerAdvertise = 4,
+};
 
 #pragma pack(push, 1)
 struct Header {
@@ -83,42 +87,20 @@ mqtt_l2_command_fn_t command_callback;
 QueueHandle_t delivery_queue;
 portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 
-bool gateway_topic_for_relay(const char *source_topic, char *gateway_topic,
-                             size_t gateway_topic_size) {
-  constexpr char marker[] = "/devices/";
-  if (!source_topic || !gateway_topic || !gateway_topic_size || !local_serial[0])
-    return false;
-  const char *serial = std::strstr(source_topic, marker);
-  if (!serial) return false;
-  serial += sizeof(marker) - 1;
-  const char *suffix = std::strchr(serial, '/');
-  if (!suffix) return false;
-  const size_t prefix_length = static_cast<size_t>(serial - source_topic);
-  const int written = std::snprintf(gateway_topic, gateway_topic_size, "%.*s%s%s",
-                                    static_cast<int>(prefix_length), source_topic,
-                                    local_serial, suffix);
-  return written > 0 && static_cast<size_t>(written) < gateway_topic_size;
-}
-
-void remember_peer(const char *topic, const uint8_t mac[6]) {
-  constexpr char marker[] = "/devices/";
-  const char *start = std::strstr(topic, marker);
-  if (!start) return;
-  start += sizeof(marker) - 1;
-  const char *end = std::strchr(start, '/');
-  const size_t length = end ? static_cast<size_t>(end - start) : std::strlen(start);
+void remember_peer_serial(const uint8_t *serial, size_t length,
+                          const uint8_t mac[6]) {
   if (!length || length > 36) return;
   Peer *slot = nullptr;
   Peer *oldest = &peers[0];
   for (auto &peer : peers) {
     if (peer.used && std::strlen(peer.serial) == length &&
-        std::memcmp(peer.serial, start, length) == 0) { slot = &peer; break; }
+        std::memcmp(peer.serial, serial, length) == 0) { slot = &peer; break; }
     if (!peer.used && !slot) slot = &peer;
     if (peer.seen_us < oldest->seen_us) oldest = &peer;
   }
   if (!slot) slot = oldest;
   slot->used = true;
-  std::memcpy(slot->serial, start, length);
+  std::memcpy(slot->serial, serial, length);
   slot->serial[length] = '\0';
   std::memcpy(slot->mac, mac, 6);
   slot->seen_us = esp_timer_get_time();
@@ -203,25 +185,16 @@ void delivery_task(void *) {
   while (true) {
     if (xQueueReceive(delivery_queue, &delivery, portMAX_DELAY) != pdTRUE) continue;
     if (delivery->type == FrameType::kPublish && is_gateway && publish_callback) {
-      char gateway_topic[kMaxTopic + 1]{};
-      if (!gateway_topic_for_relay(delivery->topic, gateway_topic,
-                                   sizeof(gateway_topic))) {
-        ESP_LOGW(kTag, "Dropped relayed publish with invalid topic: %s",
-                 delivery->topic);
+      // A leaf sends only its JSON payload over BATMAN-adv. An empty topic tells
+      // the gateway callback to publish beneath its own telemetry/status topic.
+      const int message_id = publish_callback(
+          "", delivery->payload, delivery->length, delivery->qos,
+          delivery->retain);
+      if (message_id >= 0) {
+        ESP_LOGI(kTag, "Relayed BATMAN payload to gateway MQTT status (%d)",
+                 message_id);
       } else {
-        // The payload stays byte-for-byte unchanged and carries the leaf's
-        // Appwrite clientId. Publish it beneath the authenticated gateway's
-        // serial so EMQX's per-device ACL accepts it; the ingestion function
-        // uses clientId to store the row against the leaf device.
-        const int message_id = publish_callback(
-            gateway_topic, delivery->payload, delivery->length, delivery->qos,
-            delivery->retain);
-        if (message_id >= 0) {
-          ESP_LOGI(kTag, "Relayed %s as %s (%d)", delivery->topic,
-                   gateway_topic, message_id);
-        } else {
-          ESP_LOGW(kTag, "Could not relay %s: MQTT is offline", delivery->topic);
-        }
+        ESP_LOGW(kTag, "Could not relay BATMAN payload: MQTT is offline");
       }
     } else if (delivery->type == FrameType::kCommand && !is_gateway && command_callback) {
       command_callback(delivery->topic, delivery->payload, delivery->length);
@@ -231,10 +204,21 @@ void delivery_task(void *) {
 }
 
 void advertise_task(void *) {
-  const uint8_t frame[] = {'E', 'Z', 'M', 'Q', kVersion,
-                           static_cast<uint8_t>(FrameType::kAdvertise)};
+  const uint8_t gateway_frame[] = {
+      'E', 'Z', 'M', 'Q', kVersion,
+      static_cast<uint8_t>(FrameType::kAdvertise)};
   while (true) {
-    if (is_gateway && gateway_online) (void)halow_broadcast_batman(frame, sizeof(frame));
+    if (is_gateway && gateway_online) {
+      (void)halow_broadcast_batman(gateway_frame, sizeof(gateway_frame));
+    } else if (!is_gateway && gateway_seen_us && local_serial[0] &&
+               esp_timer_get_time() - gateway_seen_us < kGatewayMaxAgeUs) {
+      uint8_t peer_frame[6 + sizeof(local_serial) - 1] = {
+          'E', 'Z', 'M', 'Q', kVersion,
+          static_cast<uint8_t>(FrameType::kPeerAdvertise)};
+      const size_t serial_length = std::strlen(local_serial);
+      std::memcpy(peer_frame + 6, local_serial, serial_length);
+      (void)halow_send_batman(gateway_mac, peer_frame, 6 + serial_length);
+    }
     vTaskDelay(pdMS_TO_TICKS(3000));
   }
 }
@@ -266,7 +250,9 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
                           int qos, bool retain) {
   if (is_gateway) return publish_callback ? publish_callback(topic, payload, length, qos, retain) : -1;
   if (!mqtt_l2_relay_gateway_available()) return -1;
-  return send_message(FrameType::kPublish, gateway_mac, topic, payload, length,
+  // The MQTT topic belongs to the upstream gateway and is deliberately not
+  // carried over BATMAN-adv. Only the JSON payload is fragmented and sent.
+  return send_message(FrameType::kPublish, gateway_mac, "", payload, length,
                       qos, retain) == ESP_OK ? static_cast<int>(esp_random() & 0x7fffffff) : -1;
 }
 
@@ -282,13 +268,20 @@ bool mqtt_l2_relay_forward_command(const char *topic, const void *payload,
 void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
                            size_t length) {
   if (!originator || !data) return;
-  if (length == 6 && std::memcmp(data, "EZMQ", 4) == 0 && data[4] == kVersion &&
-      data[5] == static_cast<uint8_t>(FrameType::kAdvertise)) {
-    if (!is_gateway) {
-      std::memcpy(gateway_mac, originator, 6);
-      gateway_seen_us = esp_timer_get_time();
+  if (length >= 6 && std::memcmp(data, "EZMQ", 4) == 0 && data[4] == kVersion) {
+    const auto control_type = static_cast<FrameType>(data[5]);
+    if (control_type == FrameType::kAdvertise && length == 6) {
+      if (!is_gateway) {
+        std::memcpy(gateway_mac, originator, 6);
+        gateway_seen_us = esp_timer_get_time();
+      }
+      return;
     }
-    return;
+    if (control_type == FrameType::kPeerAdvertise && is_gateway &&
+        length > 6 && length <= 42) {
+      remember_peer_serial(data + 6, length - 6, originator);
+      return;
+    }
   }
   if (length < sizeof(Header)) return;
   Header header;
@@ -306,7 +299,7 @@ void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
     std::memcpy(item->topic, data + sizeof(Header), header.topic_length);
     item->topic[header.topic_length] = '\0';
   }
-  if (!item->topic[0]) return;
+  if (type == FrameType::kCommand && !item->topic[0]) return;
   if (header.fragment_length) {
     std::memcpy(item->payload + header.fragment_offset,
                 data + sizeof(Header) + header.topic_length, header.fragment_length);
@@ -314,7 +307,6 @@ void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
   item->received += header.fragment_length;
   item->updated_us = esp_timer_get_time();
   if (item->received != item->total_length) return;
-  if (is_gateway) remember_peer(item->topic, originator);
   Delivery *delivery = static_cast<Delivery *>(heap_caps_malloc(
       sizeof(Delivery) + item->total_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (delivery) {

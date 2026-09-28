@@ -213,10 +213,14 @@ test("gateway topology upserts direct links and marks missing peers inactive", a
   assert.equal(topologyRows[0].active, false);
 });
 
-test("remote devices cannot report gateway topology", async () => {
-  const result = await publish([{ clientId: remoteId, topology: { links: [] } }]);
-  assert.equal(result.status, 403);
-  assert.equal(topologyRows.length, 0);
+test("relayed devices report topology under their own device identity", async () => {
+  const result = await publish([{ clientId: remoteId, topology: { links: [{
+    peerId: gatewayId, peerRadioMac: "02:11:22:33:44:55", rssi: -61, ageMs: 500,
+  }] } }]);
+  assert.equal(result.status, 201);
+  assert.equal(topologyRows.length, 1);
+  assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
+  assert.equal(topologyRows[0].peerDeviceId, gatewayId);
 });
 
 test("a topology report rejects duplicate peers", async () => {

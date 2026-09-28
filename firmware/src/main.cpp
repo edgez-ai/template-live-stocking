@@ -153,6 +153,13 @@ void handle_ota_command(const esp_mqtt_event_handle_t event);
 int publish_mqtt_direct(const char *topic, const void *payload, size_t length,
                         int qos, bool retain) {
   if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return -1;
+  char gateway_status_topic[384]{};
+  if (!topic || !topic[0]) {
+    std::snprintf(gateway_status_topic, sizeof(gateway_status_topic),
+                  "projects/%s/devices/%s/telemetry/status",
+                  mqtt_config.project_id, mqtt_config.username);
+    topic = gateway_status_topic;
+  }
   return esp_mqtt_client_publish(mqtt_client, topic,
                                  static_cast<const char *>(payload), length,
                                  qos, retain);
@@ -1071,8 +1078,13 @@ void telemetry_publish_task(void *) {
       // stalled publishes out of the MQTT retransmission outbox so they cannot
       // exhaust the heap needed for TLS reconnection.
       message_id = mqtt_l2_relay_publish(topic, payload, std::strlen(payload), 0, false);
-      if (message_id >= 0)
-        ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
+      if (message_id >= 0) {
+        if (halow_config.wifi_upstream)
+          ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
+        else
+          ESP_LOGI(kTag, "Telemetry JSON payload sent over BATMAN-adv (%d)",
+                   message_id);
+      }
     }
     cJSON_free(payload);
     cJSON_Delete(batch);

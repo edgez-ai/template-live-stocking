@@ -328,10 +328,14 @@ export default async function main({ req, res, error, log = () => {} }) {
 
   const body = bodyOf(req);
   const deviceId = eventDeviceId(req);
+  let loggedPayload = body.payload ?? null;
+  if (typeof loggedPayload === "string") {
+    try { loggedPayload = JSON.parse(loggedPayload); } catch { /* Log the invalid string below. */ }
+  }
   log(JSON.stringify({
     mqttDeviceId: deviceId,
     topic: typeof body.topic === "string" ? body.topic : "",
-    payload: body.payload ?? null,
+    payload: loggedPayload,
   }));
   if (!deviceId || body.event !== "message.publish") {
     return json(res, { accepted: false, reason: "not_mqtt_publish_event" }, 202);
@@ -425,12 +429,9 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      if (entry.topology && targetId !== deviceId) {
-        return json(res, { error: "Only the publishing gateway can report topology" }, 403);
-      }
       const topologyPeers = [];
       for (const link of entry.topology?.links || []) {
-        if (link.peerId === deviceId) return json(res, { error: "A topology link cannot target its gateway" }, 400);
+        if (link.peerId === targetId) return json(res, { error: "A topology link cannot target its reporting device" }, 400);
         const peer = await getDevice(req, link.peerId);
         if (!peer || peer.$id !== link.peerId || !device.metadata?.farmId || peer.metadata?.farmId !== device.metadata.farmId) {
           return json(res, { error: "Topology peer is not an Appwrite device in the gateway farm" }, 403);
@@ -461,7 +462,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       await reconcileOtaUpdate(tables, target, entry, readPermissions, receivedAt);
       if (entry.downlink) await syncDownlink(tables, device, target, entry.downlink, readPermissions, receivedAt);
       if (entry.topology) {
-        await syncTopology(tables, device, entry.topology.links, topologyPeers, readPermissions, receivedAt);
+        await syncTopology(tables, target, entry.topology.links, topologyPeers, readPermissions, receivedAt);
       }
       telemetryIds.push(row.$id);
     }
