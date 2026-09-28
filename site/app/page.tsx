@@ -4,7 +4,7 @@ import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
-type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
+type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
@@ -491,10 +491,13 @@ export default function Home() {
     return latest;
   }, [telemetry]);
   const selectedDevice = devices.find((device) => device.$id === selectedDeviceId);
+  const selectedLatestTelemetry = selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined;
+  const selectedGateway = selectedLatestTelemetry?.gatewayDeviceId
+    ? devices.find((device) => device.$id === selectedLatestTelemetry.gatewayDeviceId) : undefined;
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
-  const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
-  const selectedFirmwareVersion = firmwareVersionOf(selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined);
+  const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatestTelemetry) : "";
+  const selectedFirmwareVersion = firmwareVersionOf(selectedLatestTelemetry);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
   const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
@@ -548,6 +551,7 @@ export default function Home() {
           {selectedDevice ? <>
             <button className="mobile-back" onClick={() => { setDeleteConfirm(false); setMobileDetailOpen(false); }}>‹ All devices</button>
             <div className="detail-heading"><div><p className="eyebrow">DEVICE · {selectedDevice.serial}</p><h2>{selectedDevice.name}</h2></div><div className="detail-actions"><span className={`status ${selectedStatus === "Online" ? "online" : "offline"}`}><i />{selectedStatus}</span><button className="delete-device" onClick={() => setDeleteConfirm(true)}>Delete</button></div></div>
+            <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedLatestTelemetry.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedLatestTelemetry.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>

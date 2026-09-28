@@ -131,6 +131,8 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map(({ data }) => [data.deviceId, data.serial]),
     [[gatewayId, "AABBCCDDEEFF"], [remoteId, "112233445566"]]);
+  assert.equal(rows[0].data.gatewayDeviceId, null);
+  assert.equal(rows[1].data.gatewayDeviceId, gatewayId);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
   assert.deepEqual(rows[1].data.location, [18, 59.3]);
   assert.deepEqual({ icon: rows[1].data.icon, markerColor: rows[1].data.markerColor },
@@ -173,6 +175,7 @@ test("legacy single-device telemetry remains accepted", async () => {
   assert.equal(result.status, 201);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].data.deviceId, gatewayId);
+  assert.equal(rows[0].data.gatewayDeviceId, null);
 });
 
 test("sensor indexes become named fields and GPS remains numeric", async () => {

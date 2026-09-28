@@ -7,7 +7,8 @@ Function validates `projects/<projectId>/devices/<serial>/telemetry/<channel>`
 against the actual Appwrite Device and copies its read permissions to that
 device's latest telemetry row. A JSON array is accepted for gateway batches. Each entry's
 `clientId` selects the Appwrite device that owns that reading; remote devices
-must belong to the gateway's farm. Every reading is written to measurement
+must belong to the gateway's farm. Relayed rows reference the MQTT topic device
+through `gatewayDeviceId`; direct telemetry clears that optional field. Every reading is written to measurement
 `device_<deviceId>` in the project's Time Series Store, with numeric sensors as
 named fields such as `sensor_temperature` and `sensor_battery_voltage`.
 Latitude and longitude are stored as numeric `lat` and `lon` fields compatible

@@ -38,6 +38,9 @@ export function installDatabase() {
     ["tables-db", "create-table", ...telemetry, "--name", "Latest telemetry", "--row-security", "true"]);
   run(["tables-db", "update-table", ...telemetry, "--name", "Latest telemetry", "--row-security", "true"]);
   stringColumn("deviceId", "36");
+  ensure("telemetry.gatewayDeviceId column",
+    ["tables-db", "get-column", ...telemetry, "--key", "gatewayDeviceId"],
+    ["tables-db", "create-string-column", ...telemetry, "--key", "gatewayDeviceId", "--size", "36"]);
   stringColumn("serial", "36");
   stringColumn("channel", "160");
   ensure("telemetry.status column",
@@ -60,6 +63,9 @@ export function installDatabase() {
   ensure("telemetry device index",
     ["tables-db", "get-index", ...telemetry, "--key", "device-id"],
     ["tables-db", "create-index", ...telemetry, "--key", "device-id", "--type", "unique", "--columns", "deviceId"]);
+  ensure("telemetry gateway device index",
+    ["tables-db", "get-index", ...telemetry, "--key", "gateway-device-id"],
+    ["tables-db", "create-index", ...telemetry, "--key", "gateway-device-id", "--type", "key", "--columns", "gatewayDeviceId"]);
   ensure("telemetry location spatial index",
     ["tables-db", "get-index", ...telemetry, "--key", "location-spatial"],
     ["tables-db", "create-index", ...telemetry, "--key", "location-spatial", "--type", "spatial", "--columns", "location"]);

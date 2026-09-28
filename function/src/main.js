@@ -551,6 +551,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       const location = locationOf(entry);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
+        gatewayDeviceId: target.$id === device.$id ? null : device.$id,
         serial: target.serial,
         channel: route.channel,
         status: typeof entry.status === "string" && entry.status ? entry.status : "online",

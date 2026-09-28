@@ -72,6 +72,7 @@
       "enabled": true,
       "columns": [
         { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": false, "array": false },
         { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "channel", "type": "varchar", "size": 160, "required": true, "array": false },
         { "key": "status", "type": "varchar", "size": 32, "required": false, "array": false },
@@ -85,6 +86,7 @@
       "indexes": [
         { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
         { "key": "device-id", "type": "unique", "attributes": ["deviceId"] },
+        { "key": "gateway-device-id", "type": "key", "attributes": ["gatewayDeviceId"] },
         { "key": "location-spatial", "type": "spatial", "attributes": ["location"] }
       ]
     },

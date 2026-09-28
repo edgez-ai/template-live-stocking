@@ -55,6 +55,10 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .mobile-back { display: none; }
 .detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .detail-heading h2 { margin: 0; font-size: clamp(28px, 3vw, 40px); letter-spacing: -1.2px; }
+.telemetry-route { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; color: #59716f; }
+.telemetry-route span { color: #0a8c87; font-size: 9px; font-weight: 900; letter-spacing: .9px; }
+.telemetry-route strong { color: #0a3037; font-size: 12px; }
+.telemetry-route small { color: #718783; font-size: 9px; font-family: monospace; }
 .detail-actions { display: flex; align-items: center; gap: 14px; }
 .delete-device { padding: 9px 12px; border: 1px solid #e2a89c; border-radius: 9px; color: #b9472f; background: #fff3f0; font-size: 9px; font-weight: 900; text-transform: uppercase; }
 .delete-confirm { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 18px; padding: 16px 18px; border: 1px solid #e8b5aa; border-radius: 14px; background: #fff4f1; }
