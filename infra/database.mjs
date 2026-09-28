@@ -45,6 +45,9 @@ export function installDatabase() {
     ["tables-db", "create-string-column", ...telemetry, "--key", "status", "--size", "32"]);
   stringColumn("topic", "320");
   stringColumn("payload", "10000");
+  ensure("telemetry.location column",
+    ["tables-db", "get-column", ...telemetry, "--key", "location"],
+    ["tables-db", "create-point-column", ...telemetry, "--key", "location"]);
   stringColumn("receivedAt", "40");
   ensure("telemetry received-at index",
     ["tables-db", "get-index", ...telemetry, "--key", "received-at"],
@@ -52,6 +55,9 @@ export function installDatabase() {
   ensure("telemetry device index",
     ["tables-db", "get-index", ...telemetry, "--key", "device-id"],
     ["tables-db", "create-index", ...telemetry, "--key", "device-id", "--type", "unique", "--columns", "deviceId"]);
+  ensure("telemetry location spatial index",
+    ["tables-db", "get-index", ...telemetry, "--key", "location-spatial"],
+    ["tables-db", "create-index", ...telemetry, "--key", "location-spatial", "--type", "spatial", "--columns", "location"]);
 
   const topology = ["--database-id", config.databaseId, "--table-id", config.topologyTableId];
   ensure("topology links table",

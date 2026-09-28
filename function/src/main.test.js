@@ -132,6 +132,7 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
   assert.deepEqual(rows.map(({ data }) => [data.deviceId, data.serial]),
     [[gatewayId, "AABBCCDDEEFF"], [remoteId, "112233445566"]]);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
+  assert.deepEqual(rows[1].data.location, [18, 59.3]);
   assert.deepEqual(rows[1].permissions, devices.get(remoteId).$permissions);
   assert.equal(timeseriesWrites.length, 1);
   assert.match(timeseriesWrites[0].data, new RegExp(`device_${remoteId}.*sensor_battery_voltage=3\\.7`));

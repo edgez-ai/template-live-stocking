@@ -89,6 +89,9 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    indexes are stored under text fields such as `sensor_temperature` and
    `sensor_battery_voltage`; GPS is stored as numeric `lat` and `lon` fields so
    Flux's built-in `experimental/geo` package can shape and range-filter it.
+   The latest TablesDB telemetry row also stores the same fix in a spatially
+   indexed `location` point using `[longitude, latitude]`, allowing queries such
+   as `Query.distanceLessThan("location", [longitude, latitude], radiusMeters)`.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
 

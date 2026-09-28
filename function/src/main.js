@@ -537,6 +537,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       telemetryLine(target, entry, route.channel, receivedAt, index)));
     const telemetryIds = [];
     for (const { entry, target, readPermissions, topologyPeers } of targets) {
+      const location = locationOf(entry);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
         serial: target.serial,
@@ -545,6 +546,7 @@ export default async function main({ req, res, error, log = () => {} }) {
         topic,
         payload: JSON.stringify(entry),
         receivedAt,
+        ...(location ? { location: [location.longitude, location.latitude] } : {}),
       }, readPermissions);
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);

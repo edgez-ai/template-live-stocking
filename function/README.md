@@ -11,7 +11,9 @@ must belong to the gateway's farm. Every reading is written to measurement
 `device_<deviceId>` in the project's Time Series Store, with numeric sensors as
 named fields such as `sensor_temperature` and `sensor_battery_voltage`.
 Latitude and longitude are stored as numeric `lat` and `lon` fields compatible
-with Flux's built-in `experimental/geo` package. Repeated `clientId` entries remain separate time-series
+with Flux's built-in `experimental/geo` package. The latest TablesDB row stores
+the same fix as an indexed `location` point in `[longitude, latitude]` order for
+native spatial distance queries. Repeated `clientId` entries remain separate time-series
 points, while TablesDB keeps only the last reading and status for each device.
 A legacy single JSON object follows the same path for the publishing device.
 The unified `status` payload may include an integer `batteryVoltageMv` from

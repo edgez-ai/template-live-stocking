@@ -77,11 +77,13 @@
         { "key": "status", "type": "varchar", "size": 32, "required": false, "array": false },
         { "key": "topic", "type": "varchar", "size": 320, "required": true, "array": false },
         { "key": "payload", "type": "varchar", "size": 10000, "required": true, "array": false },
+        { "key": "location", "type": "point", "required": false, "array": false },
         { "key": "receivedAt", "type": "varchar", "size": 40, "required": true, "array": false }
       ],
       "indexes": [
         { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
-        { "key": "device-id", "type": "unique", "attributes": ["deviceId"] }
+        { "key": "device-id", "type": "unique", "attributes": ["deviceId"] },
+        { "key": "location-spatial", "type": "spatial", "attributes": ["location"] }
       ]
     },
     {
