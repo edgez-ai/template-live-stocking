@@ -97,9 +97,32 @@ export function exists(args) {
   return run(args, { capture: true, allowFailure: true, probe: true }).status === 0;
 }
 
+function commandOutput(result) {
+  return `${result.stdout || ""}\n${result.stderr || ""}`;
+}
+
+function isAlreadyPresent(result) {
+  return /already exists|same id already exists|duplicate/i.test(commandOutput(result));
+}
+
+export function isMissing(result) {
+  return /not found|could not be found|does not exist|404/i.test(commandOutput(result));
+}
+
 export function ensure(label, probeArgs, createArgs) {
   if (exists(probeArgs)) return console.log(`Kept existing ${label}`);
-  run(createArgs);
+  if (dryRun) {
+    run(createArgs);
+    return;
+  }
+  // The solution plan and installer can run concurrently. Treat a duplicate
+  // create as success when the other reconciler won the race.
+  const result = run(createArgs, { capture: true, allowFailure: true });
+  if (result.status !== 0) {
+    if (isAlreadyPresent(result)) return console.log(`Kept existing ${label}`);
+    process.stderr.write(commandOutput(result));
+    throw new Error(`Could not create ${label}`);
+  }
   console.log(`Created ${label}`);
 }
 

@@ -2,8 +2,8 @@ import {
   config,
   configureClient,
   dryRun,
-  exists,
   functionDomain,
+  isMissing,
   run,
   webDomain,
 } from "./appwrite.mjs";
@@ -14,11 +14,14 @@ function removeIfPresent(label, probeArgs, deleteArgs) {
     run(deleteArgs);
     return;
   }
-  if (!exists(probeArgs)) {
-    console.log(`Skipped missing ${label}`);
-    return;
+  // Delete directly instead of trusting a read probe: deployment API keys can
+  // have write scope without the corresponding read scope.
+  const result = run(deleteArgs, { capture: true, allowFailure: true });
+  if (result.status !== 0) {
+    if (isMissing(result)) return console.log(`Skipped missing ${label}`);
+    process.stderr.write(`${result.stdout || ""}\n${result.stderr || ""}`);
+    throw new Error(`Could not delete ${label}`);
   }
-  run(deleteArgs);
   console.log(`Deleted ${label}`);
 }
 
