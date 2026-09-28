@@ -1,6 +1,7 @@
 #include "mqtt_l2_relay.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -81,6 +82,23 @@ mqtt_l2_publish_fn_t publish_callback;
 mqtt_l2_command_fn_t command_callback;
 QueueHandle_t delivery_queue;
 portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
+
+bool gateway_topic_for_relay(const char *source_topic, char *gateway_topic,
+                             size_t gateway_topic_size) {
+  constexpr char marker[] = "/devices/";
+  if (!source_topic || !gateway_topic || !gateway_topic_size || !local_serial[0])
+    return false;
+  const char *serial = std::strstr(source_topic, marker);
+  if (!serial) return false;
+  serial += sizeof(marker) - 1;
+  const char *suffix = std::strchr(serial, '/');
+  if (!suffix) return false;
+  const size_t prefix_length = static_cast<size_t>(serial - source_topic);
+  const int written = std::snprintf(gateway_topic, gateway_topic_size, "%.*s%s%s",
+                                    static_cast<int>(prefix_length), source_topic,
+                                    local_serial, suffix);
+  return written > 0 && static_cast<size_t>(written) < gateway_topic_size;
+}
 
 void remember_peer(const char *topic, const uint8_t mac[6]) {
   constexpr char marker[] = "/devices/";
@@ -185,8 +203,26 @@ void delivery_task(void *) {
   while (true) {
     if (xQueueReceive(delivery_queue, &delivery, portMAX_DELAY) != pdTRUE) continue;
     if (delivery->type == FrameType::kPublish && is_gateway && publish_callback) {
-      publish_callback(delivery->topic, delivery->payload, delivery->length,
-                       delivery->qos, delivery->retain);
+      char gateway_topic[kMaxTopic + 1]{};
+      if (!gateway_topic_for_relay(delivery->topic, gateway_topic,
+                                   sizeof(gateway_topic))) {
+        ESP_LOGW(kTag, "Dropped relayed publish with invalid topic: %s",
+                 delivery->topic);
+      } else {
+        // The payload stays byte-for-byte unchanged and carries the leaf's
+        // Appwrite clientId. Publish it beneath the authenticated gateway's
+        // serial so EMQX's per-device ACL accepts it; the ingestion function
+        // uses clientId to store the row against the leaf device.
+        const int message_id = publish_callback(
+            gateway_topic, delivery->payload, delivery->length, delivery->qos,
+            delivery->retain);
+        if (message_id >= 0) {
+          ESP_LOGI(kTag, "Relayed %s as %s (%d)", delivery->topic,
+                   gateway_topic, message_id);
+        } else {
+          ESP_LOGW(kTag, "Could not relay %s: MQTT is offline", delivery->topic);
+        }
+      }
     } else if (delivery->type == FrameType::kCommand && !is_gateway && command_callback) {
       command_callback(delivery->topic, delivery->payload, delivery->length);
     }

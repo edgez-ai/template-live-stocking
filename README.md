@@ -63,6 +63,11 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    `projects/<projectId>/devices/<serial>/telemetry/<channel>`. Appwrite's EMQX
    ACL allows that serial to publish only beneath its own telemetry/events
    topics and subscribe only beneath its own commands topic.
+   A HaLow-only leaf sends that MQTT topic and payload over BATMAN-adv-lite.
+   The upstream gateway keeps the payload unchanged but replaces the topic's
+   device serial with its own before publishing, so the gateway ACL accepts the
+   message. The payload's Appwrite `clientId` still assigns the telemetry row
+   and read permissions to the leaf device.
    Firmware reads the HT-HC33 battery ADC every 30 seconds and publishes one
    `status` message with online state, optional `batteryVoltageMv` in millivolts,
    optional provisioning coordinates, and its recently observed direct HaLow
