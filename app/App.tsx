@@ -443,10 +443,30 @@ function TopologyCard({ device, links }: { device: Device; links: TopologyLink[]
   </View>;
 }
 
+function PasswordField({ value, onChangeText, placeholder, accessibilityName, maxLength, variant = "light" }: { value: string; onChangeText: (value: string) => void; placeholder: string; accessibilityName: string; maxLength?: number; variant?: "light" | "dark" }) {
+  const [visible, setVisible] = useState(false);
+  const dark = variant === "dark";
+  return <View style={[styles.passwordField, dark && styles.passwordFieldDark]}>
+    <TextInput
+      style={[styles.passwordInput, dark && styles.passwordInputDark]}
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      placeholderTextColor={dark ? "#718a83" : undefined}
+      secureTextEntry={!visible}
+      maxLength={maxLength}
+      autoCapitalize="none"
+      autoCorrect={false}
+    />
+    <Pressable style={styles.visibilityButton} onPress={() => setVisible((current) => !current)} accessibilityRole="button" accessibilityLabel={`${visible ? "Hide" : "Show"} ${accessibilityName}`} accessibilityState={{ checked: visible }}>
+      <Ionicons name={visible ? "eye-outline" : "eye-off-outline"} size={24} color={dark ? "#8cb0ad" : "#59716f"} />
+    </Pressable>
+  </View>;
+}
+
 function FarmFields({ value, onChange, onPickLocation }: { value: FarmDetails; onChange: (value: FarmDetails) => void; onPickLocation: () => void }) {
   const set = (key: keyof FarmDetails, text: string) => onChange({ ...value, [key]: text });
   const [openDropdown, setOpenDropdown] = useState<"country" | "channel" | null>(null);
-  const [passphraseVisible, setPassphraseVisible] = useState(false);
   const channels = channelsForCountry(value.country);
   const selectedCountry = halowCountries.find((country) => country.code === value.country);
   const selectedChannel = channels.find((channel) => String(channel.number) === value.halowChannel);
@@ -464,12 +484,7 @@ function FarmFields({ value, onChange, onPickLocation }: { value: FarmDetails; o
     <Text style={styles.fieldLabel}>MESH ID</Text>
     <TextInput style={styles.inputLight} value={value.meshId} onChangeText={(text) => set("meshId", text)} placeholder="Mesh ID" maxLength={32} autoCapitalize="none" />
     <Text style={styles.fieldLabel}>MESH PASSPHRASE</Text>
-    <View style={styles.passphraseField}>
-      <TextInput style={styles.passphraseInput} value={value.meshPassphrase} onChangeText={(text) => set("meshPassphrase", text)} placeholder="At least 8 characters" secureTextEntry={!passphraseVisible} maxLength={63} autoCapitalize="none" />
-      <Pressable style={styles.visibilityButton} onPress={() => setPassphraseVisible((visible) => !visible)} accessibilityRole="button" accessibilityLabel={passphraseVisible ? "Hide mesh passphrase" : "Show mesh passphrase"} accessibilityState={{ checked: passphraseVisible }}>
-        <Ionicons name={passphraseVisible ? "eye-outline" : "eye-off-outline"} size={24} color="#59716f" />
-      </Pressable>
-    </View>
+    <PasswordField value={value.meshPassphrase} onChangeText={(text) => set("meshPassphrase", text)} placeholder="At least 8 characters" accessibilityName="mesh passphrase" maxLength={63} />
   </>;
 }
 
@@ -1578,7 +1593,7 @@ export default function App() {
       <Text style={styles.authLabel}>EMAIL</Text>
       <TextInput style={styles.input} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor="#718a83" autoCapitalize="none" keyboardType="email-address" />
       <Text style={styles.authLabel}>PASSWORD</Text>
-      <TextInput style={styles.input} value={password} onChangeText={setPassword} placeholder="Password" placeholderTextColor="#718a83" secureTextEntry />
+      <PasswordField value={password} onChangeText={setPassword} placeholder="Password" accessibilityName="account password" variant="dark" />
       <Pressable style={styles.primary} onPress={() => authenticate(false)} disabled={busy}><Text style={styles.primaryText}>SIGN IN</Text></Pressable>
       <Pressable style={styles.secondary} onPress={() => authenticate(true)} disabled={busy}><Text style={styles.secondaryText}>CREATE ACCOUNT</Text></Pressable>
     </View></> : <View style={styles.dashboard}>
@@ -1769,8 +1784,8 @@ export default function App() {
               <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               {selectedBleDevice.supportsDeviceGps && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this device</Text></Pressable>}
-              {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "CURRENT PROVISIONING WI-FI PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><TextInput style={styles.inputLight} value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Factory provisioning password" : "PoP shown on the device"} autoCapitalize="none" autoCorrect={false} secureTextEntry={selectedBleDevice.transport === "softap"} /></>}
-              {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><TextInput style={styles.inputLight} value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" autoCapitalize="none" autoCorrect={false} secureTextEntry maxLength={63} /><Text style={styles.fieldHint}>This replaces the factory password when the device finishes provisioning.</Text></>}
+              {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "CURRENT PROVISIONING WI-FI PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><PasswordField value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Factory provisioning password" : "PoP shown on the device"} accessibilityName={selectedBleDevice.transport === "softap" ? "current provisioning Wi-Fi password" : "proof of possession"} /></>}
+              {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><PasswordField value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" accessibilityName="new device Wi-Fi password" maxLength={63} /><Text style={styles.fieldHint}>This replaces the factory password when the device finishes provisioning.</Text></>}
               <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim()) || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
@@ -1783,7 +1798,7 @@ export default function App() {
                 <Text style={styles.fieldLabel}>WI-FI SSID</Text>
                 <TextInput style={styles.inputLight} value={upstreamSsid} onChangeText={setUpstreamSsid} placeholder="Network name" maxLength={32} />
                 <Text style={styles.fieldLabel}>WI-FI PASSWORD</Text>
-                <TextInput style={styles.inputLight} value={upstreamPassword} onChangeText={setUpstreamPassword} placeholder="Leave blank for an open network" secureTextEntry maxLength={63} />
+                <PasswordField value={upstreamPassword} onChangeText={setUpstreamPassword} placeholder="Leave blank for an open network" accessibilityName="upstream Wi-Fi password" maxLength={63} />
                 <Pressable style={styles.primary} onPress={() => setProvisioningStep(4)} disabled={busy || !upstreamSsid.trim()}><Text style={styles.primaryText}>CONTINUE</Text></Pressable>
               </>}
             </>}
@@ -1842,7 +1857,7 @@ const styles = StyleSheet.create({
   settingsActions: { flexDirection: "row", gap: 10 }, settingsAction: { flex: 1 }, outlineButton: { minHeight: 54, borderRadius: 14, borderWidth: 1, borderColor: "#0a8c87", alignItems: "center", justifyContent: "center", marginTop: 5 }, outlineButtonText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, memberRow: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 }, memberInfo: { flex: 1, gap: 4 }, removeMemberText: { color: "#b9472f", fontSize: 10, fontWeight: "900" },
   iconChoices: { gap: 8, paddingVertical: 4 }, iconChoice: { minHeight: 58, minWidth: 72, gap: 3, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", alignItems: "center", justifyContent: "center" }, areaColorSwatch: { width: 24, height: 24, borderRadius: 12, borderWidth: 1, borderColor: "#0a303744" },
   selectField: { minHeight: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 }, selectText: { color: "#0a3037", fontSize: 14 }, optionList: { borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", overflow: "hidden" }, optionRow: { minHeight: 46, paddingHorizontal: 15, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
-  passphraseField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passphraseInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037" }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
+  passwordField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" }, passwordFieldDark: { height: 58, borderColor: "#36565b", borderRadius: 14, backgroundColor: "transparent" }, passwordInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037", fontSize: 14 }, passwordInputDark: { height: 56, paddingLeft: 17, color: "white", fontSize: 16 }, visibilityButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
   locationMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, mapCrosshair: { position: "absolute", left: "50%", top: "50%", marginLeft: -18, marginTop: -26, width: 36, height: 52, alignItems: "center", justifyContent: "center" }, mapCrosshairText: { color: "#0a8c87", fontSize: 42, fontWeight: "900", textShadowColor: "white", textShadowRadius: 4 }, locationFooter: { paddingHorizontal: 22, paddingVertical: 12, gap: 5, backgroundColor: "#f7faf9" },
   areaMapControls: { position: "absolute", right: 16, bottom: 20, gap: 8, alignItems: "flex-end" }, areaDimension: { gap: 4, alignItems: "flex-end" }, areaControlButtons: { flexDirection: "row", gap: 6 }, areaControl: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, areaControlText: { color: "white", fontSize: 28, fontWeight: "600" }, areaControlLabel: { color: "white", fontSize: 10, fontWeight: "800", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: "#092e35e8" },
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },

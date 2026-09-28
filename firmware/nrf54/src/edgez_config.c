@@ -730,14 +730,10 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_X,
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_Y,
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_Z,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_X,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_Y,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_Z,
 			};
 			const float imu_values[] = {
 				imu_sample.accel_m_s2[0], imu_sample.accel_m_s2[1],
-				imu_sample.accel_m_s2[2], imu_sample.gyro_rad_s[0],
-				imu_sample.gyro_rad_s[1], imu_sample.gyro_rad_s[2],
+				imu_sample.accel_m_s2[2],
 			};
 
 			for (size_t i = 0;
@@ -750,10 +746,9 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 				entry->which_value = ai_edgez_halow_SensorData_float_value_tag;
 				entry->value.float_value = imu_values[i];
 			}
-			LOG_DBG("IMU beacon sample accel=[%.3f %.3f %.3f] m/s2 gyro=[%.3f %.3f %.3f] rad/s",
+			LOG_DBG("IMU beacon sample accel=[%.3f %.3f %.3f] m/s2 low-power mode",
 				(double)imu_sample.accel_m_s2[0], (double)imu_sample.accel_m_s2[1],
-				(double)imu_sample.accel_m_s2[2], (double)imu_sample.gyro_rad_s[0],
-				(double)imu_sample.gyro_rad_s[1], (double)imu_sample.gyro_rad_s[2]);
+				(double)imu_sample.accel_m_s2[2]);
 		}
 	}
 	stream = pb_ostream_from_buffer(&out[off], out_cap - off);

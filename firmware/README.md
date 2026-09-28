@@ -35,6 +35,18 @@ again; after the next successful configuration it turns off again. Hold USER
 for five seconds, then release it to erase the NVS storage partition and reboot
 unprovisioned. This clears the saved HaLow and MQTT configuration and any old BLE bonds.
 
+Beacon and sensor profiles run the LSM6DS3TR-C accelerometer at 12.5 Hz in its
+low-power path and leave the gyroscope off. The nRF TWIM driver transfers each
+six-byte sample with EasyDMA. When the board's IMU INT1 connection is present,
+the sensor's embedded wake engine watches a roughly 2.5 m/s² threshold and the
+nRF sleeps instead of polling I2C; builds without the interrupt wire retain a
+12.5 Hz software fallback. Strong motion remains active for 15 seconds after
+the latest event. While
+active, HaLow beacons run every five seconds. At rest the firmware sends one
+beacon per minute, cleanly shuts down the Morse transceiver after confirmed RF
+transmission, and removes the HC01/KeepTeen radio power rail until the next
+beacon or motion wake-up.
+
 ## Seeed XIAO nRF54L15 Sense
 
 Build the official XIAO nRF54L15 Sense with the FGH100M shield using:
