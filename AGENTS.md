@@ -5,9 +5,10 @@ Read this file before changing this repository.
 ## Product
 
 Live Stocking is an authenticated Appwrite example for onboarding ESP32-S3
-devices and viewing MQTT telemetry. Web and mobile use Appwrite Auth and access
-TablesDB directly under row-level permissions. The Function is reserved for
-trusted MQTT ingestion and is the only MQTT-to-TablesDB writer.
+devices and viewing MQTT telemetry. Web and mobile use Appwrite Auth, read the
+latest state from TablesDB, and query history from the project Time Series Store
+under Appwrite permissions. The Function is reserved for trusted MQTT ingestion
+and is the only telemetry writer.
 
 ## Repository layout
 
@@ -24,12 +25,13 @@ trusted MQTT ingestion and is the only MQTT-to-TablesDB writer.
 | `README.md` | Setup guide and environment contract. |
 
 Keep these boundaries. Never expose `APPWRITE_API_KEY` to clients. Authenticated
-web and mobile clients read TablesDB directly; only the Function writes MQTT
-telemetry.
+web and mobile clients read latest state from TablesDB and history from Time
+Series; only the Function writes MQTT telemetry.
 
 Only mobile calls the Device API's create and credential endpoints. Web and
-mobile may list Devices and query `telemetry` directly with the active Appwrite
-session. Serial is the MQTT username and is unique within the Appwrite project.
+mobile may list Devices, read the latest `telemetry` row, and query the project
+Time Series Store with the active Appwrite session. Serial is the MQTT username
+and is unique within the Appwrite project.
 MQTT telemetry inherits only the built-in device's read permissions.
 
 Firmware derives serial as 12 uppercase Wi-Fi MAC hex characters, advertises

@@ -8,8 +8,10 @@ type Telemetry = Models.Row & { deviceId: string; serial: string; channel: strin
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
-type VoltagePoint = { timestamp: number; value: number };
-type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown };
+type SensorPoint = { timestamp: number; value: number };
+type SensorSeries = { field: string; label: string; color: string; points: SensorPoint[] };
+type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown; channel?: unknown };
+type HistoryReading = { timestamp: number; channel: string; payload: string };
 type SensorPayload = {
   batteryVoltageMv?: unknown;
   sensors?: { type?: unknown; value?: unknown }[];
@@ -38,6 +40,7 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "24h", label: "24 hours", duration: 24 * 60 * 60 * 1000 },
 ];
 const topologyRecentMs = 2 * 60 * 1000;
+const chartColors = ["#0a8c87", "#d47a1f", "#7c5ce5", "#d14b78", "#3977c3", "#6c8f2d", "#a75b32", "#53646f"];
 
 function measurementForDevice(deviceId: string) {
   return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
@@ -69,14 +72,39 @@ async function queryDeviceTimeseries(deviceId: string, duration: number) {
   return payload.rows || [];
 }
 
-function timeseriesPoints(rows: TimeseriesRow[], field: string, duration: number): VoltagePoint[] {
+function sensorLabel(field: string) {
+  return field.startsWith("sensor_") ? `Sensor ${field.slice("sensor_".length)}` : field;
+}
+
+function timeseriesSensorSeries(rows: TimeseriesRow[], duration: number): SensorSeries[] {
   const since = Date.now() - duration;
-  return rows.flatMap((row) => {
-    if (row._field !== field) return [];
+  const pointsByField = new Map<string, SensorPoint[]>();
+  for (const row of rows) {
+    if (typeof row._field !== "string" || !row._field.startsWith("sensor_")) continue;
     const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
     const value = typeof row._value === "number" ? row._value : Number(row._value);
-    return Number.isFinite(timestamp) && timestamp >= since && Number.isFinite(value) ? [{ timestamp, value }] : [];
-  }).sort((a, b) => a.timestamp - b.timestamp);
+    if (!Number.isFinite(timestamp) || timestamp < since || !Number.isFinite(value)) continue;
+    const points = pointsByField.get(row._field) || [];
+    points.push({ timestamp, value });
+    pointsByField.set(row._field, points);
+  }
+  return [...pointsByField.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+    .map(([field, points], index) => ({
+      field,
+      label: sensorLabel(field),
+      color: chartColors[index % chartColors.length],
+      points: points.sort((left, right) => left.timestamp - right.timestamp),
+    }));
+}
+
+function timeseriesReadings(rows: TimeseriesRow[]): HistoryReading[] {
+  return rows.flatMap((row) => {
+    if (row._field !== "payload" || typeof row._value !== "string") return [];
+    const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
+    if (!Number.isFinite(timestamp)) return [];
+    return [{ timestamp, channel: typeof row.channel === "string" ? row.channel : "telemetry", payload: row._value }];
+  }).sort((left, right) => right.timestamp - left.timestamp).slice(0, 10);
 }
 
 function errorMessage(error: unknown) {
@@ -162,13 +190,12 @@ function prettyPayload(payload: string) {
   catch { return payload; }
 }
 
-function SensorChart({ points, duration, unit, decimals, label, emptyMessage, temperature = false }: { points: VoltagePoint[]; duration: number; unit: string; decimals: number; label: string; emptyMessage: string; temperature?: boolean }) {
+function SensorChart({ series, duration }: { series: SensorSeries[]; duration: number }) {
   const width = 720;
   const height = 260;
   const inset = 28;
-  const sampled = points.length <= 240 ? points : points.filter((_, index) => index % Math.ceil(points.length / 240) === 0 || index === points.length - 1);
-  if (!points.length) return <div className="chart-empty">{emptyMessage}</div>;
-  const values = points.map((point) => point.value);
+  if (!series.length) return <div className="chart-empty">Select a sensor with data in this range.</div>;
+  const values = series.flatMap((item) => item.points.map((point) => point.value));
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const padding = Math.max(0.05, (rawMax - rawMin) * .15);
@@ -176,20 +203,24 @@ function SensorChart({ points, duration, unit, decimals, label, emptyMessage, te
   const max = rawMax + padding;
   const end = Date.now();
   const start = end - duration;
-  const coordinates = sampled.map((point) => ({
-    x: inset + Math.max(0, Math.min(1, (point.timestamp - start) / duration)) * (width - inset * 2),
-    y: inset + (1 - (point.value - min) / (max - min)) * (height - inset * 2),
-  }));
-  const path = coordinates.map((point) => `${point.x},${point.y}`).join(" ");
-  const last = coordinates[coordinates.length - 1];
 
   return <div className="chart-wrap">
-    <svg className={`chart ${temperature ? "temperature-chart" : ""}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} history line chart`}>
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Selected sensor history line chart">
       {[0, 1, 2, 3].map((line) => <line key={line} className="chart-grid" x1={inset} x2={width - inset} y1={inset + line * (height - inset * 2) / 3} y2={inset + line * (height - inset * 2) / 3} />)}
-      <polyline className="chart-line" points={path} />
-      <circle className="chart-dot" cx={last.x} cy={last.y} r="5" />
-      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(decimals)} {unit}</text>
-      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(decimals)} {unit}</text>
+      {series.map((item) => {
+        const sampled = item.points.length <= 240 ? item.points : item.points.filter((_, index) => index % Math.ceil(item.points.length / 240) === 0 || index === item.points.length - 1);
+        const coordinates = sampled.map((point) => ({
+          x: inset + Math.max(0, Math.min(1, (point.timestamp - start) / duration)) * (width - inset * 2),
+          y: inset + (1 - (point.value - min) / (max - min)) * (height - inset * 2),
+        }));
+        const last = coordinates[coordinates.length - 1];
+        return <g key={item.field}>
+          <polyline className="chart-line" style={{ stroke: item.color }} points={coordinates.map((point) => `${point.x},${point.y}`).join(" ")} />
+          {last && <circle className="chart-dot" style={{ fill: item.color }} cx={last.x} cy={last.y} r="5" />}
+        </g>;
+      })}
+      <text className="chart-label" x={width - 5} y={15} textAnchor="end">{rawMax.toFixed(2)}</text>
+      <text className="chart-label" x={width - 5} y={height - 5} textAnchor="end">{rawMin.toFixed(2)}</text>
     </svg>
   </div>;
 }
@@ -297,8 +328,9 @@ export default function Home() {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
-  const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
-  const [temperatureHistoryPoints, setTemperatureHistoryPoints] = useState<VoltagePoint[]>([]);
+  const [historySeries, setHistorySeries] = useState<SensorSeries[]>([]);
+  const [selectedSensorFields, setSelectedSensorFields] = useState<string[]>([]);
+  const [historyReadings, setHistoryReadings] = useState<HistoryReading[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -357,14 +389,20 @@ export default function Home() {
   }, [devices]);
 
   useEffect(() => {
-    if (!selectedDeviceId) { setHistoryPoints([]); setTemperatureHistoryPoints([]); return; }
+    if (!selectedDeviceId) { setHistorySeries([]); setHistoryReadings([]); return; }
     let active = true;
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
-    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
+    setHistoryLoading(true); setHistoryError(""); setHistorySeries([]); setHistoryReadings([]);
     queryDeviceTimeseries(selectedDeviceId, duration).then((rows) => {
       if (!active) return;
-      setHistoryPoints(timeseriesPoints(rows, `sensor_${batteryVoltageSensorType}`, duration));
-      setTemperatureHistoryPoints(timeseriesPoints(rows, `sensor_${temperatureSensorType}`, duration));
+      const series = timeseriesSensorSeries(rows, duration);
+      setHistorySeries(series);
+      setHistoryReadings(timeseriesReadings(rows));
+      setSelectedSensorFields((current) => {
+        const available = new Set(series.map((item) => item.field));
+        const retained = current.filter((field) => available.has(field));
+        return retained.length ? retained : series.slice(0, 3).map((item) => item.field);
+      });
     }).catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
@@ -455,23 +493,19 @@ export default function Home() {
   const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, latestTelemetryByDevice.get(selectedDevice.$id)) : "";
   const selectedFirmwareVersion = firmwareVersionOf(selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined);
-  const selectedTelemetry = telemetry.filter((row) => row.deviceId === selectedDeviceId).slice(0, 10);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
   const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
   const selectedFirmwareCurrent = sameFirmwareVersion(selectedFirmwareVersion, latestFirmwareVersion);
   const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
-  const historyStats = useMemo(() => {
-    if (!historyPoints.length) return null;
-    const values = historyPoints.map((point) => point.value);
-    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
-  }, [historyPoints]);
-  const temperatureHistoryStats = useMemo(() => {
-    if (!temperatureHistoryPoints.length) return null;
-    const values = temperatureHistoryPoints.map((point) => point.value);
-    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
-  }, [temperatureHistoryPoints]);
+  const selectedHistorySeries = historySeries.filter((series) => selectedSensorFields.includes(series.field));
+
+  function toggleSensor(field: string) {
+    setSelectedSensorFields((current) => current.includes(field)
+      ? current.filter((candidate) => candidate !== field)
+      : [...current, field]);
+  }
 
   function selectDevice(device: Device) {
     setSelectedDeviceId(device.$id);
@@ -484,7 +518,7 @@ export default function Home() {
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
     <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
-      <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read your permitted device and telemetry rows directly from Appwrite.</p></div>
+      <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read the latest device state from TablesDB and permitted history from Time Series.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void authenticate(false); }}>
         <h2>Operator access</h2>
         <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
@@ -492,7 +526,7 @@ export default function Home() {
         <div className="actions"><button disabled={busy}>Sign in</button><button className="secondary" type="button" disabled={busy} onClick={() => authenticate(true)}>Create account</button></div>
       </form>
     </section> : <section className="dashboard">
-      <div className="heading-row"><div><p className="eyebrow">SIGNED IN AS {user.email}</p><h1>Device telemetry</h1></div><span className="count">{devices.length} DEVICES · DIRECT TABLESDB READS</span></div>
+      <div className="heading-row"><div><p className="eyebrow">SIGNED IN AS {user.email}</p><h1>Device telemetry</h1></div><span className="count">{devices.length} DEVICES · TABLESDB LATEST · INFLUXDB HISTORY</span></div>
       <div className={`master-detail ${mobileDetailOpen ? "mobile-detail-open" : ""}`}>
         <aside className="device-master">
           <div className="master-heading"><div><p className="eyebrow">DEVICES</p><h2>Provisioned devices</h2></div><span>{devices.length}</span></div>
@@ -512,19 +546,24 @@ export default function Home() {
           {selectedDevice ? <>
             <button className="mobile-back" onClick={() => { setDeleteConfirm(false); setMobileDetailOpen(false); }}>‹ All devices</button>
             <div className="detail-heading"><div><p className="eyebrow">DEVICE · {selectedDevice.serial}</p><h2>{selectedDevice.name}</h2></div><div className="detail-actions"><span className={`status ${selectedStatus === "Online" ? "online" : "offline"}`}><i />{selectedStatus}</span><button className="delete-device" onClick={() => setDeleteConfirm(true)}>Delete</button></div></div>
-            {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing telemetry rows are not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
+            {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
-            <div className="chart-card"><header><div><h3>Battery voltage history</h3><p>Device battery ADC · {historyPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><SensorChart points={historyPoints} duration={activeRange.duration} unit="V" decimals={2} label="Battery voltage" emptyMessage="No battery voltage data in this range." /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
-            {historyStats && <div className="stats"><div><span>MIN</span><strong>{historyStats.min.toFixed(2)} V</strong></div><div><span>AVERAGE</span><strong>{historyStats.average.toFixed(2)} V</strong></div><div><span>MAX</span><strong>{historyStats.max.toFixed(2)} V</strong></div></div>}
-            <p className="sensor-note">Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</p>
+            <div className="chart-card"><header><div><h3>Sensor history</h3><p>InfluxDB · {selectedHistorySeries.reduce((total, series) => total + series.points.length, 0)} selected readings</p></div>{historyLoading && <span className="spinner" />}</header>
+              <div className="sensor-picker" aria-label="Sensors displayed in the history chart">{historySeries.map((series) => <label key={series.field} className={selectedSensorFields.includes(series.field) ? "selected" : ""}><input type="checkbox" checked={selectedSensorFields.includes(series.field)} onChange={() => toggleSensor(series.field)} /><i style={{ background: series.color }} />{series.label}<small>{series.points.length}</small></label>)}{!historyLoading && !historySeries.length && <span>No sensor fields found.</span>}</div>
+              <SensorChart series={selectedHistorySeries} duration={activeRange.duration} />
+              <footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}
+            </div>
+            {selectedHistorySeries.length > 0 && <div className="series-stats">{selectedHistorySeries.map((series) => {
+              const values = series.points.map((point) => point.value);
+              const latest = series.points[series.points.length - 1];
+              return <div key={series.field}><span><i style={{ background: series.color }} />{series.label}</span><strong>{latest.value.toFixed(2)}</strong><small>min {Math.min(...values).toFixed(2)} · avg {(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2)} · max {Math.max(...values).toFixed(2)}</small></div>;
+            })}</div>}
             <div className="metric-card temperature-metric"><span>TEMPERATURE · SENSOR TYPE 1</span><strong>{selectedTemperature ? `${selectedTemperature.value.toFixed(1)} °C` : "—"}</strong><small>{selectedTemperature ? `Updated ${relativeTime(selectedTemperature.row.receivedAt)}` : "No temperature readings received"}</small></div>
-            <div className="chart-card"><header><div><h3>Temperature history</h3><p>Unified Lua sensor · {temperatureHistoryPoints.length} readings</p></div>{historyLoading && <span className="spinner" />}</header><SensorChart points={temperatureHistoryPoints} duration={activeRange.duration} unit="°C" decimals={1} label="Temperature" emptyMessage="No temperature data in this range." temperature /><footer><span>{activeRange.label} ago</span><span>Now</span></footer>{historyError && <p className="inline-error">{historyError}</p>}</div>
-            {temperatureHistoryStats && <div className="stats temperature-stats"><div><span>MIN</span><strong>{temperatureHistoryStats.min.toFixed(1)} °C</strong></div><div><span>AVERAGE</span><strong>{temperatureHistoryStats.average.toFixed(1)} °C</strong></div><div><span>MAX</span><strong>{temperatureHistoryStats.max.toFixed(1)} °C</strong></div></div>}
             <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="sensor-script-card"><div><h3>Random temperature sensor</h3><p>Installs a Lua sample derived from the EdgeZ sensor definition. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the currently installed unified sensor script.</p>{selectedTemperature && <small>Latest temperature: {selectedTemperature.value.toFixed(1)} °C · {relativeTime(selectedTemperature.row.receivedAt)}</small>}{scriptMessage && <small>{scriptMessage}</small>}</div><button onClick={() => void deployRandomTemperatureSensor()} disabled={selectedStatus !== "Online" || scriptDeviceId === selectedDevice.$id}>{scriptDeviceId === selectedDevice.$id ? "Deploying…" : "Deploy sensor script"}</button></div>}
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>live-stocking-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
-            <div className="recent"><h3>Recent telemetry</h3>{selectedTelemetry.map((row) => <article key={row.$id}><header><code>{row.channel}</code><time>{new Date(row.receivedAt).toLocaleString()}</time></header><pre>{prettyPayload(row.payload)}</pre></article>)}{!selectedTelemetry.length && <p className="empty">No telemetry received yet.</p>}</div>
+            <div className="recent"><h3>Recent history</h3>{historyReadings.map((reading) => <article key={`${reading.timestamp}-${reading.channel}`}><header><code>{reading.channel}</code><time>{new Date(reading.timestamp).toLocaleString()}</time></header><pre>{prettyPayload(reading.payload)}</pre></article>)}{!historyReadings.length && <p className="empty">No time-series readings in this range.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>
       </div>

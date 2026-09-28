@@ -80,6 +80,13 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .chart-card > header { display: flex; align-items: center; justify-content: space-between; }
 .chart-card h3, .recent h3 { margin: 0; font-size: 17px; }
 .chart-card header p { margin: 4px 0 10px; color: #718783; font-size: 10px; }
+.sensor-picker { display: flex; flex-wrap: wrap; gap: 7px; margin: 2px 0 14px; }
+.sensor-picker > span { color: #718783; font-size: 11px; }
+.sensor-picker label { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid #d5e2df; border-radius: 999px; color: #59716f; background: #f7faf9; font-size: 10px; font-weight: 800; cursor: pointer; }
+.sensor-picker label.selected { border-color: #9bc9c4; color: #173f42; background: #e8f4f2; }
+.sensor-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.sensor-picker i, .series-stats i { width: 8px; height: 8px; border-radius: 50%; }
+.sensor-picker small { color: #819590; font-size: 9px; }
 .chart-wrap { width: 100%; overflow: hidden; border-radius: 14px; background: #f3f8f6; }
 .chart { display: block; width: 100%; min-height: 230px; }
 .chart-grid { stroke: #dce8e5; stroke-width: 1; }
@@ -97,6 +104,11 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .stats div { display: grid; padding: 14px; border-radius: 14px; background: white; }
 .stats span { color: #718783; font-size: 8px; font-weight: 900; letter-spacing: .7px; }
 .stats strong { margin-top: 3px; font-size: 20px; }
+.series-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
+.series-stats > div { display: grid; gap: 4px; padding: 14px; border-radius: 14px; background: white; }
+.series-stats span { display: flex; align-items: center; gap: 7px; color: #49635e; font-size: 9px; font-weight: 900; text-transform: uppercase; }
+.series-stats strong { color: #0a3037; font-size: 22px; }
+.series-stats small { color: #718783; font-size: 9px; }
 .sensor-note { margin: 12px 0 24px; color: #718783; font-size: 10px; text-align: center; }
 .topology-card { padding: 20px; border-radius: 18px; background: white; }
 .topology-card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
