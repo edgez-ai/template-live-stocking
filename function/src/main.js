@@ -321,13 +321,18 @@ async function getDevice(req, deviceId) {
   return response.json();
 }
 
-export default async function main({ req, res, error }) {
+export default async function main({ req, res, error, log = () => {} }) {
   if (!DATABASE_ID || !TELEMETRY_TABLE_ID) {
     return json(res, { error: "Function environment is incomplete" }, 500);
   }
 
   const body = bodyOf(req);
   const deviceId = eventDeviceId(req);
+  log(JSON.stringify({
+    mqttDeviceId: deviceId,
+    topic: typeof body.topic === "string" ? body.topic : "",
+    payload: body.payload ?? null,
+  }));
   if (!deviceId || body.event !== "message.publish") {
     return json(res, { accepted: false, reason: "not_mqtt_publish_event" }, 202);
   }
