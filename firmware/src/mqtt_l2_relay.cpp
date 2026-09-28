@@ -118,9 +118,10 @@ esp_err_t send_relay_frame(const uint8_t route_destination[6],
   if (!payload || !length || length + kEthernetHeaderLength > kFrameLimit + kEthernetHeaderLength)
     return ESP_ERR_INVALID_SIZE;
   uint8_t frame[kFrameLimit + kEthernetHeaderLength];
-  if (broadcast) std::memset(frame, 0xff, 6);
-  else if (route_destination && ethernet_destination)
+  if (ethernet_destination)
     std::memcpy(frame, ethernet_destination, 6);
+  else if (broadcast)
+    std::memset(frame, 0xff, 6);
   else
     return ESP_ERR_INVALID_ARG;
   std::memcpy(frame + 6, local_mac, 6);
@@ -165,8 +166,9 @@ bool peer_for_serial(const char *serial, size_t length, uint8_t mac[6]) {
 }
 
 esp_err_t send_message(FrameType type, const uint8_t route_destination[6],
-                       const uint8_t ethernet_destination[6], const char *topic,
-                       const void *payload, size_t length, int qos, bool retain) {
+                       const uint8_t ethernet_destination[6], bool broadcast_route,
+                       const char *topic, const void *payload, size_t length,
+                       int qos, bool retain) {
   if (!topic || (!payload && length) || length > kMaxPayload) return ESP_ERR_INVALID_ARG;
   const size_t topic_length = std::strlen(topic);
   if (topic_length > kMaxTopic) return ESP_ERR_INVALID_SIZE;
@@ -187,7 +189,7 @@ esp_err_t send_message(FrameType type, const uint8_t route_destination[6],
     if (chunk) std::memcpy(frame + sizeof(header) + included_topic,
                            static_cast<const uint8_t *>(payload) + offset, chunk);
     const esp_err_t result = send_relay_frame(
-        route_destination, ethernet_destination, false, frame,
+        route_destination, ethernet_destination, broadcast_route, frame,
         sizeof(header) + included_topic + chunk);
     if (result != ESP_OK) return result;
     offset += chunk;
@@ -263,7 +265,7 @@ void advertise_task(void *) {
       const size_t serial_length = std::strlen(local_serial);
       std::memcpy(peer_frame + 6, local_serial, serial_length);
       const esp_err_t result = send_relay_frame(
-          gateway_mac, gateway_l2_mac, false, peer_frame, 6 + serial_length);
+          gateway_mac, gateway_l2_mac, true, peer_frame, 6 + serial_length);
       if (result == ESP_OK) {
         ESP_LOGI(kTag,
                  "Peer advertisement sent route=" MACSTR " ethernet=" MACSTR,
@@ -320,7 +322,10 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
   }
   // The MQTT topic belongs to the upstream gateway and is deliberately not
   // carried over BATMAN-adv. Only the JSON payload is fragmented and sent.
-  return send_message(FrameType::kPublish, gateway_mac, gateway_l2_mac, "",
+  // Mixed ESP32/Linux meshes reliably forward BATMAN broadcast frames across
+  // a shared HaLow hard interface. Keep the inner Ethernet destination
+  // unicast so only the selected MQTT gateway consumes the opaque payload.
+  return send_message(FrameType::kPublish, gateway_mac, gateway_l2_mac, true, "",
                       payload, length, qos, retain) == ESP_OK
       ? static_cast<int>(esp_random() & 0x7fffffff) : -1;
 }
@@ -346,7 +351,7 @@ bool mqtt_l2_relay_forward_command(const char *topic, const void *payload,
       static_cast<int>(serial_length), serial, command + 1);
   if (written < 0 || written >= static_cast<int>(sizeof(leaf_topic))) return false;
   // Keep the broker payload opaque; only the routing topic is reconstructed.
-  return send_message(FrameType::kCommand, destination, destination, leaf_topic,
+  return send_message(FrameType::kCommand, destination, destination, true, leaf_topic,
                       payload, length, qos, retain) == ESP_OK;
 }
 
@@ -358,6 +363,10 @@ void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
   if (length < kEthernetHeaderLength ||
       data[12] != static_cast<uint8_t>(kEtherType >> 8) ||
       data[13] != static_cast<uint8_t>(kEtherType)) return;
+  const bool ethernet_broadcast =
+      data[0] == 0xff && data[1] == 0xff && data[2] == 0xff &&
+      data[3] == 0xff && data[4] == 0xff && data[5] == 0xff;
+  if (!ethernet_broadcast && std::memcmp(data, local_mac, 6) != 0) return;
   ethernet_source = data + 6;
   ESP_LOGI(kTag,
            "RX relay frame originator=" MACSTR " src=" MACSTR

@@ -137,6 +137,7 @@ char provisioning_pop[16]{};
 char device_serial[24]{};
 char device_status[96] = "STARTING";
 bool provisioning_active = false;
+bool restart_after_provisioning = false;
 bool halow_connect_started = false;
 bool mqtt_relay_started = false;
 QueueHandle_t beacon_queue;
@@ -889,6 +890,7 @@ esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_leng
   if (result == ESP_OK) {
     mqtt_config = candidate;
     xEventGroupSetBits(state_events, kMqttConfigured);
+    restart_after_provisioning = provisioning_active;
     ESP_LOGI(kTag, "MQTT, mesh, and location configuration stored for serial %s", mqtt_config.username);
     show_device_status("DEVICE CONFIG", "CREDENTIALS STORED");
   } else {
@@ -905,10 +907,6 @@ esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_leng
 }
 
 void connect_halow_task(void *) {
-  if (provisioning_active) {
-    vTaskDelay(pdMS_TO_TICKS(750));
-    network_prov_mgr_stop_provisioning();
-  }
   show_device_status("HALOW STATUS", "CONNECTING");
   const esp_err_t result = halow_connect(
       halow_config.mesh_id, halow_config.passphrase,
@@ -919,6 +917,21 @@ void connect_halow_task(void *) {
     ESP_LOGE(kTag, "HaLow connect failed: %s", esp_err_to_name(result));
   }
   vTaskDelete(nullptr);
+}
+
+void finish_provisioning_task(void *) {
+  // Let the custom-endpoint response reach the mobile client before closing
+  // BLE. NETWORK_PROV_END performs deinitialization and schedules the reboot.
+  vTaskDelay(pdMS_TO_TICKS(750));
+  if (provisioning_active) network_prov_mgr_stop_provisioning();
+  vTaskDelete(nullptr);
+}
+
+void restart_task(void *) {
+  // Give the final provisioning event and BLE teardown time to complete before
+  // rebooting into the lower-memory normal operating path.
+  vTaskDelay(pdMS_TO_TICKS(750));
+  esp_restart();
 }
 
 esp_err_t start_halow_connection() {
@@ -972,7 +985,15 @@ esp_err_t configure_mesh(cJSON *root) {
   if (result == ESP_OK) {
     halow_config = candidate;
     if (location_provided) device_location = new_location;
-    if (!candidate.wifi_upstream) result = start_halow_connection();
+    if (!candidate.wifi_upstream) {
+      if (provisioning_active) {
+        if (xTaskCreate(finish_provisioning_task, "finish-provisioning", 3072,
+                        nullptr, 5, nullptr) != pdPASS)
+          result = ESP_ERR_NO_MEM;
+      } else {
+        result = start_halow_connection();
+      }
+    }
   }
   return result;
 }
@@ -1180,7 +1201,14 @@ void event_handler(void *, esp_event_base_t event_base, int32_t event_id, void *
       provisioning_active = false;
       network_prov_mgr_deinit();
       esp_event_handler_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, event_handler);
-      if (halow_config.wifi_upstream && halow_config.mesh_id[0]) {
+      if (restart_after_provisioning) {
+        show_device_status("PROVISION COMPLETE", "RESTARTING");
+        if (xTaskCreate(restart_task, "provision-restart", 2048, nullptr, 5,
+                        nullptr) != pdPASS) {
+          ESP_LOGE(kTag, "Could not schedule post-provisioning restart");
+          esp_restart();
+        }
+      } else if (halow_config.wifi_upstream && halow_config.mesh_id[0]) {
         const esp_err_t result = start_halow_connection();
         if (result != ESP_OK) ESP_LOGE(kTag, "Could not start HaLow mesh: %s", esp_err_to_name(result));
       }
