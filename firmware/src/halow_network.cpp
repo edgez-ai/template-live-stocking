@@ -89,6 +89,10 @@ bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
          mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
 }
 
+bool halow_get_local_mac(uint8_t mac[6]) {
+  return mac && mmwlan_get_mac_addr(mac) == MMWLAN_SUCCESS;
+}
+
 esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,
                             size_t length) {
   if (!radio_started || !destination || !data || !length) return ESP_ERR_INVALID_STATE;

@@ -1121,9 +1121,7 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
     show_device_status("MQTT CONNECTED", device_serial);
     char command_topic[384]{};
     std::snprintf(command_topic, sizeof(command_topic),
-                  halow_config.wifi_upstream
-                      ? "projects/%s/devices/+/commands/#"
-                      : "projects/%s/devices/%s/commands/#",
+                  "projects/%s/devices/%s/commands/#",
                   mqtt_config.project_id, mqtt_config.username);
     const int subscription_id = esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
     ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)", command_topic, subscription_id);

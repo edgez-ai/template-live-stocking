@@ -1488,22 +1488,16 @@ static bool power_down_halow(void)
 {
 	enum mmwlan_status status;
 
-	if (mmwlan_get_sta_state() != MMWLAN_STA_DISABLED) {
-		status = mmwlan_sta_disable();
-		if (status == MMWLAN_SUCCESS) {
-			return false;
-		}
-		if (status != MMWLAN_NOT_RUNNING) {
-			LOG_WRN("HaLow duty-cycle station disable deferred status=%d", status);
-			return false;
-		}
-	}
-
+	/* mmwlan_shutdown() already performs the clean station disconnect. Calling
+	 * mmwlan_sta_disable() first deadlocks the discovery-only mesh advertiser
+	 * while it waits for a VIF state transition that this mode never emits. */
+	LOG_INF("HaLow duty-cycle clean shutdown begin");
 	status = mmwlan_shutdown();
 	if (status != MMWLAN_SUCCESS && status != MMWLAN_NOT_RUNNING) {
 		LOG_WRN("HaLow duty-cycle shutdown deferred status=%d", status);
 		return false;
 	}
+	LOG_INF("HaLow duty-cycle clean shutdown complete status=%d", status);
 	if (HAS_HALOW_POWER_EN && halow_power_ready) {
 		int rc = gpio_pin_set_dt(&halow_power_en, 0);
 

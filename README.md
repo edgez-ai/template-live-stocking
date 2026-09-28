@@ -66,6 +66,10 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    A HaLow-only leaf sends only its JSON payload over BATMAN-adv-lite. The
    upstream gateway constructs its own `telemetry/status` MQTT topic and
    publishes the unchanged payload, so the gateway ACL accepts the message.
+   Commands take the reverse path under the gateway's own authorized namespace:
+   `commands/proxy/<leafSerial>/<command>`. The gateway removes that routing
+   prefix, restores the leaf's normal command topic, and forwards the MQTT
+   payload bytes unchanged over BATMAN-adv.
    The payload's Appwrite `clientId` assigns each telemetry and topology report
    and its read permissions to the originating leaf device.
    Firmware reads the HT-HC33 battery ADC every 30 seconds and publishes one

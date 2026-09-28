@@ -108,6 +108,14 @@ function isRecentTopology(link: TopologyLink) {
   return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
 }
 
+function mqttGatewayFor(device: Device, devices: Device[], topology: TopologyLink[]) {
+  if (device.metadata?.mqttGateway === true || topology.some((link) => isRecentTopology(link) && link.gatewayDeviceId === device.$id)) return undefined;
+  const link = topology.find((candidate) => isRecentTopology(candidate) && candidate.peerDeviceId === device.$id);
+  if (link) return link.gatewayDeviceId;
+  const farmId = device.metadata?.farmId;
+  return devices.find((candidate) => candidate.metadata?.mqttGateway === true && candidate.metadata?.farmId === farmId)?.$id;
+}
+
 function prettyPayload(payload: string) {
   try { return JSON.stringify(JSON.parse(payload), null, 2); }
   catch { return payload; }
@@ -203,13 +211,13 @@ async function deleteDevice(deviceId: string) {
   }
 }
 
-async function sendOtaCommand(deviceId: string) {
+async function sendOtaCommand(deviceId: string, gatewayDeviceId?: string) {
   if (!otaImageUrl) throw new Error("This deployment does not expose a supported source repository for OTA.");
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
-    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() } }),
+    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() }, gatewayDeviceId }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { message?: string };
@@ -217,13 +225,14 @@ async function sendOtaCommand(deviceId: string) {
   }
 }
 
-async function sendRandomTemperatureScript(deviceId: string, requestId: string) {
+async function sendRandomTemperatureScript(deviceId: string, requestId: string, gatewayDeviceId?: string) {
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
     body: JSON.stringify({
       command: "script",
+      gatewayDeviceId,
       payload: {
         action: "download",
         requestId,
@@ -371,7 +380,7 @@ export default function Home() {
     if (!window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
     setOtaDeviceId(selectedDevice.$id); setOtaMessage(""); setError("");
     try {
-      await sendOtaCommand(selectedDevice.$id);
+      await sendOtaCommand(selectedDevice.$id, mqttGatewayFor(selectedDevice, devices, topology));
       setOtaMessage("Update requested. The device will download, install, and restart in the background.");
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setOtaDeviceId(""); }
@@ -382,7 +391,7 @@ export default function Home() {
     if (!window.confirm(`Replace the active sensor script on ${selectedDevice.name} with the random temperature sample?`)) return;
     setScriptDeviceId(selectedDevice.$id); setScriptMessage(""); setError("");
     try {
-      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique());
+      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique(), mqttGatewayFor(selectedDevice, devices, topology));
       setScriptMessage(`Command sent. The first random temperature reading should arrive now, then every ${randomTemperatureIntervalSeconds} seconds.`);
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setScriptDeviceId(""); }

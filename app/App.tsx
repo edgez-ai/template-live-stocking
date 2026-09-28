@@ -385,6 +385,14 @@ function isRecentTopology(link: TopologyLink) {
   return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
 }
 
+function mqttGatewayFor(device: Device, devices: Device[], topology: TopologyLink[]) {
+  if (device.metadata?.mqttGateway === true || topology.some((link) => isRecentTopology(link) && link.gatewayDeviceId === device.$id)) return undefined;
+  const link = topology.find((candidate) => isRecentTopology(candidate) && candidate.peerDeviceId === device.$id);
+  if (link) return link.gatewayDeviceId;
+  const farmId = device.metadata?.farmId;
+  return devices.find((candidate) => candidate.metadata?.mqttGateway === true && candidate.metadata?.farmId === farmId)?.$id;
+}
+
 function SensorChart({ points, duration, unit, decimals, emptyMessage, color = "#0a8c87" }: { points: VoltagePoint[]; duration: number; unit: string; decimals: number; emptyMessage: string; color?: string }) {
   const [width, setWidth] = useState(0);
   const height = 210;
@@ -1211,6 +1219,7 @@ export default function App() {
       }
       const coordinates = deviceLocationChoice === "none" || deviceLocationChoice === "gps" ? null : coordinatesFromLocation(deviceLocation);
       if (deviceLocationChoice !== "none" && deviceLocationChoice !== "gps" && !coordinates) throw new Error("Choose a valid device location before provisioning.");
+      const mqttGateway = upstreamConnection === "wifi" || upstreamConnection === "ethernet";
       if (!appwriteDevice) {
         appwriteDevice = await deviceApi<Device>("", "POST", {
           serial,
@@ -1221,11 +1230,11 @@ export default function App() {
             Permission.update(Role.team(farm.teamId, "owner")),
             Permission.delete(Role.team(farm.teamId, "owner")),
           ],
-          metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget },
+          metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway },
         });
-      } else if (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget) {
+      } else if (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway) {
         appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
-          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget },
+          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway },
         });
       }
       const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
@@ -1296,8 +1305,9 @@ export default function App() {
         if (!otaImageUrl) { setError("This deployment does not expose a supported source repository for OTA."); return; }
         setBusy(true); setError("");
         try {
+          const gatewayDeviceId = mqttGatewayFor(device, devicesRef.current, topology);
           await deviceApi(`/${encodeURIComponent(device.$id)}/commands`, "POST", {
-            command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() },
+            command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() }, gatewayDeviceId,
           });
           Alert.alert("Update requested", "The device will download, install, and restart in the background.");
         } catch (caught) { setError(messageOf(caught)); }
@@ -1315,8 +1325,10 @@ export default function App() {
         { text: "Deploy", onPress: () => void (async () => {
           setScriptDeployingDeviceId(device.$id); setError("");
           try {
+            const gatewayDeviceId = mqttGatewayFor(device, devicesRef.current, topology);
             await deviceApi(`/${encodeURIComponent(device.$id)}/commands`, "POST", {
               command: "script",
+              gatewayDeviceId,
               payload: {
                 action: "download",
                 requestId: ID.unique(),

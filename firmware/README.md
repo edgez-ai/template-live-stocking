@@ -182,6 +182,10 @@ reading.
 The firmware also subscribes at QoS 1 to
 `projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.
+For a HaLow-only leaf, Appwrite publishes through the upstream gateway at
+`projects/<projectId>/devices/<gatewaySerial>/commands/proxy/<leafSerial>/<command>`.
+The gateway reconstructs the leaf's normal command topic and forwards the
+original payload bytes over BATMAN-adv without parsing or re-encoding them.
 
 Release builds provide `live-stocking-flash.bin`, a merged bootloader, partition
 table, and factory app image to flash at address `0x0`, and

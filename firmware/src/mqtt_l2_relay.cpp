@@ -1,6 +1,7 @@
 #include "mqtt_l2_relay.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "esp_heap_caps.h"
@@ -16,6 +17,8 @@ namespace {
 constexpr char kTag[] = "mqtt_l2";
 constexpr uint32_t kMagic = 0x455a4d51;  // EZMQ
 constexpr uint8_t kVersion = 1;
+constexpr uint16_t kEtherType = 0x88b5;
+constexpr size_t kEthernetHeaderLength = 14;
 constexpr size_t kFrameLimit = 480;
 constexpr size_t kMaxTopic = 383;
 constexpr size_t kMaxPayload = 16 * 1024;
@@ -72,7 +75,7 @@ struct Delivery {
   bool retain;
   size_t length;
   char topic[kMaxTopic + 1];
-  uint8_t payload[];
+  uint8_t *payload;
 };
 
 bool is_gateway;
@@ -86,6 +89,24 @@ mqtt_l2_publish_fn_t publish_callback;
 mqtt_l2_command_fn_t command_callback;
 QueueHandle_t delivery_queue;
 portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
+
+esp_err_t send_relay_frame(const uint8_t destination[6], bool broadcast,
+                           const uint8_t *payload, size_t length) {
+  if (!payload || !length || length + kEthernetHeaderLength > kFrameLimit + kEthernetHeaderLength)
+    return ESP_ERR_INVALID_SIZE;
+  uint8_t frame[kFrameLimit + kEthernetHeaderLength];
+  uint8_t source[6];
+  if (!halow_get_local_mac(source)) return ESP_ERR_INVALID_STATE;
+  if (broadcast) std::memset(frame, 0xff, 6);
+  else std::memcpy(frame, destination, 6);
+  std::memcpy(frame + 6, source, 6);
+  frame[12] = static_cast<uint8_t>(kEtherType >> 8);
+  frame[13] = static_cast<uint8_t>(kEtherType);
+  std::memcpy(frame + kEthernetHeaderLength, payload, length);
+  return broadcast
+      ? halow_broadcast_batman(frame, length + kEthernetHeaderLength)
+      : halow_send_batman(destination, frame, length + kEthernetHeaderLength);
+}
 
 void remember_peer_serial(const uint8_t *serial, size_t length,
                           const uint8_t mac[6]) {
@@ -106,16 +127,11 @@ void remember_peer_serial(const uint8_t *serial, size_t length,
   slot->seen_us = esp_timer_get_time();
 }
 
-bool peer_for_topic(const char *topic, uint8_t mac[6]) {
-  constexpr char marker[] = "/devices/";
-  const char *start = std::strstr(topic, marker);
-  if (!start) return false;
-  start += sizeof(marker) - 1;
-  const char *end = std::strchr(start, '/');
-  const size_t length = end ? static_cast<size_t>(end - start) : std::strlen(start);
+bool peer_for_serial(const char *serial, size_t length, uint8_t mac[6]) {
+  if (!serial || !length || length > 36) return false;
   for (const auto &peer : peers) {
     if (peer.used && std::strlen(peer.serial) == length &&
-        std::memcmp(peer.serial, start, length) == 0) {
+        std::memcmp(peer.serial, serial, length) == 0) {
       std::memcpy(mac, peer.mac, 6);
       return true;
     }
@@ -144,8 +160,8 @@ esp_err_t send_message(FrameType type, const uint8_t destination[6], const char 
     if (included_topic) std::memcpy(frame + sizeof(header), topic, included_topic);
     if (chunk) std::memcpy(frame + sizeof(header) + included_topic,
                            static_cast<const uint8_t *>(payload) + offset, chunk);
-    const esp_err_t result = halow_send_batman(
-        destination, frame, sizeof(header) + included_topic + chunk);
+    const esp_err_t result = send_relay_frame(
+        destination, false, frame, sizeof(header) + included_topic + chunk);
     if (result != ESP_OK) return result;
     offset += chunk;
     if (length == 0) break;
@@ -199,6 +215,7 @@ void delivery_task(void *) {
     } else if (delivery->type == FrameType::kCommand && !is_gateway && command_callback) {
       command_callback(delivery->topic, delivery->payload, delivery->length);
     }
+    heap_caps_free(delivery->payload);
     heap_caps_free(delivery);
   }
 }
@@ -209,7 +226,7 @@ void advertise_task(void *) {
       static_cast<uint8_t>(FrameType::kAdvertise)};
   while (true) {
     if (is_gateway && gateway_online) {
-      (void)halow_broadcast_batman(gateway_frame, sizeof(gateway_frame));
+      (void)send_relay_frame(nullptr, true, gateway_frame, sizeof(gateway_frame));
     } else if (!is_gateway && gateway_seen_us && local_serial[0] &&
                esp_timer_get_time() - gateway_seen_us < kGatewayMaxAgeUs) {
       uint8_t peer_frame[6 + sizeof(local_serial) - 1] = {
@@ -217,7 +234,7 @@ void advertise_task(void *) {
           static_cast<uint8_t>(FrameType::kPeerAdvertise)};
       const size_t serial_length = std::strlen(local_serial);
       std::memcpy(peer_frame + 6, local_serial, serial_length);
-      (void)halow_send_batman(gateway_mac, peer_frame, 6 + serial_length);
+      (void)send_relay_frame(gateway_mac, false, peer_frame, 6 + serial_length);
     }
     vTaskDelay(pdMS_TO_TICKS(3000));
   }
@@ -259,15 +276,36 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
 bool mqtt_l2_relay_forward_command(const char *topic, const void *payload,
                                    size_t length, int qos, bool retain) {
   if (!is_gateway || !topic) return false;
+  constexpr char devices_marker[] = "/devices/";
+  constexpr char proxy_marker[] = "/commands/proxy/";
+  const char *devices = std::strstr(topic, devices_marker);
+  const char *serial = std::strstr(topic, proxy_marker);
+  if (!devices || !serial || serial <= devices) return false;
+  serial += sizeof(proxy_marker) - 1;
+  const char *command = std::strchr(serial, '/');
+  if (!command || command == serial || !command[1]) return false;
   uint8_t destination[6];
-  if (!peer_for_topic(topic, destination)) return false;
-  return send_message(FrameType::kCommand, destination, topic, payload, length,
+  const size_t serial_length = static_cast<size_t>(command - serial);
+  if (!peer_for_serial(serial, serial_length, destination)) return false;
+  char leaf_topic[kMaxTopic + 1]{};
+  const int written = std::snprintf(
+      leaf_topic, sizeof(leaf_topic), "%.*s/devices/%.*s/commands/%s",
+      static_cast<int>(devices - topic), topic,
+      static_cast<int>(serial_length), serial, command + 1);
+  if (written < 0 || written >= static_cast<int>(sizeof(leaf_topic))) return false;
+  // Keep the broker payload opaque; only the routing topic is reconstructed.
+  return send_message(FrameType::kCommand, destination, leaf_topic, payload, length,
                       qos, retain) == ESP_OK;
 }
 
 void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
                            size_t length) {
   if (!originator || !data) return;
+  if (length < kEthernetHeaderLength ||
+      data[12] != static_cast<uint8_t>(kEtherType >> 8) ||
+      data[13] != static_cast<uint8_t>(kEtherType)) return;
+  data += kEthernetHeaderLength;
+  length -= kEthernetHeaderLength;
   if (length >= 6 && std::memcmp(data, "EZMQ", 4) == 0 && data[4] == kVersion) {
     const auto control_type = static_cast<FrameType>(data[5]);
     if (control_type == FrameType::kAdvertise && length == 6) {
@@ -308,15 +346,19 @@ void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
   item->updated_us = esp_timer_get_time();
   if (item->received != item->total_length) return;
   Delivery *delivery = static_cast<Delivery *>(heap_caps_malloc(
-      sizeof(Delivery) + item->total_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      sizeof(Delivery), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (delivery) {
     delivery->type = item->type;
     delivery->qos = item->qos;
     delivery->retain = item->retain;
     delivery->length = item->total_length;
     strlcpy(delivery->topic, item->topic, sizeof(delivery->topic));
-    std::memcpy(delivery->payload, item->payload, item->total_length);
-    if (xQueueSend(delivery_queue, &delivery, 0) != pdTRUE) heap_caps_free(delivery);
+    delivery->payload = item->payload;
+    if (xQueueSend(delivery_queue, &delivery, 0) == pdTRUE) {
+      item->payload = nullptr;
+    } else {
+      heap_caps_free(delivery);
+    }
   }
   heap_caps_free(item->payload);
   *item = {};
