@@ -36,8 +36,9 @@ hardware integration, and deployment requirements.
 
 The root `edgez.json` selects `appwrite.config.json` as the complete,
 version-controlled solution plan. **Deploy on EdgeZ** applies the auth methods,
-web and Android platforms, telemetry database and indexes, MQTT Function, Site,
-variables, domains, and both source deployments after project selection.
+web and Android platforms, project Time Series Store, latest-state database and
+indexes, MQTT Function, Site, variables, domains, and both source deployments
+after project selection.
 Its `buildInstance` accepts `tiny`, `small`, `medium`, or `large`; this template
 defaults to `tiny` for both Site and Function builds.
 

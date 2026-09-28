@@ -33,6 +33,14 @@
       "enabled": true
     }
   ],
+  "timeseriesStores": [
+    {
+      "$id": "<PROJECT_ID>",
+      "name": "Live Stocking telemetry",
+      "permissions": ["read(\"users\")"],
+      "enabled": true
+    }
+  ],
   "tables": [
     {
       "$id": "farms",

@@ -32,8 +32,8 @@ export async function installTimeseries() {
     await request("/timeseries/stores", {
       method: "POST",
       body: JSON.stringify({
-        name: `${config.name} telemetry`,
-        permissions: ['read("users")'],
+        name: config.timeseriesStoreName,
+        permissions: config.timeseriesStorePermissions,
       }),
     });
     console.log(`Created time-series Store ${config.projectId}`);

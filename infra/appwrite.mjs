@@ -17,9 +17,13 @@ const geofenceAlarmTable = appwriteConfig.tables?.find((table) => table.$id === 
 const database = appwriteConfig.tablesDB?.find(
   (candidate) => candidate.$id === telemetryTable?.databaseId,
 );
+const timeseriesStore = appwriteConfig.timeseriesStores?.find(
+  (candidate) => candidate.enabled !== false && candidate.$id === "<PROJECT_ID>",
+);
 if (!database || !telemetryTable || !topologyTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+    !timeseriesStore || !timeseriesStore.name || !Array.isArray(timeseriesStore.permissions) ||
     [topologyTable, farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
-  throw new Error("appwrite.config.json must define the farm, telemetry, topology, and geofence tables in the same database");
+  throw new Error("appwrite.config.json must define the Time Series Store and all Live Stocking tables");
 }
 
 const cli = path.join(infraDir, "node_modules", ".bin", "appwrite");
@@ -54,6 +58,8 @@ export const config = {
   projectId: process.env.APPWRITE_PROJECT_ID,
   projectName: process.env.APPWRITE_PROJECT_NAME,
   apiKey: process.env.APPWRITE_API_KEY,
+  timeseriesStoreName: timeseriesStore.name,
+  timeseriesStorePermissions: timeseriesStore.permissions,
   databaseId: database.$id,
   telemetryTableId: telemetryTable.$id,
   topologyTableId: topologyTable.$id,

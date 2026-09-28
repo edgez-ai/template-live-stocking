@@ -6,8 +6,11 @@ import { installSite } from "./site.mjs";
 import { installTimeseries } from "./timeseries.mjs";
 
 configureClient();
+// Reconcile the project-scoped Time Series Store first. This keeps it at the
+// same declarative layer as TablesDB and prevents unrelated Platform or Domain
+// failures from leaving the project without its Store.
+await installTimeseries();
 installAuth();
 installDatabase();
-await installTimeseries();
 installFunction();
 installSite();
