@@ -35,11 +35,14 @@ export function installDatabase() {
   const telemetry = ["--database-id", config.databaseId, "--table-id", config.telemetryTableId];
   ensure("telemetry table",
     ["tables-db", "get-table", ...telemetry],
-    ["tables-db", "create-table", ...telemetry, "--name", "Telemetry", "--row-security", "true"]);
-  run(["tables-db", "update-table", ...telemetry, "--row-security", "true"]);
+    ["tables-db", "create-table", ...telemetry, "--name", "Latest telemetry", "--row-security", "true"]);
+  run(["tables-db", "update-table", ...telemetry, "--name", "Latest telemetry", "--row-security", "true"]);
   stringColumn("deviceId", "36");
   stringColumn("serial", "36");
   stringColumn("channel", "160");
+  ensure("telemetry.status column",
+    ["tables-db", "get-column", ...telemetry, "--key", "status"],
+    ["tables-db", "create-string-column", ...telemetry, "--key", "status", "--size", "32"]);
   stringColumn("topic", "320");
   stringColumn("payload", "10000");
   stringColumn("receivedAt", "40");
@@ -48,10 +51,7 @@ export function installDatabase() {
     ["tables-db", "create-index", ...telemetry, "--key", "received-at", "--type", "key", "--columns", "receivedAt", "--orders", "DESC"]);
   ensure("telemetry device index",
     ["tables-db", "get-index", ...telemetry, "--key", "device-id"],
-    ["tables-db", "create-index", ...telemetry, "--key", "device-id", "--type", "key", "--columns", "deviceId"]);
-  ensure("telemetry device history index",
-    ["tables-db", "get-index", ...telemetry, "--key", "device-history"],
-    ["tables-db", "create-index", ...telemetry, "--key", "device-history", "--type", "key", "--columns", "deviceId", "receivedAt", "--orders", "ASC", "ASC"]);
+    ["tables-db", "create-index", ...telemetry, "--key", "device-id", "--type", "unique", "--columns", "deviceId"]);
 
   const topology = ["--database-id", config.databaseId, "--table-id", config.topologyTableId];
   ensure("topology links table",

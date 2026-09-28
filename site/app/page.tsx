@@ -9,6 +9,7 @@ type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gate
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type VoltagePoint = { timestamp: number; value: number };
+type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown };
 type SensorPayload = {
   batteryVoltageMv?: unknown;
   sensors?: { type?: unknown; value?: unknown }[];
@@ -37,6 +38,46 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "24h", label: "24 hours", duration: 24 * 60 * 60 * 1000 },
 ];
 const topologyRecentMs = 2 * 60 * 1000;
+
+function measurementForDevice(deviceId: string) {
+  return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
+
+function timeseriesRange(duration: number) {
+  if (duration <= 60 * 60 * 1000) return "1h";
+  if (duration <= 6 * 60 * 60 * 1000) return "6h";
+  return "24h";
+}
+
+async function queryDeviceTimeseries(deviceId: string, duration: number) {
+  const jwt = (await account.createJWT()).jwt;
+  const response = await fetch(`${endpoint}/timeseries/stores/${encodeURIComponent(projectId)}/queries`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": projectId,
+      "x-appwrite-jwt": jwt,
+    },
+    body: JSON.stringify({
+      measurement: measurementForDevice(deviceId),
+      range: timeseriesRange(duration),
+      limit: 1000,
+    }),
+  });
+  const payload = await response.json() as { rows?: TimeseriesRow[]; message?: string };
+  if (!response.ok) throw new Error(payload.message || "Could not query time-series data.");
+  return payload.rows || [];
+}
+
+function timeseriesPoints(rows: TimeseriesRow[], field: string, duration: number): VoltagePoint[] {
+  const since = Date.now() - duration;
+  return rows.flatMap((row) => {
+    if (row._field !== field) return [];
+    const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
+    const value = typeof row._value === "number" ? row._value : Number(row._value);
+    return Number.isFinite(timestamp) && timestamp >= since && Number.isFinite(value) ? [{ timestamp, value }] : [];
+  }).sort((a, b) => a.timestamp - b.timestamp);
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
@@ -320,21 +361,10 @@ export default function Home() {
     let active = true;
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
     setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
-    tables.listRows({
-      databaseId,
-      tableId: telemetryTableId,
-      queries: [Query.equal("deviceId", selectedDeviceId), Query.greaterThanEqual("receivedAt", new Date(Date.now() - duration).toISOString()), Query.orderAsc("receivedAt"), Query.limit(5000)],
-    }).then((result) => {
+    queryDeviceTimeseries(selectedDeviceId, duration).then((rows) => {
       if (!active) return;
-      const rows = result.rows as unknown as Telemetry[];
-      setHistoryPoints(rows.flatMap((row) => {
-        const value = voltageOf(row);
-        return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
-      }));
-      setTemperatureHistoryPoints(rows.flatMap((row) => {
-        const value = temperatureOf(row);
-        return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
-      }));
+      setHistoryPoints(timeseriesPoints(rows, `sensor_${batteryVoltageSensorType}`, duration));
+      setTemperatureHistoryPoints(timeseriesPoints(rows, `sensor_${temperatureSensorType}`, duration));
     }).catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };

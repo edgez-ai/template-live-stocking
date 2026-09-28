@@ -58,7 +58,7 @@
     {
       "$id": "telemetry",
       "databaseId": "live-stocking",
-      "name": "Telemetry",
+      "name": "Latest telemetry",
       "permissions": [],
       "rowSecurity": true,
       "enabled": true,
@@ -66,14 +66,14 @@
         { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "channel", "type": "varchar", "size": 160, "required": true, "array": false },
+        { "key": "status", "type": "varchar", "size": 32, "required": false, "array": false },
         { "key": "topic", "type": "varchar", "size": 320, "required": true, "array": false },
         { "key": "payload", "type": "varchar", "size": 10000, "required": true, "array": false },
         { "key": "receivedAt", "type": "varchar", "size": 40, "required": true, "array": false }
       ],
       "indexes": [
         { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
-        { "key": "device-id", "type": "key", "attributes": ["deviceId"] },
-        { "key": "device-history", "type": "key", "attributes": ["deviceId", "receivedAt"], "orders": ["ASC", "ASC"] }
+        { "key": "device-id", "type": "unique", "attributes": ["deviceId"] }
       ]
     },
     {

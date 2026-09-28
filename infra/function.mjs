@@ -6,7 +6,7 @@ export function installFunction() {
     "--function-id", id, "--name", `${config.name} MQTT ingest`,
     "--runtime", "node-24", "--events", "devices.*.mqtt.message.publish", "--timeout", "15",
     "--enabled", "true", "--logging", "true", "--entrypoint", "src/main.js",
-    "--commands", "npm install", "--scopes", "devices.read", "rows.read", "rows.write",
+    "--commands", "npm install", "--scopes", "devices.read", "rows.read", "rows.write", "timeseries.write",
   ];
   run(exists(["functions", "get", "--function-id", id])
     ? ["functions", "update", ...settings]

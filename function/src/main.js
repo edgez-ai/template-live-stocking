@@ -55,6 +55,75 @@ function sensorValue(payload, type) {
   return typeof sensor?.value === "number" && Number.isFinite(sensor.value) ? sensor.value : null;
 }
 
+function measurementForDevice(deviceId) {
+  return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
+
+function escapeMeasurement(value) {
+  return value.replace(/\\/g, "\\\\").replace(/([ ,])/g, "\\$1");
+}
+
+function escapeTag(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/([ ,=])/g, "\\$1");
+}
+
+function stringField(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function telemetryLine(target, entry, channel, receivedAt, sequence = 0) {
+  const tags = `serial=${escapeTag(target.serial)},channel=${escapeTag(channel)}`;
+  const fields = [`payload=${stringField(JSON.stringify(entry))}`];
+  if (typeof entry.status === "string" && entry.status) fields.push(`status=${stringField(entry.status)}`);
+  if (typeof entry.firmwareVersion === "string" && entry.firmwareVersion) {
+    fields.push(`firmwareVersion=${stringField(entry.firmwareVersion)}`);
+  }
+  for (const sensor of entry.sensors || []) fields.push(`sensor_${sensor.type}=${sensor.value}`);
+  if (Number.isInteger(entry.batteryVoltageMv) && entry.batteryVoltageMv >= 2500 && entry.batteryVoltageMv <= 5000 &&
+      !entry.sensors?.some((sensor) => sensor.type === SENSOR_BATTERY_VOLTAGE)) {
+    fields.push(`sensor_${SENSOR_BATTERY_VOLTAGE}=${entry.batteryVoltageMv / 1000}`);
+  }
+  const timestamp = BigInt(Date.parse(receivedAt)) * 1000000n + BigInt(sequence);
+  return `${escapeMeasurement(measurementForDevice(target.$id))},${tags} ${fields.join(",")} ${timestamp}`;
+}
+
+async function writeTimeseries(req, lines) {
+  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
+  const projectId = process.env.APPWRITE_FUNCTION_PROJECT_ID;
+  const response = await fetch(`${endpoint}/timeseries/stores/${encodeURIComponent(projectId)}/points`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": projectId,
+      "x-appwrite-key": req.headers["x-appwrite-key"],
+    },
+    body: JSON.stringify({ data: lines.join("\n"), precision: "nanosecond" }),
+  });
+  if (!response.ok) throw new Error(`Time-series write failed with ${response.status}`);
+}
+
+async function upsertLatestTelemetry(tables, target, data, readPermissions) {
+  try {
+    return await tables.updateRow({
+      databaseId: DATABASE_ID, tableId: TELEMETRY_TABLE_ID, rowId: target.$id, data, permissions: readPermissions,
+    });
+  } catch (caught) {
+    const code = caught?.code ?? caught?.status;
+    if (code !== 404) throw caught;
+  }
+  try {
+    return await tables.createRow({
+      databaseId: DATABASE_ID, tableId: TELEMETRY_TABLE_ID, rowId: target.$id, data, permissions: readPermissions,
+    });
+  } catch (caught) {
+    const code = caught?.code ?? caught?.status;
+    if (code !== 409) throw caught;
+    return tables.updateRow({
+      databaseId: DATABASE_ID, tableId: TELEMETRY_TABLE_ID, rowId: target.$id, data, permissions: readPermissions,
+    });
+  }
+}
+
 function validTopology(topology) {
   const valid = topology && typeof topology === "object" && !Array.isArray(topology) &&
     Array.isArray(topology.links) && topology.links.length <= 16 &&
@@ -370,6 +439,9 @@ export default async function main({ req, res, error, log = () => {} }) {
     if (entry.clientId !== undefined && typeof entry.clientId !== "string") {
       return json(res, { error: "Telemetry clientId must be a string" }, 400);
     }
+    if (entry.status !== undefined && (typeof entry.status !== "string" || entry.status.length > 32)) {
+      return json(res, { error: "Telemetry status must be a string up to 32 characters" }, 400);
+    }
     if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
         !sensor || typeof sensor !== "object" || !Number.isInteger(sensor.type) || sensor.type < 1 || sensor.type > SENSOR_TYPE_MAX ||
         typeof sensor.value !== "number" || !Number.isFinite(sensor.value)))) {
@@ -441,22 +513,19 @@ export default async function main({ req, res, error, log = () => {} }) {
       targets.push({ entry, target, readPermissions, topologyPeers });
     }
     const receivedAt = new Date().toISOString();
+    await writeTimeseries(req, targets.map(({ entry, target }, index) =>
+      telemetryLine(target, entry, route.channel, receivedAt, index)));
     const telemetryIds = [];
     for (const { entry, target, readPermissions, topologyPeers } of targets) {
-      const row = await tables.createRow({
-        databaseId: DATABASE_ID,
-        tableId: TELEMETRY_TABLE_ID,
-        rowId: ID.unique(),
-        data: {
-          deviceId: target.$id,
-          serial: target.serial,
-          channel: route.channel,
-          topic,
-          payload: JSON.stringify(entry),
-          receivedAt,
-        },
-        permissions: readPermissions,
-      });
+      const row = await upsertLatestTelemetry(tables, target, {
+        deviceId: target.$id,
+        serial: target.serial,
+        channel: route.channel,
+        status: typeof entry.status === "string" && entry.status ? entry.status : "online",
+        topic,
+        payload: JSON.stringify(entry),
+        receivedAt,
+      }, readPermissions);
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);
       await reconcileOtaUpdate(tables, target, entry, readPermissions, receivedAt);
@@ -464,7 +533,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (entry.topology) {
         await syncTopology(tables, target, entry.topology.links, topologyPeers, readPermissions, receivedAt);
       }
-      telemetryIds.push(row.$id);
+      telemetryIds.push(row.$id || target.$id);
     }
     return json(res, { accepted: true, telemetryId: telemetryIds[0], telemetryIds, receivedAt }, 201);
   } catch (caught) {

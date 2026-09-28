@@ -7,6 +7,7 @@ import {
   run,
   webDomain,
 } from "./appwrite.mjs";
+import { removeTimeseries } from "./timeseries.mjs";
 
 function removeIfPresent(label, probeArgs, deleteArgs) {
   if (dryRun) {
@@ -50,6 +51,7 @@ removeIfPresent(
   ["functions", "get", "--function-id", config.name],
   ["functions", "delete", "--function-id", config.name],
 );
+await removeTimeseries();
 removeIfPresent(
   "telemetry database",
   ["tables-db", "get", "--database-id", config.databaseId],

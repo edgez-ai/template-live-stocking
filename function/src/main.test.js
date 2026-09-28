@@ -28,21 +28,27 @@ const rows = [];
 const topologyRows = [];
 const otaRows = [];
 const downlinkRows = [];
+const timeseriesWrites = [];
 
 beforeEach(() => {
   rows.length = 0;
   topologyRows.length = 0;
   otaRows.length = 0;
   downlinkRows.length = 0;
+  timeseriesWrites.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
   process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
   process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
   process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, options = {}) => {
     if (url === "https://github.example/acme/live-stocking/releases/latest") {
       return { ok: true, status: 200, url: "https://github.example/acme/live-stocking/releases/tag/v0.0.4" };
+    }
+    if (url === "https://appwrite.example/v1/timeseries/stores/project-a/points") {
+      timeseriesWrites.push(JSON.parse(options.body));
+      return { ok: true, status: 201 };
     }
     const device = devices.get(decodeURIComponent(url.split("/").pop()));
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
@@ -63,8 +69,9 @@ beforeEach(() => {
       downlinkRows.push(row);
       return row;
     }
-    rows.push(args);
-    return { $id: `telemetry-${rows.length}` };
+    const row = { ...args, $id: args.rowId };
+    rows.push(row);
+    return row;
   };
   TablesDB.prototype.listRows = async (args) => ({
     rows: args.tableId === "topology-a"
@@ -74,6 +81,13 @@ beforeEach(() => {
         : args.tableId === "downlink-a" ? downlinkRows : [],
   });
   TablesDB.prototype.updateRow = async (args) => {
+    if (args.tableId === "telemetry-a") {
+      const telemetry = rows.find((candidate) => candidate.$id === args.rowId);
+      if (!telemetry) throw Object.assign(new Error("not found"), { code: 404 });
+      Object.assign(telemetry.data, args.data);
+      telemetry.permissions = args.permissions;
+      return telemetry;
+    }
     const row = topologyRows.find((candidate) => candidate.$id === args.rowId);
     if (row) Object.assign(row, args.data);
     const ota = otaRows.find((candidate) => candidate.$id === args.rowId);
@@ -119,6 +133,8 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
     [[gatewayId, "AABBCCDDEEFF"], [remoteId, "112233445566"]]);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
   assert.deepEqual(rows[1].permissions, devices.get(remoteId).$permissions);
+  assert.equal(timeseriesWrites.length, 1);
+  assert.match(timeseriesWrites[0].data, new RegExp(`device_${remoteId}.*sensor_12=3\\.7`));
 });
 
 test("a gateway cannot write a remote device from another farm", async () => {
@@ -132,17 +148,18 @@ test("a gateway cannot write a remote device from another farm", async () => {
   }
 });
 
-test("multiple queued readings from one clientId remain separate rows", async () => {
+test("multiple queued readings remain in time series while TablesDB keeps one latest row per device", async () => {
   const result = await publish([
     { clientId: gatewayId, status: "online" },
     { clientId: remoteId, sensors: [{ type: 12, value: 3.7 }] },
     { clientId: remoteId, sensors: [{ type: 12, value: 3.65 }] },
   ]);
   assert.equal(result.status, 201);
-  assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map(({ data }) => data.deviceId), [gatewayId, remoteId, remoteId]);
-  assert.deepEqual(rows.slice(1).map(({ data }) => JSON.parse(data.payload).sensors[0].value),
-    [3.7, 3.65]);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map(({ data }) => data.deviceId), [gatewayId, remoteId]);
+  assert.equal(JSON.parse(rows[1].data.payload).sensors[0].value, 3.65);
+  assert.match(timeseriesWrites[0].data, /sensor_12=3\.7/);
+  assert.match(timeseriesWrites[0].data, /sensor_12=3\.65/);
 });
 
 test("legacy single-device telemetry remains accepted", async () => {

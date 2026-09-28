@@ -30,7 +30,7 @@ hardware integration, and deployment requirements.
 | --- | --- |
 | `site/` | Read-only Next.js portal for sign-in, devices, and telemetry |
 | `app/` | Expo app with an offline Organic Maps dashboard and BLE HaLow provisioning |
-| `function/` | Trusted MQTT webhook that writes telemetry |
+| `function/` | Trusted MQTT webhook that writes history to Time Series and the latest state to TablesDB |
 | `firmware/` | PlatformIO + ESP-IDF device client |
 | `infra/` | Rerunnable Appwrite CLI installer |
 
@@ -79,9 +79,13 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
 6. Appwrite resolves the MQTT client and emits
    `devices.<deviceId>.mqtt.message.publish` to the Function.
 7. The Function verifies the topic project and serial against the built-in
-   device, creates a telemetry row carrying its read permissions, and upserts
-   the gateway's current links in `topology-links`.
-8. Web and mobile read permitted telemetry and topology directly from TablesDB.
+   device, writes the complete reading to the project's Time Series Store, and
+   upserts one latest `telemetry` row per device carrying that device's read
+   permissions. It also upserts the gateway's current links in `topology-links`.
+8. Web and mobile read current state and topology from TablesDB, then query
+   historical sensor fields from Time Series with an Appwrite JWT. Each device
+   uses the deterministic `device_<deviceId>` measurement; sensor type `N` is
+   stored as field `sensor_N`.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
 
@@ -142,8 +146,8 @@ Install dependencies in `site/`, `app/`, `function/`, and `infra/`, then run:
 Remote installation is intentionally separate: run `cd infra && npm run deploy`
 only when you intend to provision or update Appwrite resources.
 Run `cd infra && npm run clean` to remove this template's Site, Function,
-database, proxy rule, and auth platforms. Cleanup preserves project users,
-Devices, and project-wide authentication settings.
+database, Time Series Store, proxy rule, and auth platforms. Cleanup preserves
+project users, Devices, and project-wide authentication settings.
 
 ## Release builds
 
