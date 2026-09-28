@@ -5,6 +5,7 @@
 #include "edgez_halow_events.h"
 #include "edgez_halow_radio.hpp"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 extern "C" {
@@ -59,6 +60,14 @@ void event_task(void *) {
         (void)edgez_halow_event_respond_peer_admission(event.request_id, true, 0);
         break;
       case EDGEZ_HALOW_EVENT_BATMAN_PAYLOAD:
+        if (event.data.batman_payload.payload_len >= 14 &&
+            event.data.batman_payload.payload[12] == 0x88 &&
+            event.data.batman_payload.payload[13] == 0xb5) {
+          ESP_LOGI(kTag,
+                   "HaLow BATMAN relay frame originator=" MACSTR " bytes=%u",
+                   MAC2STR(event.data.batman_payload.originator),
+                   static_cast<unsigned>(event.data.batman_payload.payload_len));
+        }
         if (batman_callback) {
           batman_callback(event.data.batman_payload.originator,
                           event.data.batman_payload.payload,
@@ -87,10 +96,6 @@ void halow_set_batman_callback(halow_batman_callback_t callback) {
 bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
   return peer_mac && rssi_dbm &&
          mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
-}
-
-bool halow_get_local_mac(uint8_t mac[6]) {
-  return mac && mmwlan_get_mac_addr(mac) == MMWLAN_SUCCESS;
 }
 
 esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,

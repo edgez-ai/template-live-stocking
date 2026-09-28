@@ -16,7 +16,6 @@ bool halow_channel_supported(const char *country, uint8_t channel);
 void halow_set_beacon_callback(halow_beacon_callback_t callback);
 void halow_set_batman_callback(halow_batman_callback_t callback);
 bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm);
-bool halow_get_local_mac(uint8_t mac[6]);
 esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,
                             size_t length);
 esp_err_t halow_broadcast_batman(const uint8_t *data, size_t length);
