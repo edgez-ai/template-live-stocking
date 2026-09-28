@@ -55,7 +55,8 @@ on that target.
 The signed-in home screen opens with a full-screen Organic Maps view from
 `@edgez/react-native-sdk`. The top-right menu switches between map and list
 views or signs out; `+ ADD` remains beside it. Operators can download the
-current map region once and continue viewing it offline; device coordinates
+current map region once and continue viewing it offline; cached farms, geofence
+areas and rules, devices, and latest telemetry provide the map state. Devices
 are displayed as map nodes when latitude and longitude are present. List view
 shows the selected farm name and each device as a card with its connectivity
 status and latest battery voltage. Selecting a card opens the full-screen device

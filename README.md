@@ -103,10 +103,11 @@ Actions' `GITHUB_REPOSITORY` for mobile), so **Deploy on EdgeZ** installations
 use their own latest release instead of a fixed template repository. Only users
 with update permission on the Device can publish its MQTT OTA command.
 
-The mobile app caches each signed-in user's farm list, device list, and recent
-telemetry for offline viewing. It refreshes them when Appwrite is reachable and
-clears the cache on sign-out. Farm mesh passphrases and MQTT credentials are not
-stored in this offline cache; provisioning and edits require a connection.
+The mobile app caches each signed-in user's farms, geofence areas and rules,
+devices, and latest telemetry for offline map rendering. It refreshes them when
+Appwrite is reachable and clears the cache on sign-out. Farm mesh passphrases
+and MQTT credentials are not stored in this offline cache; provisioning and
+edits require a connection.
 
 ## Environment
 

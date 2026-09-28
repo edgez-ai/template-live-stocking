@@ -18,7 +18,7 @@ type Device = { $id: string; serial: string; name: string; status: string; enabl
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
 type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
-type CachedSnapshot = { version: 1; user: CurrentUser; farms: CachedFarm[]; devices: Device[]; telemetry: CachedTelemetry[] };
+type CachedSnapshot = { version: 2; user: CurrentUser; farms: CachedFarm[]; areas: CachedGeofenceArea[]; rules: CachedGeofenceRule[]; devices: Device[]; telemetry: CachedTelemetry[] };
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; receivedAt: string };
@@ -29,6 +29,8 @@ type GeofenceArea = Models.Row & { farmId: string; name: string; shape: Geofence
 type GeofenceRule = Models.Row & { farmId: string; name: string; areaId: string; deviceIds: string[]; enterAlert: boolean; exitAlert: boolean };
 type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: string; deviceId: string; event: "enter" | "exit"; active: boolean; acknowledged: boolean; lastLocation: string; raisedAt: string; clearedAt?: string; acknowledgedAt?: string };
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "serial" | "channel" | "topic" | "payload" | "location" | "icon" | "markerColor" | "receivedAt">;
+type CachedGeofenceArea = Pick<GeofenceArea, "$id" | "farmId" | "name" | "shape" | "geometry">;
+type CachedGeofenceRule = Pick<GeofenceRule, "$id" | "farmId" | "name" | "areaId" | "deviceIds" | "enterAlert" | "exitAlert">;
 type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
@@ -353,22 +355,28 @@ async function readCachedSnapshot(userId?: string) {
     if (!id) return null;
     const [raw, selectedFarmId] = await AsyncStorage.multiGet([snapshotCacheKey(id), selectedFarmCacheKey(id)]);
     const parsed = raw[1] ? JSON.parse(raw[1]) as CachedSnapshot : null;
-    if (!parsed || parsed.version !== 1 || parsed.user?.$id !== id || !Array.isArray(parsed.farms) || !Array.isArray(parsed.devices) || !Array.isArray(parsed.telemetry)) return null;
+    if (!parsed || parsed.version !== 2 || parsed.user?.$id !== id || !Array.isArray(parsed.farms) ||
+        !Array.isArray(parsed.areas) || !Array.isArray(parsed.rules) || !Array.isArray(parsed.devices) ||
+        !Array.isArray(parsed.telemetry)) return null;
     return { ...parsed, selectedFarmId: selectedFarmId[1] || (parsed.user.prefs as { currentFarmId?: string }).currentFarmId || "" };
   } catch { return null; }
 }
 
-async function cacheSnapshot(user: CurrentUser, farms: Farm[], devices: Device[], telemetry: Telemetry[]) {
+async function cacheSnapshot(user: CurrentUser, farms: Farm[], areas: GeofenceArea[], rules: GeofenceRule[], devices: Device[], telemetry: Telemetry[]) {
   const safeFarms: CachedFarm[] = farms.map(({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }) =>
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
   const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
     ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor } }));
+  const safeAreas: CachedGeofenceArea[] = areas.map(({ $id, farmId, name, shape, geometry }) =>
+    ({ $id, farmId, name, shape, geometry }));
+  const safeRules: CachedGeofenceRule[] = rules.map(({ $id, farmId, name, areaId, deviceIds, enterAlert, exitAlert }) =>
+    ({ $id, farmId, name, areaId, deviceIds, enterAlert, exitAlert }));
   const safeTelemetry: CachedTelemetry[] = telemetry.map(({ $id, deviceId, serial, channel, topic, payload, location, icon, markerColor, receivedAt }) =>
     ({ $id, deviceId, serial, channel, topic, payload, location, icon, markerColor, receivedAt }));
   const safeUser: CurrentUser = { $id: user.$id, email: user.email, name: user.name, prefs: { currentFarmId: (user.prefs as { currentFarmId?: string }).currentFarmId } };
   try {
     await AsyncStorage.multiSet([
-      [snapshotCacheKey(user.$id), JSON.stringify({ version: 1, user: safeUser, farms: safeFarms, devices: safeDevices, telemetry: safeTelemetry } satisfies CachedSnapshot)],
+      [snapshotCacheKey(user.$id), JSON.stringify({ version: 2, user: safeUser, farms: safeFarms, areas: safeAreas, rules: safeRules, devices: safeDevices, telemetry: safeTelemetry } satisfies CachedSnapshot)],
       [lastUserCacheKey, user.$id],
     ]);
   } catch { /* Offline cache is best effort; live data remains available. */ }
@@ -764,11 +772,23 @@ export default function App() {
   const farmsRef = useRef<Farm[]>([]);
   const devicesRef = useRef<Device[]>([]);
   const telemetryRef = useRef<Telemetry[]>([]);
+  const geofenceAreasRef = useRef<GeofenceArea[]>([]);
+  const geofenceRulesRef = useRef<GeofenceRule[]>([]);
+  const currentFarmIdRef = useRef("");
   const refreshInFlight = useRef<Promise<Farm[]> | null>(null);
   const refreshUserId = useRef<string | null>(null);
   const appUpdateCheckInFlight = useRef(false);
   const latestFlashRelease = latestFlashReleases[flashTarget] || null;
   const selectedFlashTarget = flashTargets.find(({ key }) => key === flashTarget) || flashTargets[0];
+
+  const cacheCurrentSnapshot = (current: CurrentUser) => cacheSnapshot(
+    current,
+    farmsRef.current,
+    geofenceAreasRef.current,
+    geofenceRulesRef.current,
+    devicesRef.current,
+    telemetryRef.current,
+  );
 
   useEffect(() => {
     void markAppBundleUpdateHealthy()
@@ -920,21 +940,36 @@ export default function App() {
   const refresh = useCallback((current: CurrentUser): Promise<Farm[]> => {
     if (refreshInFlight.current && refreshUserId.current === current.$id) return refreshInFlight.current;
     const request = (async () => {
-      const [farmResult, deviceResult, telemetryResult, topologyResult, otaResult] = await Promise.allSettled([
+      const [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, topologyResult, otaResult] = await Promise.allSettled([
         tables.listRows<Farm>({ databaseId: config.databaseId, tableId: config.farmTableId, queries: [Query.limit(100)] }),
+        tables.listRows<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, queries: [Query.limit(500)] }),
+        tables.listRows<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, queries: [Query.limit(500)] }),
         deviceApi<{ devices: Device[] }>(),
         tables.listRows({ databaseId: config.databaseId, tableId: config.telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
         tables.listRows({ databaseId: config.databaseId, tableId: config.topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
         tables.listRows({ databaseId: config.databaseId, tableId: config.otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
       ]);
-      const failures = [farmResult, deviceResult, telemetryResult, topologyResult, otaResult].filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      const failures = [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, topologyResult, otaResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected");
       const authFailure = failures.find((failure) => isAuthError(failure.reason));
       if (authFailure) throw authFailure.reason;
       if (activeUserId.current !== current.$id) return farmsRef.current;
       if (farmResult.status === "fulfilled") {
         farmsRef.current = farmResult.value.rows;
         setFarms(farmsRef.current);
-        setCurrentFarmId((selected) => farmsRef.current.some((farm) => farm.$id === selected) ? selected : farmsRef.current[0]?.$id || "");
+        setCurrentFarmId((selected) => {
+          const next = farmsRef.current.some((farm) => farm.$id === selected) ? selected : farmsRef.current[0]?.$id || "";
+          currentFarmIdRef.current = next;
+          return next;
+        });
+      }
+      if (areaResult.status === "fulfilled") {
+        geofenceAreasRef.current = areaResult.value.rows;
+        setGeofenceAreas(geofenceAreasRef.current.filter((area) => area.farmId === currentFarmIdRef.current));
+      }
+      if (ruleResult.status === "fulfilled") {
+        geofenceRulesRef.current = ruleResult.value.rows;
+        setGeofenceRules(geofenceRulesRef.current.filter((rule) => rule.farmId === currentFarmIdRef.current));
       }
       if (deviceResult.status === "fulfilled") {
         devicesRef.current = deviceResult.value.devices;
@@ -946,7 +981,7 @@ export default function App() {
       }
       if (topologyResult.status === "fulfilled") setTopology(topologyResult.value.rows as unknown as TopologyLink[]);
       if (otaResult.status === "fulfilled") setOtaUpdates(otaResult.value.rows as unknown as OtaUpdate[]);
-      await cacheSnapshot(current, farmsRef.current, devicesRef.current, telemetryRef.current);
+      await cacheCurrentSnapshot(current);
       if (failures.length) {
         setOffline(true);
         throw failures[0].reason;
@@ -969,7 +1004,12 @@ export default function App() {
       farmsRef.current = snapshot.farms.map((farm) => ({ ...farm, meshPassphrase: "" }) as Farm);
       devicesRef.current = snapshot.devices;
       telemetryRef.current = snapshot.telemetry as Telemetry[];
+      geofenceAreasRef.current = snapshot.areas as GeofenceArea[];
+      geofenceRulesRef.current = snapshot.rules as GeofenceRule[];
+      currentFarmIdRef.current = snapshot.selectedFarmId;
       setUser(snapshot.user); setFarms(farmsRef.current); setDevices(devicesRef.current); setTelemetry(telemetryRef.current);
+      setGeofenceAreas(geofenceAreasRef.current.filter((area) => area.farmId === snapshot.selectedFarmId));
+      setGeofenceRules(geofenceRulesRef.current.filter((rule) => rule.farmId === snapshot.selectedFarmId));
       setCurrentFarmId(snapshot.selectedFarmId); setOffline(true); setBusy(false);
     };
     void (async () => {
@@ -991,8 +1031,11 @@ export default function App() {
         }
         else {
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]);
-          setCurrentFarmId((current.prefs as { currentFarmId?: string }).currentFarmId || "");
+          geofenceAreasRef.current = []; geofenceRulesRef.current = [];
+          setFarms([]); setDevices([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setTopology([]); setOtaUpdates([]);
+          const preferredFarmId = (current.prefs as { currentFarmId?: string }).currentFarmId || "";
+          currentFarmIdRef.current = preferredFarmId;
+          setCurrentFarmId(preferredFarmId);
         }
         setUser(current);
         setProfileName(current.name || "");
@@ -1004,7 +1047,8 @@ export default function App() {
           if (cached) await clearCachedUser(cached.user.$id);
           activeUserId.current = null;
           farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
+          geofenceAreasRef.current = []; geofenceRulesRef.current = []; currentFarmIdRef.current = "";
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
         } else if (cached) setOffline(true);
         else setError(messageOf(caught));
       } finally { if (active) setBusy(false); }
@@ -1041,7 +1085,9 @@ export default function App() {
         if (isAuthError(caught)) {
           void clearCachedUser(user.$id);
           activeUserId.current = null;
-          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
+          farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
+          geofenceAreasRef.current = []; geofenceRulesRef.current = []; currentFarmIdRef.current = "";
+          setUser(null); setFarms([]); setDevices([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); setTopology([]); setOtaUpdates([]); setCurrentFarmId(""); setOffline(false);
         } else setOffline(true);
       });
     }, offline ? 15000 : 5000);
@@ -1320,7 +1366,7 @@ export default function App() {
       devicesRef.current = devicesRef.current.map((item) => item.$id === updated.$id ? updated : item);
       setDevices(devicesRef.current);
       setDetailDevice(updated);
-      if (user) await cacheSnapshot(user, farmsRef.current, devicesRef.current, telemetryRef.current);
+      if (user) await cacheCurrentSnapshot(user);
     } catch (caught) { setError(messageOf(caught)); }
     finally { setBusy(false); }
   }
@@ -1396,7 +1442,8 @@ export default function App() {
     }
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    geofenceAreasRef.current = []; geofenceRulesRef.current = []; currentFarmIdRef.current = "";
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
   }
 
   function openSettings() {
@@ -1419,6 +1466,7 @@ export default function App() {
         const updated = await account.updatePrefs({ prefs: { ...user.prefs, currentFarmId: farm.$id } });
         setUser(updated);
       }
+      currentFarmIdRef.current = farm.$id;
       setCurrentFarmId(farm.$id);
       await cacheSelectedFarm(user.$id, farm.$id);
       setFarmFormMode(null);
@@ -1455,7 +1503,7 @@ export default function App() {
       }
       farmsRef.current = [...farmsRef.current, farm];
       setFarms(farmsRef.current);
-      await cacheSnapshot(user, farmsRef.current, devicesRef.current, telemetryRef.current);
+      await cacheCurrentSnapshot(user);
       setFarmFormMode(null);
       setFarmDraft(emptyFarmDetails);
       await selectFarm(farm);
@@ -1473,7 +1521,7 @@ export default function App() {
       if (data.name !== farm.name) await teams.updateName({ teamId: farm.teamId, name: data.name });
       farmsRef.current = farmsRef.current.map((item) => item.$id === farm.$id ? updated : item);
       setFarms(farmsRef.current);
-      await cacheSnapshot(user!, farmsRef.current, devicesRef.current, telemetryRef.current);
+      await cacheCurrentSnapshot(user!);
       setFarmFormMode(null);
     } catch (caught) { setError(messageOf(caught)); }
     finally { setBusy(false); }
@@ -1506,7 +1554,7 @@ export default function App() {
     try {
       const updated = await account.updateName({ name });
       setUser(updated);
-      await cacheSnapshot(updated, farmsRef.current, devicesRef.current, telemetryRef.current);
+      await cacheCurrentSnapshot(updated);
       if (currentFarmId) {
         const farm = farms.find((candidate) => candidate.$id === currentFarmId);
         if (farm) setMembers((await teams.listMemberships({ teamId: farm.teamId, queries: [Query.limit(100)] })).memberships);
@@ -1614,22 +1662,19 @@ export default function App() {
     return () => { active = false; };
   }, [settingsOpen, activeTeamId, offline, user?.$id]);
   useEffect(() => {
-    if (!currentFarmId || offline || !config.geofenceAreaTableId || !config.geofenceRuleTableId || !config.geofenceAlarmTableId) {
-      setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); return;
+    currentFarmIdRef.current = currentFarmId;
+    setGeofenceAreas(geofenceAreasRef.current.filter((area) => area.farmId === currentFarmId));
+    setGeofenceRules(geofenceRulesRef.current.filter((rule) => rule.farmId === currentFarmId));
+    if (!currentFarmId || offline || !config.geofenceAlarmTableId) {
+      setGeofenceAlarms([]); return;
     }
     let active = true;
-    setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]);
-    Promise.allSettled([
-      tables.listRows<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
-      tables.listRows<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, queries: [Query.equal("farmId", currentFarmId), Query.limit(100)] }),
-      tables.listRows<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, queries: [Query.equal("farmId", currentFarmId), Query.equal("active", true), Query.limit(100)] }),
-    ]).then(([areas, rules, alarms]) => {
+    setGeofenceAlarms([]);
+    tables.listRows<GeofenceAlarm>({ databaseId: config.databaseId, tableId: config.geofenceAlarmTableId, queries: [Query.equal("farmId", currentFarmId), Query.equal("active", true), Query.limit(100)] })
+      .then((alarms) => {
       if (!active) return;
-      if (areas.status === "fulfilled") setGeofenceAreas(areas.value.rows);
-      else setError(`Could not load geofence areas: ${messageOf(areas.reason)}`);
-      if (rules.status === "fulfilled") setGeofenceRules(rules.value.rows);
-      if (alarms.status === "fulfilled") setGeofenceAlarms(alarms.value.rows);
-    });
+      setGeofenceAlarms(alarms.rows);
+    }).catch((caught) => { if (active) setError(`Could not load geofence alarms: ${messageOf(caught)}`); });
     return () => { active = false; };
   }, [currentFarmId, offline]);
   const visibleDevices = devices.filter((device) => Boolean(currentFarmId) && device.metadata?.farmId === currentFarmId);
@@ -1658,7 +1703,7 @@ export default function App() {
       })}
       {!currentFarm ? <Text style={styles.empty}>Create a farm in Settings before adding devices.</Text> : !visibleDevices.length ? <Text style={styles.empty}>No devices in this farm yet. Use + ADD to provision one.</Text> : null}
       </ScrollView>}
-      {offline && <View style={styles.offlineBanner}><Text style={styles.offlineBannerText}>OFFLINE · SHOWING CACHED FARM AND DEVICE DATA</Text></View>}
+      {offline && <View style={styles.offlineBanner}><Text style={styles.offlineBannerText}>OFFLINE · SHOWING CACHED MAP DATA</Text></View>}
       {menuOpen && <Pressable style={styles.menuBackdrop} onPress={() => setMenuOpen(false)} accessibilityLabel="Close menu" />}
       <View style={[styles.dashboardHeader, dashboardView === "list" && styles.listHeader]}>
         {dashboardView === "list" ? <Text style={styles.listTitle} numberOfLines={1}>{currentFarm?.name || "Choose a farm"}</Text> : <View />}
@@ -1796,7 +1841,7 @@ export default function App() {
                 <AreaColorPicker color={areaDraft.color} onChange={(color) => setAreaDraft((draft) => ({ ...draft, color }))} />
                 <Pressable style={styles.farmRow} onPress={() => setAreaPickerOpen(true)}><Text style={styles.deviceNameDark}>{areaDraft.shape === "polygon" ? "EDIT POINTS ON MAP" : "CENTER ON MAP"}</Text><Text style={styles.muted}>{areaDraft.shape === "polygon" ? `${areaDraft.vertices.split(";").filter(Boolean).length} points` : areaDraft.location || "Choose center"}</Text></Pressable>
                 {areaDraft.shape !== "polygon" && <View style={styles.settingsActions}><TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.primary} onChangeText={(primary) => setAreaDraft({ ...areaDraft, primary })} placeholder={areaDraft.shape === "circle" ? "Radius m" : "Width/radius m"} keyboardType="decimal-pad" />{areaDraft.shape !== "circle" && <TextInput style={[styles.inputLight, styles.dimensionInput]} value={areaDraft.secondary} onChangeText={(secondary) => setAreaDraft({ ...areaDraft, secondary })} placeholder="Height/radius m" keyboardType="decimal-pad" />}</View>}
-                <Pressable style={styles.primary} onPress={() => void (async () => { setTeamError(""); try { const geometry = areaGeometry(areaDraft); const data = { farmId: currentFarm.$id, name: areaDraft.name.trim(), shape: areaDraft.shape, geometry }; const permissions = [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))]; const area = areaEditingId === "new" ? await tables.createRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: ID.unique(), data, permissions }) : await tables.updateRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: areaEditingId, data }); setGeofenceAreas((items) => areaEditingId === "new" ? [...items, area] : items.map((item) => item.$id === area.$id ? area : item)); setAreaEditingId(null); } catch (caught) { setTeamError(messageOf(caught)); } })()}><Text style={styles.primaryText}>SAVE AREA</Text></Pressable>
+                <Pressable style={styles.primary} onPress={() => void (async () => { setTeamError(""); try { const geometry = areaGeometry(areaDraft); const data = { farmId: currentFarm.$id, name: areaDraft.name.trim(), shape: areaDraft.shape, geometry }; const permissions = [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))]; const area = areaEditingId === "new" ? await tables.createRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: ID.unique(), data, permissions }) : await tables.updateRow<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, rowId: areaEditingId, data }); geofenceAreasRef.current = areaEditingId === "new" ? [...geofenceAreasRef.current, area] : geofenceAreasRef.current.map((item) => item.$id === area.$id ? area : item); setGeofenceAreas(geofenceAreasRef.current.filter((item) => item.farmId === currentFarm.$id)); if (user) await cacheCurrentSnapshot(user); setAreaEditingId(null); } catch (caught) { setTeamError(messageOf(caught)); } })()}><Text style={styles.primaryText}>SAVE AREA</Text></Pressable>
                 {teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}
               </View>}
             </>}
@@ -1804,7 +1849,7 @@ export default function App() {
           {currentFarm && settingsTab === "rules" && <>
             <Text style={styles.sectionLabel}>GEOFENCE RULES</Text>
             {geofenceRules.map((rule) => <View key={rule.$id} style={styles.memberRow}><View style={styles.memberInfo}><Text style={styles.deviceNameDark}>{rule.name || "Unnamed rule"}</Text><Text style={styles.muted}>{geofenceAreas.find((area) => area.$id === rule.areaId)?.name || "Deleted area"} · {rule.enterAlert ? "ENTER" : ""}{rule.enterAlert && rule.exitAlert ? " + " : ""}{rule.exitAlert ? "LEAVE" : ""} · {rule.deviceIds?.length || "All"} devices</Text></View></View>)}
-            {currentFarm.ownerId === user?.$id && <View style={styles.geofenceForm}><Text style={styles.dialogHelp}>Name the rule, select its area, and choose the devices it applies to. Leave device selection empty for every farm device.</Text><Text style={styles.fieldLabel}>RULE NAME</Text><TextInput style={styles.inputLight} value={ruleName} onChangeText={setRuleName} placeholder="For example: Cattle leave north pasture" maxLength={128} /><Text style={styles.fieldLabel}>AREA</Text>{geofenceAreas.length ? geofenceAreas.map((area) => <Pressable key={area.$id} style={[styles.farmRow, ruleAreaId === area.$id && styles.farmRowSelected]} onPress={() => setRuleAreaId(area.$id)} accessibilityRole="radio" accessibilityState={{ selected: ruleAreaId === area.$id }}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}{ruleAreaId === area.$id ? " · SELECTED" : ""}</Text></Pressable>) : <Text style={styles.muted}>Create an area before adding a rule.</Text>}<Text style={styles.fieldLabel}>DEVICES</Text>{visibleDevices.map((device) => <Pressable key={device.$id} style={[styles.farmRow, ruleDeviceIds.includes(device.$id) && styles.farmRowSelected]} onPress={() => setRuleDeviceIds((ids) => ids.includes(device.$id) ? ids.filter((id) => id !== device.$id) : [...ids, device.$id])}><Text style={styles.deviceNameDark}>{device.name}</Text></Pressable>)}<View style={styles.settingsActions}><Pressable style={[styles.smallOption, ruleEnter && styles.farmRowSelected]} onPress={() => setRuleEnter((value) => !value)}><Text style={styles.deviceNameDark}>ENTER</Text></Pressable><Pressable style={[styles.smallOption, ruleExit && styles.farmRowSelected]} onPress={() => setRuleExit((value) => !value)}><Text style={styles.deviceNameDark}>LEAVE</Text></Pressable></View><Pressable style={[styles.primary, (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) && styles.disabledButton]} onPress={() => void (async () => { if (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) { setTeamError("Enter a rule name, choose an area, and select at least one alarm condition."); return; } setTeamError(""); try { const rule = await tables.createRow<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, rowId: ID.unique(), data: { farmId: currentFarm.$id, name: ruleName.trim(), areaId: ruleAreaId, deviceIds: ruleDeviceIds, enterAlert: ruleEnter, exitAlert: ruleExit }, permissions: [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))] }); setGeofenceRules((rules) => [...rules, rule]); setRuleName(""); setRuleAreaId(""); setRuleDeviceIds([]); } catch (caught) { setTeamError(messageOf(caught)); } })()} disabled={!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)}><Text style={styles.primaryText}>SAVE RULE</Text></Pressable>{teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}</View>}
+            {currentFarm.ownerId === user?.$id && <View style={styles.geofenceForm}><Text style={styles.dialogHelp}>Name the rule, select its area, and choose the devices it applies to. Leave device selection empty for every farm device.</Text><Text style={styles.fieldLabel}>RULE NAME</Text><TextInput style={styles.inputLight} value={ruleName} onChangeText={setRuleName} placeholder="For example: Cattle leave north pasture" maxLength={128} /><Text style={styles.fieldLabel}>AREA</Text>{geofenceAreas.length ? geofenceAreas.map((area) => <Pressable key={area.$id} style={[styles.farmRow, ruleAreaId === area.$id && styles.farmRowSelected]} onPress={() => setRuleAreaId(area.$id)} accessibilityRole="radio" accessibilityState={{ selected: ruleAreaId === area.$id }}><Text style={styles.deviceNameDark}>{area.name}</Text><Text style={styles.muted}>{area.shape.toUpperCase()}{ruleAreaId === area.$id ? " · SELECTED" : ""}</Text></Pressable>) : <Text style={styles.muted}>Create an area before adding a rule.</Text>}<Text style={styles.fieldLabel}>DEVICES</Text>{visibleDevices.map((device) => <Pressable key={device.$id} style={[styles.farmRow, ruleDeviceIds.includes(device.$id) && styles.farmRowSelected]} onPress={() => setRuleDeviceIds((ids) => ids.includes(device.$id) ? ids.filter((id) => id !== device.$id) : [...ids, device.$id])}><Text style={styles.deviceNameDark}>{device.name}</Text></Pressable>)}<View style={styles.settingsActions}><Pressable style={[styles.smallOption, ruleEnter && styles.farmRowSelected]} onPress={() => setRuleEnter((value) => !value)}><Text style={styles.deviceNameDark}>ENTER</Text></Pressable><Pressable style={[styles.smallOption, ruleExit && styles.farmRowSelected]} onPress={() => setRuleExit((value) => !value)}><Text style={styles.deviceNameDark}>LEAVE</Text></Pressable></View><Pressable style={[styles.primary, (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) && styles.disabledButton]} onPress={() => void (async () => { if (!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)) { setTeamError("Enter a rule name, choose an area, and select at least one alarm condition."); return; } setTeamError(""); try { const rule = await tables.createRow<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, rowId: ID.unique(), data: { farmId: currentFarm.$id, name: ruleName.trim(), areaId: ruleAreaId, deviceIds: ruleDeviceIds, enterAlert: ruleEnter, exitAlert: ruleExit }, permissions: [Permission.read(Role.team(currentFarm.teamId)), Permission.update(Role.team(currentFarm.teamId, "owner")), Permission.delete(Role.team(currentFarm.teamId, "owner"))] }); geofenceRulesRef.current = [...geofenceRulesRef.current, rule]; setGeofenceRules(geofenceRulesRef.current.filter((item) => item.farmId === currentFarm.$id)); if (user) await cacheCurrentSnapshot(user); setRuleName(""); setRuleAreaId(""); setRuleDeviceIds([]); } catch (caught) { setTeamError(messageOf(caught)); } })()} disabled={!ruleName.trim() || !ruleAreaId || (!ruleEnter && !ruleExit)}><Text style={styles.primaryText}>SAVE RULE</Text></Pressable>{teamError ? <Text style={styles.dialogError}>{teamError}</Text> : null}</View>}
           </>}
           </>}
           {error ? <Text style={styles.dialogError}>{error}</Text> : null}
