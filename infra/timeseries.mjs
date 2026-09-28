@@ -24,11 +24,19 @@ export async function installTimeseries() {
     console.log(`[dry-run] ensure time-series Store ${config.projectId}`);
     return;
   }
+
   try {
     await request(`/timeseries/stores/${encodeURIComponent(config.projectId)}`);
     console.log(`Kept existing time-series Store ${config.projectId}`);
+    return;
   } catch (caught) {
-    if (caught?.status !== 404) throw caught;
+    // Deployment keys can be write-only, and the native solution deployer can
+    // create this Store concurrently. In both cases, POST is the authoritative
+    // idempotency check: a conflict means the project-scoped Store now exists.
+    if (![401, 403, 404].includes(caught?.status)) throw caught;
+  }
+
+  try {
     await request("/timeseries/stores", {
       method: "POST",
       body: JSON.stringify({
@@ -37,6 +45,18 @@ export async function installTimeseries() {
       }),
     });
     console.log(`Created time-series Store ${config.projectId}`);
+  } catch (caught) {
+    if (caught?.status === 409) {
+      console.log(`Kept existing time-series Store ${config.projectId}`);
+      return;
+    }
+    if ([401, 403].includes(caught?.status)) {
+      throw new Error(
+        `${caught.message}. APPWRITE_API_KEY requires the timeseries.write scope`,
+        { cause: caught },
+      );
+    }
+    throw caught;
   }
 }
 
