@@ -19,7 +19,6 @@ type Farm = Models.Row & { name: string; country: string; location: string; halo
 type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
 type CachedSnapshot = { version: 2; user: CurrentUser; farms: CachedFarm[]; areas: CachedGeofenceArea[]; rules: CachedGeofenceRule[]; devices: Device[]; telemetry: CachedTelemetry[] };
-type LegacyCachedSnapshot = Omit<CachedSnapshot, "version" | "areas" | "rules"> & { version: 1 };
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
 type Telemetry = Models.Row & { deviceId: string; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; receivedAt: string };
@@ -355,14 +354,11 @@ async function readCachedSnapshot(userId?: string) {
     const id = userId ?? await AsyncStorage.getItem(lastUserCacheKey);
     if (!id) return null;
     const [raw, selectedFarmId] = await AsyncStorage.multiGet([snapshotCacheKey(id), selectedFarmCacheKey(id)]);
-    const parsed = raw[1] ? JSON.parse(raw[1]) as CachedSnapshot | LegacyCachedSnapshot : null;
-    if (!parsed || ![1, 2].includes(parsed.version) || parsed.user?.$id !== id || !Array.isArray(parsed.farms) ||
-        !Array.isArray(parsed.devices) || !Array.isArray(parsed.telemetry) ||
-        (parsed.version === 2 && (!Array.isArray(parsed.areas) || !Array.isArray(parsed.rules)))) return null;
-    const snapshot: CachedSnapshot = parsed.version === 2
-      ? parsed
-      : { ...parsed, version: 2, areas: [], rules: [] };
-    return { ...snapshot, selectedFarmId: selectedFarmId[1] || (snapshot.user.prefs as { currentFarmId?: string }).currentFarmId || "" };
+    const parsed = raw[1] ? JSON.parse(raw[1]) as CachedSnapshot : null;
+    if (!parsed || parsed.version !== 2 || parsed.user?.$id !== id || !Array.isArray(parsed.farms) ||
+        !Array.isArray(parsed.areas) || !Array.isArray(parsed.rules) || !Array.isArray(parsed.devices) ||
+        !Array.isArray(parsed.telemetry)) return null;
+    return { ...parsed, selectedFarmId: selectedFarmId[1] || (parsed.user.prefs as { currentFarmId?: string }).currentFarmId || "" };
   } catch { return null; }
 }
 
