@@ -134,7 +134,10 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
   assert.deepEqual(rows[1].permissions, devices.get(remoteId).$permissions);
   assert.equal(timeseriesWrites.length, 1);
-  assert.match(timeseriesWrites[0].data, new RegExp(`device_${remoteId}.*sensor_12=3\\.7`));
+  assert.match(timeseriesWrites[0].data, new RegExp(`device_${remoteId}.*sensor_battery_voltage=3\\.7`));
+  assert.match(timeseriesWrites[0].data, /lat=59\.3,lon=18/);
+  assert.doesNotMatch(timeseriesWrites[0].data, /sensor_(3|4)=/);
+  assert.doesNotMatch(timeseriesWrites[0].data, /sensor_gps=/);
 });
 
 test("a gateway cannot write a remote device from another farm", async () => {
@@ -158,8 +161,8 @@ test("multiple queued readings remain in time series while TablesDB keeps one la
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map(({ data }) => data.deviceId), [gatewayId, remoteId]);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[0].value, 3.65);
-  assert.match(timeseriesWrites[0].data, /sensor_12=3\.7/);
-  assert.match(timeseriesWrites[0].data, /sensor_12=3\.65/);
+  assert.match(timeseriesWrites[0].data, /sensor_battery_voltage=3\.7/);
+  assert.match(timeseriesWrites[0].data, /sensor_battery_voltage=3\.65/);
 });
 
 test("legacy single-device telemetry remains accepted", async () => {
@@ -167,6 +170,25 @@ test("legacy single-device telemetry remains accepted", async () => {
   assert.equal(result.status, 201);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].data.deviceId, gatewayId);
+});
+
+test("sensor indexes become named fields and GPS remains numeric", async () => {
+  const result = await publish({ sensors: [
+    { type: 1, value: 21.5 }, { type: 2, value: 61 },
+    { type: 3, value: 59.3293 }, { type: 4, value: 18.0686 },
+    { type: 5, value: 2.4 },
+    { type: 6, value: 0.1 }, { type: 7, value: 0.2 }, { type: 8, value: 9.8 },
+    { type: 9, value: 0.01 }, { type: 10, value: 0.02 }, { type: 11, value: 0.03 },
+    { type: 12, value: 3.8 },
+  ] });
+  assert.equal(result.status, 201);
+  const line = timeseriesWrites[0].data;
+  for (const field of ["temperature", "humidity", "length", "accel_x", "accel_y", "accel_z",
+    "gyro_x", "gyro_y", "gyro_z", "battery_voltage"]) {
+    assert.match(line, new RegExp(`sensor_${field}=`));
+  }
+  assert.match(line, /lat=59\.3293,lon=18\.0686/);
+  assert.doesNotMatch(line, /sensor_\d+=|sensor_gps=/);
 });
 
 

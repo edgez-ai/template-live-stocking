@@ -9,7 +9,9 @@ device's latest telemetry row. A JSON array is accepted for gateway batches. Eac
 `clientId` selects the Appwrite device that owns that reading; remote devices
 must belong to the gateway's farm. Every reading is written to measurement
 `device_<deviceId>` in the project's Time Series Store, with numeric sensors as
-`sensor_<type>` fields. Repeated `clientId` entries remain separate time-series
+named fields such as `sensor_temperature` and `sensor_battery_voltage`.
+Latitude and longitude are stored as numeric `lat` and `lon` fields compatible
+with Flux's built-in `experimental/geo` package. Repeated `clientId` entries remain separate time-series
 points, while TablesDB keeps only the last reading and status for each device.
 A legacy single JSON object follows the same path for the publishing device.
 The unified `status` payload may include an integer `batteryVoltageMv` from

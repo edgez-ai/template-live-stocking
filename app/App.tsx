@@ -325,10 +325,10 @@ async function queryDeviceTimeseries(deviceId: string, duration: number) {
   return payload.rows || [];
 }
 
-function timeseriesPoints(rows: TimeseriesRow[], field: string, duration: number): VoltagePoint[] {
+function timeseriesPoints(rows: TimeseriesRow[], fields: string[], duration: number): VoltagePoint[] {
   const since = Date.now() - duration;
   return rows.flatMap((row) => {
-    if (row._field !== field) return [];
+    if (typeof row._field !== "string" || !fields.includes(row._field)) return [];
     const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
     const value = typeof row._value === "number" ? row._value : Number(row._value);
     return Number.isFinite(timestamp) && timestamp >= since && Number.isFinite(value) ? [{ timestamp, value }] : [];
@@ -1072,8 +1072,8 @@ export default function App() {
     setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
     queryDeviceTimeseries(detailDevice.$id, duration).then((rows) => {
       if (!active) return;
-      setHistoryPoints(timeseriesPoints(rows, `sensor_${sensorType.batteryVoltage}`, duration));
-      setTemperatureHistoryPoints(timeseriesPoints(rows, `sensor_${sensorType.temperature}`, duration));
+      setHistoryPoints(timeseriesPoints(rows, ["sensor_battery_voltage", `sensor_${sensorType.batteryVoltage}`], duration));
+      setTemperatureHistoryPoints(timeseriesPoints(rows, ["sensor_temperature", `sensor_${sensorType.temperature}`], duration));
     }).catch((caught) => { if (active) { setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration)); setTemperatureHistoryPoints(cachedTemperaturePoints(telemetryRef.current, detailDevice.$id, duration)); setHistoryError(messageOf(caught)); } })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };

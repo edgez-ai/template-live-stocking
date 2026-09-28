@@ -73,7 +73,9 @@ async function queryDeviceTimeseries(deviceId: string, duration: number) {
 }
 
 function sensorLabel(field: string) {
-  return field.startsWith("sensor_") ? `Sensor ${field.slice("sensor_".length)}` : field;
+  if (!field.startsWith("sensor_")) return field;
+  const name = field.slice("sensor_".length).replaceAll("_", " ");
+  return name.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function timeseriesSensorSeries(rows: TimeseriesRow[], duration: number): SensorSeries[] {

@@ -15,6 +15,18 @@ const SENSOR_LONGITUDE = 4;
 const SENSOR_ACCELEROMETER = [6, 7, 8];
 const SENSOR_GYROSCOPE = [9, 10, 11];
 const SENSOR_TYPE_MAX = 12;
+const SENSOR_FIELD_NAMES = new Map([
+  [1, "temperature"],
+  [2, "humidity"],
+  [5, "length"],
+  [6, "accel_x"],
+  [7, "accel_y"],
+  [8, "accel_z"],
+  [9, "gyro_x"],
+  [10, "gyro_y"],
+  [11, "gyro_z"],
+  [12, "battery_voltage"],
+]);
 const OTA_STATUSES = new Set(["pending", "succeeded", "failed", "busy"]);
 const DOWNLINK_STATUSES = new Set(["cached", "transmitting", "applied", "failed", "expired"]);
 const LATEST_RELEASE_CACHE_MS = 5 * 60 * 1000;
@@ -78,10 +90,18 @@ function telemetryLine(target, entry, channel, receivedAt, sequence = 0) {
   if (typeof entry.firmwareVersion === "string" && entry.firmwareVersion) {
     fields.push(`firmwareVersion=${stringField(entry.firmwareVersion)}`);
   }
-  for (const sensor of entry.sensors || []) fields.push(`sensor_${sensor.type}=${sensor.value}`);
+  for (const sensor of entry.sensors || []) {
+    const name = SENSOR_FIELD_NAMES.get(sensor.type);
+    if (name) fields.push(`sensor_${name}=${sensor.value}`);
+  }
+  const latitude = sensorValue(entry, SENSOR_LATITUDE);
+  const longitude = sensorValue(entry, SENSOR_LONGITUDE);
+  if (latitude !== null && longitude !== null) {
+    fields.push(`lat=${latitude}`, `lon=${longitude}`);
+  }
   if (Number.isInteger(entry.batteryVoltageMv) && entry.batteryVoltageMv >= 2500 && entry.batteryVoltageMv <= 5000 &&
       !entry.sensors?.some((sensor) => sensor.type === SENSOR_BATTERY_VOLTAGE)) {
-    fields.push(`sensor_${SENSOR_BATTERY_VOLTAGE}=${entry.batteryVoltageMv / 1000}`);
+    fields.push(`sensor_battery_voltage=${entry.batteryVoltageMv / 1000}`);
   }
   const timestamp = BigInt(Date.parse(receivedAt)) * 1000000n + BigInt(sequence);
   return `${escapeMeasurement(measurementForDevice(target.$id))},${tags} ${fields.join(",")} ${timestamp}`;

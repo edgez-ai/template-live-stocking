@@ -85,8 +85,10 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    permissions. It also upserts the gateway's current links in `topology-links`.
 8. Web and mobile read current state and topology from TablesDB, then query
    historical sensor fields from Time Series with an Appwrite JWT. Each device
-   uses the deterministic `device_<deviceId>` measurement; sensor type `N` is
-   stored as field `sensor_N`.
+   uses the deterministic `device_<deviceId>` measurement. Numeric sensor type
+   indexes are stored under text fields such as `sensor_temperature` and
+   `sensor_battery_voltage`; GPS is stored as numeric `lat` and `lon` fields so
+   Flux's built-in `experimental/geo` package can shape and range-filter it.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
 
