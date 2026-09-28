@@ -168,6 +168,19 @@ function statusOf(device: Device, latest?: Telemetry) {
   return Date.now() - new Date(latest.receivedAt).getTime() <= 2 * 60 * 1000 ? "Online" : "Offline";
 }
 
+function gatewayStatusOf(row?: Telemetry) {
+  if (!row) return "unknown";
+  try {
+    const value = (JSON.parse(row.payload) as { gateway_status?: unknown }).gateway_status;
+    return value === "online" || value === "offline" || value === "disabled" ? value : "unknown";
+  } catch { return "unknown"; }
+}
+
+function isGatewayDevice(device: Device, latest?: Telemetry) {
+  const gatewayStatus = gatewayStatusOf(latest);
+  return device.metadata?.mqttGateway === true || gatewayStatus === "online" || gatewayStatus === "offline";
+}
+
 function relativeTime(value: string) {
   const seconds = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
@@ -494,6 +507,12 @@ export default function Home() {
   const selectedLatestTelemetry = selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined;
   const selectedGateway = selectedLatestTelemetry?.gatewayDeviceId
     ? devices.find((device) => device.$id === selectedLatestTelemetry.gatewayDeviceId) : undefined;
+  const selectedGatewayLatest = selectedGateway ? latestTelemetryByDevice.get(selectedGateway.$id) : undefined;
+  const selectedIsGateway = selectedDevice ? isGatewayDevice(selectedDevice, selectedLatestTelemetry) : false;
+  const selectedGatewayStatus = gatewayStatusOf(selectedIsGateway ? selectedLatestTelemetry : selectedGatewayLatest);
+  const selectedGatewayAvailable = selectedIsGateway || selectedLatestTelemetry?.gatewayDeviceId
+    ? selectedGatewayStatus === "online" || (selectedGatewayStatus === "unknown" && selectedDevice !== undefined && statusOf(selectedDevice, selectedLatestTelemetry) === "Online")
+    : null;
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatestTelemetry) : "";
@@ -552,6 +571,7 @@ export default function Home() {
             <button className="mobile-back" onClick={() => { setDeleteConfirm(false); setMobileDetailOpen(false); }}>‹ All devices</button>
             <div className="detail-heading"><div><p className="eyebrow">DEVICE · {selectedDevice.serial}</p><h2>{selectedDevice.name}</h2></div><div className="detail-actions"><span className={`status ${selectedStatus === "Online" ? "online" : "offline"}`}><i />{selectedStatus}</span><button className="delete-device" onClick={() => setDeleteConfirm(true)}>Delete</button></div></div>
             <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedLatestTelemetry.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedLatestTelemetry.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
+            <div className="gateway-summary"><div><span>DEVICE ROLE</span><strong>{selectedIsGateway ? "Gateway" : "Leaf device"}</strong></div><div><span>GATEWAY AVAILABLE</span><strong className={selectedGatewayAvailable === true ? "available" : selectedGatewayAvailable === false ? "unavailable" : "unknown"}>{selectedGatewayAvailable === true ? "Available" : selectedGatewayAvailable === false ? "Unavailable" : "Not configured"}</strong></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
