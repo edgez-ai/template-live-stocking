@@ -21,6 +21,7 @@ type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowCha
 type CachedSnapshot = { version: 2; user: CurrentUser; farms: CachedFarm[]; areas: CachedGeofenceArea[]; rules: CachedGeofenceRule[]; devices: Device[]; telemetry: CachedTelemetry[] };
 type FarmDetails = { name: string; country: string; location: string; halowChannel: string; meshId: string; meshPassphrase: string };
 type Credential = { clientId: string; username: string; password: string };
+type PreparedProvisioning = { device: Device; credential: Credential };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
@@ -743,6 +744,7 @@ export default function App() {
   const [upstreamPassword, setUpstreamPassword] = useState("");
   const [upstreamNetworks, setUpstreamNetworks] = useState<EdgezProvisioningWifiNetwork[]>([]);
   const [provisioningStatus, setProvisioningStatus] = useState("");
+  const [preparedProvisioning, setPreparedProvisioning] = useState<PreparedProvisioning | null>(null);
   const [provisioningDialogOpen, setProvisioningDialogOpen] = useState(false);
   const [provisioningStep, setProvisioningStep] = useState<1 | 2 | 3 | 4>(1);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
@@ -1170,7 +1172,7 @@ export default function App() {
     setBusy(true); setError(""); setProvisioningStatus("Scanning for ESP32, nRF54, and H7608 devices…");
     try {
       if (selectedBleDevice) await provisioningManager.disconnect(selectedBleDevice);
-      setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false);
+      setSelectedBleDevice(null); setPreparedProvisioning(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false);
       const result = await provisioningManager.scan();
       const valid = result.devices;
       setBleDevices(valid);
@@ -1185,7 +1187,7 @@ export default function App() {
     setMenuOpen(false);
     if (selectedBleDevice) void provisioningManager.disconnect(selectedBleDevice);
     upstreamScanGeneration.current += 1;
-    setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUpstreamConnection(null); setUpstreamWifiScanning(false); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
+    setBleDevices([]); setSelectedBleDevice(null); setPreparedProvisioning(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation(""); setDeviceLocationPickerOpen(false); setUpstreamConnection(null); setUpstreamWifiScanning(false); setUpstreamSsid(""); setUpstreamPassword(""); setUpstreamNetworks([]);
     setError(""); setProvisioningStatus("Start by scanning for a device in provisioning mode.");
     setProvisioningStep(1);
     setProvisioningDialogOpen(true);
@@ -1196,7 +1198,7 @@ export default function App() {
     upstreamScanGeneration.current += 1;
     setUpstreamWifiScanning(false);
     if (selectedBleDevice) void provisioningManager.disconnect(selectedBleDevice);
-    setSelectedBleDevice(null); setBleConnected(false);
+    setSelectedBleDevice(null); setPreparedProvisioning(null); setBleConnected(false);
     setDeviceLocationPickerOpen(false);
     setProvisioningDialogOpen(false);
   }
@@ -1224,6 +1226,7 @@ export default function App() {
     if (selectedBleDevice) void provisioningManager.disconnect(selectedBleDevice);
     setError("");
     setSelectedBleDevice(device);
+    setPreparedProvisioning(null);
     const existing = devices.find((item) => item.serial === device.serial);
     setDeviceIcon(existing?.metadata?.icon || device.category);
     setDeviceColor(existing ? colorForDevice(existing) : "blue");
@@ -1233,9 +1236,38 @@ export default function App() {
     setDeviceLocation(previousLocation ? `${previousLocation.latitude.toFixed(6)}, ${previousLocation.longitude.toFixed(6)}` : "");
     setProofOfPossession(provisioningPop);
     setDeviceWifiPassword("");
+    setName(existing?.name || (device.requiresDeviceName ? device.serial : ""));
     setBleConnected(false);
     setProvisioningStatus(`Confirm the details for ${device.name}.`);
     setProvisioningStep(2);
+  }
+
+  async function prepareDeviceCredential(device: ProvisioningDevice, farm: Farm): Promise<PreparedProvisioning> {
+    const serial = device.serial;
+    let appwriteDevice = devices.find((candidate) => candidate.serial === serial);
+    if (appwriteDevice && appwriteDevice.metadata?.farmId !== farm.$id) {
+      throw new Error("This device is already assigned to another farm. Open Settings to select that farm.");
+    }
+    if (!appwriteDevice) {
+      appwriteDevice = await deviceApi<Device>("", "POST", {
+        serial,
+        name: name.trim() || serial,
+        enabled: true,
+        permissions: [
+          Permission.read(Role.team(farm.teamId)),
+          Permission.update(Role.team(farm.teamId, "owner")),
+          Permission.delete(Role.team(farm.teamId, "owner")),
+        ],
+        // H7608 is gateway-capable. The selected upstream mode is reported by
+        // telemetry after provisioning and can refine this cached UI hint.
+        metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: device.firmwareTarget, mqttGateway: device.kind === "h7608" },
+      });
+    }
+    const credential = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
+    if (credential.username !== serial) {
+      throw new Error(`The server returned MQTT username ${credential.username}, but this device advertises serial ${serial}.`);
+    }
+    return { device: appwriteDevice, credential };
   }
 
   async function chooseCurrentDeviceLocation() {
@@ -1251,9 +1283,27 @@ export default function App() {
   }
 
   async function connectForProvisioning() {
-    if (!selectedBleDevice || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim()) || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))) return;
+    if (!selectedBleDevice) return;
+    if (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) {
+      setError(selectedBleDevice.transport === "softap" ? "Enter the current provisioning Wi-Fi password." : "Enter the device proof of possession.");
+      return;
+    }
+    const farm = farms.find((candidate) => candidate.$id === currentFarmId);
+    if (selectedBleDevice.kind === "h7608") {
+      if (!user || offline) { setError("Reconnect the phone to the internet, then retry. The app must prepare the MQTT credential before joining the H7608 provisioning Wi-Fi."); return; }
+      if (!farm) { setError("Select a farm before connecting to the H7608."); return; }
+      if (!name.trim()) { setError("Enter a device and Wi-Fi AP name."); return; }
+      if (name.trim().length > selectedBleDevice.deviceNameMaxLength) { setError(`The device name must not exceed ${selectedBleDevice.deviceNameMaxLength} characters.`); return; }
+      if (!validDeviceWifiPassword(deviceWifiPassword)) { setError("The new device Wi-Fi password must be 8 to 63 printable characters."); return; }
+      const coordinates = deviceLocationChoice === "none" ? null : coordinatesFromLocation(deviceLocation);
+      if (deviceLocationChoice !== "none" && !coordinates) { setError("Choose a valid device location before provisioning."); return; }
+    }
     setBusy(true); setError("");
     try {
+      if (selectedBleDevice.kind === "h7608" && farm && !preparedProvisioning) {
+        setProvisioningStatus("Preparing the MQTT credential before joining the provisioning Wi-Fi…");
+        setPreparedProvisioning(await prepareDeviceCredential(selectedBleDevice, farm));
+      }
       setProvisioningStatus(selectedBleDevice.transport === "softap" ? `Connecting to the ${selectedBleDevice.name} provisioning SoftAP…` : selectedBleDevice.requiresProofOfPossession ? `Authenticating ${selectedBleDevice.name} with the provided PoP…` : `Connecting to ${selectedBleDevice.name}…`);
       await provisioningManager.connect(selectedBleDevice, selectedBleDevice.requiresProofOfPossession ? proofOfPossession.trim() : undefined);
       setBleConnected(true);
@@ -1301,38 +1351,29 @@ export default function App() {
 
   async function provisionDevice() {
     const farm = farms.find((candidate) => candidate.$id === currentFarmId);
-    if (!user || offline || !farm || !selectedBleDevice || !bleConnected) return;
+    if (!user || (offline && !preparedProvisioning)) { setError("Provisioning requires a prepared MQTT credential. Reconnect the phone to the internet and restart H7608 provisioning."); return; }
+    if (!farm) { setError("Select a farm before provisioning this device."); return; }
+    if (!selectedBleDevice) { setError("Select a device before provisioning."); return; }
+    if (!bleConnected) { setError("The provisioning connection was lost. Go back and reconnect to the device."); return; }
+    if (selectedBleDevice.requiresDeviceName && !name.trim()) { setError("Enter a device and Wi-Fi AP name."); return; }
+    if (name.trim().length > selectedBleDevice.deviceNameMaxLength) { setError(`The device name must not exceed ${selectedBleDevice.deviceNameMaxLength} characters.`); return; }
     if (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword)) { setError("The new device Wi-Fi password must be 8 to 63 printable characters."); return; }
     setBusy(true); setError(""); setProvisioningStatus("Preparing the device credential…");
     try {
       const serial = selectedBleDevice.serial;
 
-      setProvisioningStatus("Creating Appwrite device credential…");
-      let appwriteDevice = devices.find((device) => device.serial === serial);
-      if (appwriteDevice && appwriteDevice.metadata?.farmId !== farm.$id) {
-        throw new Error("This device is already assigned to another farm. Open Settings to select that farm.");
-      }
+      setProvisioningStatus(preparedProvisioning ? "Using the prepared MQTT credential…" : "Creating Appwrite device credential…");
       const coordinates = deviceLocationChoice === "none" || deviceLocationChoice === "gps" ? null : coordinatesFromLocation(deviceLocation);
       if (deviceLocationChoice !== "none" && deviceLocationChoice !== "gps" && !coordinates) throw new Error("Choose a valid device location before provisioning.");
       const mqttGateway = upstreamConnection === "wifi" || upstreamConnection === "ethernet";
-      if (!appwriteDevice) {
-        appwriteDevice = await deviceApi<Device>("", "POST", {
-          serial,
-          name: name.trim() || serial,
-          enabled: true,
-          permissions: [
-            Permission.read(Role.team(farm.teamId)),
-            Permission.update(Role.team(farm.teamId, "owner")),
-            Permission.delete(Role.team(farm.teamId, "owner")),
-          ],
-          metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway },
-        });
-      } else if (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway) {
+      const backend = preparedProvisioning ?? await prepareDeviceCredential(selectedBleDevice, farm);
+      let appwriteDevice = backend.device;
+      if (!offline && (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway)) {
         appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
           metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway },
         });
       }
-      const mqtt = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
+      const mqtt = backend.credential;
       if (mqtt.username !== serial) {
         throw new Error(`The server returned MQTT username ${mqtt.username}, but this device advertises serial ${serial}.`);
       }
@@ -1362,9 +1403,9 @@ export default function App() {
         upstreamConnection === "wifi" && selectedBleDevice.supportsUpstreamWifi ? { ssid: upstreamSsid, passphrase: upstreamPassword } : undefined,
       );
       setProvisioningStatus(`Provisioned ${serial}.`);
-      setSelectedBleDevice(null); setBleDevices([]); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
+      setSelectedBleDevice(null); setPreparedProvisioning(null); setBleDevices([]); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setName(""); setDeviceIcon("tracker"); setDeviceColor("blue"); setDeviceLocationChoice("none"); setDeviceLocation("");
       setProvisioningDialogOpen(false);
-      await refresh(user);
+      if (!offline) await refresh(user);
     } catch (caught) { setError(messageOf(caught)); setProvisioningStatus("Provisioning did not complete."); }
     finally { await provisioningManager.disconnect(selectedBleDevice); setBleConnected(false); setBusy(false); }
   }
@@ -1900,8 +1941,8 @@ export default function App() {
               <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
               {selectedBleDevice.supportsDeviceGps && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this device</Text></Pressable>}
               {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "CURRENT PROVISIONING WI-FI PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><PasswordField value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Factory provisioning password" : "PoP shown on the device"} accessibilityName={selectedBleDevice.transport === "softap" ? "current provisioning Wi-Fi password" : "proof of possession"} /></>}
-              {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><PasswordField value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" accessibilityName="new device Wi-Fi password" maxLength={63} /><Text style={styles.fieldHint}>This replaces the factory password when the device finishes provisioning.</Text></>}
-              <Pressable style={styles.primary} onPress={connectForProvisioning} disabled={busy || (selectedBleDevice.requiresProofOfPossession && !proofOfPossession.trim()) || (selectedBleDevice.requiresDeviceName && !name.trim()) || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
+              {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><PasswordField value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" accessibilityName="new device Wi-Fi password" maxLength={63} /><Text style={[styles.fieldHint, Boolean(deviceWifiPassword) && !validDeviceWifiPassword(deviceWifiPassword) && styles.fieldHintError]}>{deviceWifiPassword && !validDeviceWifiPassword(deviceWifiPassword) ? "Use 8 to 63 printable characters." : "This replaces the factory password when the device finishes provisioning."}</Text></>}
+              <Pressable style={[styles.primary, busy && styles.disabledButton]} onPress={connectForProvisioning} disabled={busy}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
               <Text style={styles.dialogHelp}>Choose how this device reaches its upstream network. It will receive the farm mesh settings either way.</Text>
@@ -1920,7 +1961,7 @@ export default function App() {
             {provisioningStep === 4 && selectedBleDevice && <>
               <View style={styles.selectedSummary}><Text style={styles.deviceNameDark}>{currentFarm?.name}</Text><Text style={styles.muted}>{currentFarm?.location}, {currentFarm?.country} · Channel {currentFarm?.halowChannel}</Text><Text style={styles.muted}>Mesh ID: {currentFarm?.meshId}</Text><Text style={styles.muted}>Device location: {deviceLocationChoice === "none" ? "None" : deviceLocationChoice === "gps" ? "Device GPS" : deviceLocation}</Text></View>
               <Text style={styles.dialogHelp}>{!selectedBleDevice.supportsUpstreamWifi ? "HaLow upstream. " : upstreamConnection === "wifi" ? `Upstream Wi-Fi: ${upstreamSsid}. ` : upstreamConnection === "ethernet" ? "Ethernet upstream. " : "No upstream connection. "}The app will send the mesh settings and MQTT credential to the device.{selectedBleDevice.kind === "h7608" ? " Its local Wi-Fi AP will restart with the new name and password." : ""}</Text>
-              <Pressable style={styles.primary} onPress={provisionDevice} disabled={busy || !bleConnected || !currentFarm || (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword))}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
+              <Pressable style={[styles.primary, busy && styles.disabledButton]} onPress={provisionDevice} disabled={busy}><Text style={styles.primaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep > 1 && <Pressable style={styles.backButton} onPress={previousProvisioningStep} disabled={busy}><Text style={styles.secondaryText}>BACK</Text></Pressable>}
             {provisioningStatus ? <Text style={styles.dialogStatus}>{provisioningStatus}</Text> : null}
@@ -1979,7 +2020,7 @@ const styles = StyleSheet.create({
   areaMapControls: { position: "absolute", right: 16, bottom: 20, gap: 8, alignItems: "flex-end" }, areaDimension: { gap: 4, alignItems: "flex-end" }, areaControlButtons: { flexDirection: "row", gap: 6 }, areaControl: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, areaControlText: { color: "white", fontSize: 28, fontWeight: "600" }, areaControlLabel: { color: "white", fontSize: 10, fontWeight: "800", paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8, backgroundColor: "#092e35e8" },
   bleDevice: { padding: 13, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white" }, deviceNameDark: { color: "#0a3037", fontSize: 14, fontWeight: "800" },
   wifiHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, rescan: { color: "#0a8c87", fontSize: 10, fontWeight: "900" }, wifiNetwork: { padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, wifiNetworkSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" }, signal: { color: "#59716f", fontSize: 10, fontWeight: "700" },
-  dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
+  dialogPage: { flex: 1, backgroundColor: "#f7faf9" }, dialogScreen: { flex: 1 }, dialogHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22, paddingVertical: 18, borderBottomWidth: 1, borderBottomColor: "#dce6e5" }, stepLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, dialogTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 }, close: { color: "#59716f", fontSize: 10, fontWeight: "900" }, dialogContent: { padding: 22, paddingBottom: 34, gap: 10 }, dialogHelp: { color: "#59716f", fontSize: 13, lineHeight: 19 }, selectedSummary: { padding: 13, borderRadius: 12, backgroundColor: "#e9f7f5", marginBottom: 4 }, fieldLabel: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, fieldHint: { color: "#718783", fontSize: 10, marginTop: -5 }, fieldHintError: { color: "#b9472f" }, backButton: { minHeight: 44, alignItems: "center", justifyContent: "center" }, dialogStatus: { color: "#59716f", fontSize: 11, textAlign: "center", marginTop: 2 }, dialogError: { color: "#b9472f", fontSize: 11, textAlign: "center" },
   flashWarning: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#e8b5aa", backgroundColor: "#fff4f1" }, flashWarningTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, flashWarningText: { color: "#7f5b53", fontSize: 11, lineHeight: 16, marginTop: 5 }, flashWarningCode: { fontWeight: "900" }, flashHash: { color: "#718783", fontSize: 9, fontFamily: Platform.OS === "android" ? "monospace" : undefined }, flashProgress: { padding: 14, borderRadius: 12, backgroundColor: "#e9f7f5", gap: 8 }, flashProgressHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, flashElapsed: { color: "#087f73", fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }, flashLog: { paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#a8cfca", gap: 3 }, flashLogLine: { color: "#315e59", fontSize: 9, lineHeight: 13, fontFamily: Platform.OS === "android" ? "monospace" : undefined },
   sectionLabel: { color: "#7d9a97", fontSize: 10, fontWeight: "900", letterSpacing: 1.2, marginTop: 6 }, deviceCard: { padding: 18, borderRadius: 18, backgroundColor: "#f7faf9" }, deviceCardHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, deviceCardName: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, deviceSerial: { color: "#718783", fontSize: 10, fontWeight: "700", letterSpacing: .7, marginTop: 3 }, statusBadge: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 20, backgroundColor: "#e7efed" }, statusDot: { width: 7, height: 7, borderRadius: 4 }, statusOnline: { backgroundColor: "#16a085" }, statusOffline: { backgroundColor: "#9badaa" }, statusText: { color: "#4d6965", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, latestRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 24 }, latestLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, latestValue: { color: "#0a3037", fontSize: 39, lineHeight: 45, fontWeight: "900", letterSpacing: -1.5 }, cardArrow: { color: "#0a8c87", fontSize: 36, lineHeight: 42, fontWeight: "300" }, lastSeen: { color: "#718783", fontSize: 10, marginTop: 5 },
   gatewaySummary: { flexDirection: "row", gap: 10 }, gatewaySummaryItem: { flex: 1, padding: 12, borderWidth: 1, borderColor: "#d7e3e0", borderRadius: 12, backgroundColor: "#f7faf9", gap: 4 }, gatewaySummaryLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, gatewaySummaryValue: { color: "#0a3037", fontSize: 13, fontWeight: "900" }, gatewayAvailable: { color: "#087f73" }, gatewayUnavailable: { color: "#b9472f" }, gatewayUnknown: { color: "#718783" },
