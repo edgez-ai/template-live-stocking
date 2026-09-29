@@ -1,6 +1,7 @@
 "use client";
 
 import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
@@ -540,7 +541,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read the latest device state from TablesDB and permitted history from Time Series.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void authenticate(false); }}>

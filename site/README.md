@@ -19,6 +19,10 @@ device through the authenticated Appwrite Devices API. The detail view also
 draws the selected device's direct HaLow links from the current-state
 `topology-links` table. Only active rows whose gateway report arrived within
 the last two minutes are displayed.
+The authenticated `/topology` page renders those same recent links as an
+interactive force-directed network graph. Operators can pan, zoom, drag and
+inspect devices, filter the graph by farm, compare RF RSSI, and see unresolved
+HaLow peers alongside provisioned devices without requiring a Neo4j database.
 HT-HC33 details also show the running firmware version and offer MQTT OTA from
 the latest release of `APPWRITE_VCS_REPOSITORY_URL`, the repository used for
 the current Appwrite Site deployment.

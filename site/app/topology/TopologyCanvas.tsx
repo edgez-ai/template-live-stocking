@@ -1,0 +1,154 @@
+"use client";
+
+import ForceGraph2D, { ForceGraphMethods, GraphData, LinkObject, NodeObject } from "react-force-graph-2d";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+export type CanvasNode = {
+  id: string;
+  label: string;
+  kind: "gateway" | "device" | "unresolved";
+  online: boolean;
+};
+
+export type CanvasLink = {
+  id: string;
+  from: string;
+  to: string;
+  rssi?: number | null;
+};
+
+type GraphNode = CanvasNode;
+type GraphLink = {
+  id: string;
+  rssi?: number | null;
+};
+
+function signalColor(rssi?: number | null) {
+  if (typeof rssi !== "number") return "#91a7a3";
+  if (rssi >= -60) return "#0a9b7d";
+  if (rssi >= -75) return "#d68a24";
+  return "#d05b47";
+}
+
+function nodeColor(node: GraphNode) {
+  if (node.kind === "gateway") return "#0a8c87";
+  if (node.kind === "unresolved") return "#8b9f9c";
+  return node.online ? "#ff7657" : "#b8c6c3";
+}
+
+export default function TopologyCanvas({
+  nodes,
+  links,
+  selectedId,
+  onSelect,
+}: {
+  nodes: CanvasNode[];
+  links: CanvasLink[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined);
+  const fittedGraphRef = useRef("");
+  const [size, setSize] = useState({ width: 900, height: 650 });
+  const graphKey = useMemo(() => `${nodes.map((node) => node.id).sort().join(",")}|${links.map((link) => link.id).sort().join(",")}`, [links, nodes]);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const update = () => setSize({ width: element.clientWidth || 900, height: element.clientHeight || 650 });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const graphData = useMemo<GraphData<GraphNode, GraphLink>>(() => ({
+    nodes: nodes.map((node) => ({ ...node })),
+    links: links.map((link) => ({ id: link.id, source: link.from, target: link.to, rssi: link.rssi })),
+  }), [links, nodes]);
+
+  function paintNode(node: NodeObject<GraphNode>, context: CanvasRenderingContext2D, scale: number) {
+    const x = node.x || 0;
+    const y = node.y || 0;
+    const radius = node.kind === "gateway" ? 12 : node.kind === "unresolved" ? 8 : 10;
+    if (node.id === selectedId) {
+      context.beginPath();
+      context.arc(x, y, radius + 4, 0, Math.PI * 2);
+      context.fillStyle = "#ffcf5c";
+      context.fill();
+    }
+    context.beginPath();
+    context.arc(x, y, radius, 0, Math.PI * 2);
+    context.fillStyle = nodeColor(node);
+    context.fill();
+    context.lineWidth = 2 / scale;
+    context.strokeStyle = "#ffffff";
+    context.stroke();
+
+    const fontSize = 11 / scale;
+    context.font = `800 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    const labelY = y + radius + 9 / scale;
+    const textWidth = context.measureText(node.label).width;
+    context.fillStyle = "rgba(255, 255, 255, .9)";
+    context.fillRect(x - textWidth / 2 - 3 / scale, labelY - fontSize / 2 - 2 / scale, textWidth + 6 / scale, fontSize + 4 / scale);
+    context.fillStyle = "#173f42";
+    context.fillText(node.label, x, labelY);
+  }
+
+  function paintLinkLabel(link: LinkObject<GraphNode, GraphLink>, context: CanvasRenderingContext2D, scale: number) {
+    const source = typeof link.source === "object" ? link.source : undefined;
+    const target = typeof link.target === "object" ? link.target : undefined;
+    if (!source || !target || source.x === undefined || source.y === undefined || target.x === undefined || target.y === undefined) return;
+    const label = typeof link.rssi === "number" ? `${link.rssi} dBm` : "HaLow";
+    const x = (source.x + target.x) / 2;
+    const y = (source.y + target.y) / 2;
+    const fontSize = 9 / scale;
+    context.font = `800 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    const width = context.measureText(label).width;
+    context.fillStyle = "rgba(245, 249, 248, .94)";
+    context.fillRect(x - width / 2 - 3 / scale, y - fontSize / 2 - 2 / scale, width + 6 / scale, fontSize + 4 / scale);
+    context.fillStyle = signalColor(link.rssi);
+    context.fillText(label, x, y);
+  }
+
+  return <div className="topology-canvas" ref={containerRef}>
+    <ForceGraph2D<GraphNode, GraphLink>
+      ref={graphRef}
+      width={size.width}
+      height={size.height}
+      graphData={graphData}
+      backgroundColor="rgba(0,0,0,0)"
+      nodeCanvasObject={paintNode}
+      nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 15 : 12, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
+      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"}`}
+      linkColor={(link) => signalColor(link.rssi)}
+      linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
+      linkDirectionalArrowLength={4}
+      linkDirectionalArrowRelPos={.74}
+      linkDirectionalArrowColor={(link) => signalColor(link.rssi)}
+      linkCanvasObjectMode={() => "after"}
+      linkCanvasObject={paintLinkLabel}
+      linkLabel={(link) => typeof link.rssi === "number" ? `RF signal ${link.rssi} dBm` : "RF signal unavailable"}
+      minZoom={.15}
+      maxZoom={6}
+      warmupTicks={80}
+      cooldownTicks={180}
+      d3VelocityDecay={.28}
+      onEngineStop={() => {
+        if (fittedGraphRef.current === graphKey) return;
+        fittedGraphRef.current = graphKey;
+        graphRef.current?.zoomToFit(450, 90);
+      }}
+      onNodeClick={(node) => onSelect(String(node.id || ""))}
+      onBackgroundClick={() => onSelect("")}
+      enableNodeDrag
+      enablePanInteraction
+      enableZoomInteraction
+    />
+  </div>;
+}
