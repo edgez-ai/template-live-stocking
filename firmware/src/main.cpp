@@ -742,53 +742,59 @@ void append_topology(cJSON *entry) {
   }
   cJSON_AddItemToObject(topology, "links", links);
   const int64_t now_ms = esp_timer_get_time() / 1000;
+  uint8_t seen_macs[kMaxTopologyPeers][6]{};
+  cJSON *seen_links[kMaxTopologyPeers]{};
   size_t link_count = 0;
+  auto append_link = [&](const uint8_t mac[6], int64_t age_ms,
+                         int16_t rssi_dbm, bool rssi_valid) {
+    if (!mac || age_ms < 0 || age_ms > kTopologyPeerMaxAgeMs ||
+        (mac[0] & 1U) != 0 ||
+        (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) == 0 ||
+        link_count >= kMaxTopologyPeers) return;
+    for (size_t index = 0; index < link_count; ++index) {
+      if (std::memcmp(seen_macs[index], mac, 6) != 0) continue;
+      // BATMAN supplies reachability only. A later direct Vendor-IE RF
+      // observation enriches the same link with the measured radio RSSI.
+      if (rssi_valid) {
+        cJSON *rssi = cJSON_GetObjectItemCaseSensitive(seen_links[index], "rssi");
+        if (rssi) cJSON_SetNumberValue(rssi, rssi_dbm);
+        else cJSON_AddNumberToObject(seen_links[index], "rssi", rssi_dbm);
+      }
+      return;
+    }
+    cJSON *link = cJSON_CreateObject();
+    if (!link) return;
+    char radio_mac[18]{};
+    std::snprintf(radio_mac, sizeof(radio_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    cJSON_AddStringToObject(link, "peerHalowMac", radio_mac);
+    cJSON_AddNumberToObject(link, "ageMs", static_cast<double>(age_ms));
+    if (rssi_valid) cJSON_AddNumberToObject(link, "rssi", rssi_dbm);
+    cJSON_AddItemToArray(links, link);
+    std::memcpy(seen_macs[link_count], mac, 6);
+    seen_links[link_count] = link;
+    ++link_count;
+  };
+
+  // BATMAN knows every currently reachable mesh originator, including nodes
+  // which do not emit an EdgeZ sensor Vendor IE.
+  HalowRouteSnapshot routes[kMaxTopologyPeers]{};
+  const size_t route_count = halow_snapshot_routes(routes, kMaxTopologyPeers);
+  for (size_t index = 0; index < route_count; ++index) {
+    int16_t rssi_dbm = 0;
+    const bool rssi_valid =
+        halow_get_peer_rssi(routes[index].originator, &rssi_dbm);
+    append_link(routes[index].originator, routes[index].age_ms,
+                rssi_dbm, rssi_valid);
+  }
+
+  // Vendor IE observations may arrive before BATMAN has installed a route.
   for (const auto &peer : snapshot) {
     const int64_t age_ms = now_ms - peer.last_seen_ms;
     if (!peer.occupied || age_ms < 0 || age_ms > kTopologyPeerMaxAgeMs) continue;
-    cJSON *link = cJSON_CreateObject();
-    if (!link) continue;
-    char radio_mac[18]{};
-    std::snprintf(radio_mac, sizeof(radio_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                  peer.radio_mac[0], peer.radio_mac[1], peer.radio_mac[2],
-                  peer.radio_mac[3], peer.radio_mac[4], peer.radio_mac[5]);
-    cJSON_AddStringToObject(link, "peerHalowMac", radio_mac);
-    cJSON_AddNumberToObject(link, "ageMs", static_cast<double>(age_ms));
-    if (peer.rssi_valid) cJSON_AddNumberToObject(link, "rssi", peer.rssi_dbm);
-    cJSON_AddItemToArray(links, link);
-    ++link_count;
+    append_link(peer.radio_mac, age_ms, peer.rssi_dbm, peer.rssi_valid);
   }
 
-  // Topology is identified only by HaLow MAC. The backend resolves that stable
-  // radio identity to the Appwrite device registered by its own telemetry.
-  uint8_t gateway_mac[6];
-  uint8_t gateway_l2[6];
-  bool already_listed = false;
-  if (link_count < kMaxTopologyPeers &&
-      halow_selected_mqtt_gateway(gateway_mac, gateway_l2)) {
-    for (const auto &peer : snapshot) {
-      if (peer.occupied && std::memcmp(peer.radio_mac, gateway_mac, 6) == 0) {
-        already_listed = true;
-        break;
-      }
-    }
-    if (!already_listed) {
-      cJSON *link = cJSON_CreateObject();
-      if (link) {
-        char radio_mac[18]{};
-        int16_t rssi_dbm = 0;
-        std::snprintf(radio_mac, sizeof(radio_mac),
-                      "%02X:%02X:%02X:%02X:%02X:%02X",
-                      gateway_mac[0], gateway_mac[1], gateway_mac[2],
-                      gateway_mac[3], gateway_mac[4], gateway_mac[5]);
-        cJSON_AddStringToObject(link, "peerHalowMac", radio_mac);
-        cJSON_AddNumberToObject(link, "ageMs", 0);
-        if (halow_get_peer_rssi(gateway_mac, &rssi_dbm))
-          cJSON_AddNumberToObject(link, "rssi", rssi_dbm);
-        cJSON_AddItemToArray(links, link);
-      }
-    }
-  }
   cJSON_AddItemToObject(entry, "topology", topology);
 }
 
@@ -862,6 +868,8 @@ void remote_beacon_task(void *) {
 }
 
 void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t count) {
+  uint8_t observer_halow_mac[6]{};
+  const bool observer_mac_valid = halow_get_local_mac(observer_halow_mac);
   for (size_t record_index = 0; record_index < count; ++record_index) {
     const auto &reading = records[record_index];
     cJSON *entry = cJSON_CreateObject();
@@ -879,6 +887,14 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
                     halow_mac[0], halow_mac[1], halow_mac[2],
                     halow_mac[3], halow_mac[4], halow_mac[5]);
       cJSON_AddStringToObject(entry, "halowMac", formatted);
+    }
+    if (reading.halow_mac_valid && observer_mac_valid) {
+      char observer[18]{};
+      std::snprintf(observer, sizeof(observer), "%02X:%02X:%02X:%02X:%02X:%02X",
+                    observer_halow_mac[0], observer_halow_mac[1],
+                    observer_halow_mac[2], observer_halow_mac[3],
+                    observer_halow_mac[4], observer_halow_mac[5]);
+      cJSON_AddStringToObject(entry, "observerHalowMac", observer);
     }
     if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) {
       cJSON_AddStringToObject(entry, "firmwareVersion", esp_app_get_description()->version);

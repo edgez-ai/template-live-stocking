@@ -102,6 +102,21 @@ bool halow_get_local_mac(uint8_t mac[6]) {
   return mac && mmwlan_get_mac_addr(mac) == MMWLAN_SUCCESS;
 }
 
+size_t halow_snapshot_routes(HalowRouteSnapshot *routes, size_t capacity) {
+  if (!routes || capacity == 0) return 0;
+  constexpr size_t kSnapshotCapacity = 16;
+  edgez_batadv_route_snapshot_t snapshot[kSnapshotCapacity]{};
+  const size_t requested = capacity < kSnapshotCapacity ? capacity : kSnapshotCapacity;
+  const size_t count = radio.snapshotBatmanRoutes(snapshot, requested);
+  for (size_t index = 0; index < count; ++index) {
+    std::memcpy(routes[index].originator, snapshot[index].originator, 6);
+    std::memcpy(routes[index].next_hop, snapshot[index].next_hop, 6);
+    routes[index].age_ms = snapshot[index].age_ms;
+    routes[index].hops = snapshot[index].hops;
+  }
+  return count;
+}
+
 void halow_set_batman_gateway(bool available) {
   radio.setBatmanGateway(available);
 }
