@@ -148,11 +148,18 @@ function validTopology(topology) {
   const valid = topology && typeof topology === "object" && !Array.isArray(topology) &&
     Array.isArray(topology.links) && topology.links.length <= 16 &&
     topology.links.every((link) => link && typeof link === "object" &&
-      typeof link.peerId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(link.peerId) &&
-      typeof link.peerRadioMac === "string" && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(link.peerRadioMac) &&
+      typeof link.peerHalowMac === "string" && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(link.peerHalowMac) &&
       Number.isInteger(link.ageMs) && link.ageMs >= 0 && link.ageMs <= 300000 &&
       (link.rssi === undefined || (Number.isInteger(link.rssi) && link.rssi >= -127 && link.rssi <= 0)));
-  return Boolean(valid) && new Set(topology.links.map((link) => link.peerId)).size === topology.links.length;
+  return Boolean(valid) &&
+    new Set(topology.links.map((link) => link.peerHalowMac.toUpperCase())).size === topology.links.length;
+}
+
+function normalizedHalowMac(value) {
+  if (typeof value !== "string" || !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(value)) return "";
+  const normalized = value.toUpperCase();
+  return normalized !== "00:00:00:00:00:00" && (Number.parseInt(normalized.slice(0, 2), 16) & 1) === 0
+    ? normalized : "";
 }
 
 function validDownlinkStatus(value) {
@@ -207,7 +214,7 @@ async function syncTopology(tables, gateway, links, peerDevices, readPermissions
       gatewaySerial: gateway.serial,
       peerDeviceId: peer.$id,
       peerSerial: peer.serial,
-      peerRadioMac: link.peerRadioMac.toUpperCase(),
+      peerRadioMac: link.peerHalowMac.toUpperCase(),
       rssi: link.rssi ?? null,
       active: true,
       lastSeenAt: new Date(new Date(reportedAt).getTime() - link.ageMs).toISOString(),
@@ -421,6 +428,16 @@ async function getDevice(req, deviceId) {
   return response.json();
 }
 
+async function latestTelemetryByHalowMac(tables, halowMac) {
+  const result = await tables.listRows({
+    databaseId: DATABASE_ID,
+    tableId: TELEMETRY_TABLE_ID,
+    queries: [Query.equal("halowMac", halowMac), Query.limit(2)],
+  });
+  if ((result.rows?.length || 0) > 1) throw new Error(`Duplicate latest telemetry HaLow MAC ${halowMac}`);
+  return result.rows?.[0] || null;
+}
+
 export default async function main({ req, res, error, log = () => {} }) {
   if (!DATABASE_ID || !TELEMETRY_TABLE_ID) {
     return json(res, { error: "Function environment is incomplete" }, 500);
@@ -472,6 +489,9 @@ export default async function main({ req, res, error, log = () => {} }) {
     }
     if (entry.status !== undefined && (typeof entry.status !== "string" || entry.status.length > 32)) {
       return json(res, { error: "Telemetry status must be a string up to 32 characters" }, 400);
+    }
+    if (!normalizedHalowMac(entry.halowMac)) {
+      return json(res, { error: "Telemetry must include a valid unicast halowMac" }, 400);
     }
     if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
         !sensor || typeof sensor !== "object" || !Number.isInteger(sensor.type) || sensor.type < 1 || sensor.type > SENSOR_TYPE_MAX ||
@@ -532,16 +552,49 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      const topologyPeers = [];
-      for (const link of entry.topology?.links || []) {
-        if (link.peerId === targetId) return json(res, { error: "A topology link cannot target its reporting device" }, 400);
-        const peer = await getDevice(req, link.peerId);
-        if (!peer || peer.$id !== link.peerId || !device.metadata?.farmId || peer.metadata?.farmId !== device.metadata.farmId) {
-          return json(res, { error: "Topology peer is not an Appwrite device in the gateway farm" }, 403);
-        }
-        topologyPeers.push(peer);
+      targets.push({ entry, target, readPermissions, topologyPeers: [] });
+    }
+
+    const devicesByHalowMac = new Map();
+    const telemetryByHalowMac = new Map();
+    const findTelemetryByHalowMac = async (halowMac) => {
+      if (!telemetryByHalowMac.has(halowMac)) {
+        telemetryByHalowMac.set(halowMac, await latestTelemetryByHalowMac(tables, halowMac));
       }
-      targets.push({ entry, target, readPermissions, topologyPeers });
+      return telemetryByHalowMac.get(halowMac);
+    };
+    for (const item of targets) {
+      const halowMac = normalizedHalowMac(item.entry.halowMac);
+      const owner = devicesByHalowMac.get(halowMac);
+      if (owner && owner.$id !== item.target.$id) {
+        return json(res, { error: `HaLow MAC ${halowMac} is reported by multiple devices` }, 409);
+      }
+      const existing = await findTelemetryByHalowMac(halowMac);
+      if (existing && existing.deviceId !== item.target.$id) {
+        return json(res, { error: `HaLow MAC ${halowMac} belongs to another latest telemetry row` }, 409);
+      }
+      devicesByHalowMac.set(halowMac, item.target);
+    }
+    for (const item of targets) {
+      const selfMac = normalizedHalowMac(item.entry.halowMac);
+      for (const link of item.entry.topology?.links || []) {
+        const peerMac = normalizedHalowMac(link.peerHalowMac);
+        if (peerMac === selfMac) {
+          return json(res, { error: "A topology link cannot target its reporting device" }, 400);
+        }
+        let peer = devicesByHalowMac.get(peerMac);
+        if (!peer) {
+          const peerTelemetry = await findTelemetryByHalowMac(peerMac);
+          if (peerTelemetry?.farmId === device.metadata?.farmId) {
+            peer = { $id: peerTelemetry.deviceId, serial: peerTelemetry.serial,
+              metadata: { farmId: peerTelemetry.farmId } };
+          }
+        }
+        if (!peer || peer.$id === item.target.$id) {
+          return json(res, { error: "Topology HaLow peer has no latest telemetry in the gateway farm" }, 403);
+        }
+        item.topologyPeers.push(peer);
+      }
     }
     const receivedAt = new Date().toISOString();
     await writeTimeseries(req, targets.map(({ entry, target }, index) =>
@@ -551,6 +604,8 @@ export default async function main({ req, res, error, log = () => {} }) {
       const location = locationOf(entry);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
+        farmId: target.metadata.farmId,
+        halowMac: normalizedHalowMac(entry.halowMac),
         gatewayDeviceId: target.$id === device.$id ? null : device.$id,
         serial: target.serial,
         channel: route.channel,

@@ -98,6 +98,10 @@ bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
          mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
 }
 
+bool halow_get_local_mac(uint8_t mac[6]) {
+  return mac && mmwlan_get_mac_addr(mac) == MMWLAN_SUCCESS;
+}
+
 void halow_set_batman_gateway(bool available) {
   radio.setBatmanGateway(available);
 }

@@ -98,6 +98,8 @@ struct BeaconFrame {
 
 struct RemoteBeacon {
   char client_id[37];
+  uint8_t halow_mac[6];
+  bool halow_mac_valid;
   pb_size_t sensor_data_count;
   ai_edgez_halow_SensorData sensor_data[9];
 };
@@ -740,6 +742,7 @@ void append_topology(cJSON *entry) {
   }
   cJSON_AddItemToObject(topology, "links", links);
   const int64_t now_ms = esp_timer_get_time() / 1000;
+  size_t link_count = 0;
   for (const auto &peer : snapshot) {
     const int64_t age_ms = now_ms - peer.last_seen_ms;
     if (!peer.occupied || age_ms < 0 || age_ms > kTopologyPeerMaxAgeMs) continue;
@@ -749,11 +752,42 @@ void append_topology(cJSON *entry) {
     std::snprintf(radio_mac, sizeof(radio_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
                   peer.radio_mac[0], peer.radio_mac[1], peer.radio_mac[2],
                   peer.radio_mac[3], peer.radio_mac[4], peer.radio_mac[5]);
-    cJSON_AddStringToObject(link, "peerId", peer.client_id);
-    cJSON_AddStringToObject(link, "peerRadioMac", radio_mac);
+    cJSON_AddStringToObject(link, "peerHalowMac", radio_mac);
     cJSON_AddNumberToObject(link, "ageMs", static_cast<double>(age_ms));
     if (peer.rssi_valid) cJSON_AddNumberToObject(link, "rssi", peer.rssi_dbm);
     cJSON_AddItemToArray(links, link);
+    ++link_count;
+  }
+
+  // Topology is identified only by HaLow MAC. The backend resolves that stable
+  // radio identity to the Appwrite device registered by its own telemetry.
+  uint8_t gateway_mac[6];
+  uint8_t gateway_l2[6];
+  bool already_listed = false;
+  if (link_count < kMaxTopologyPeers &&
+      halow_selected_mqtt_gateway(gateway_mac, gateway_l2)) {
+    for (const auto &peer : snapshot) {
+      if (peer.occupied && std::memcmp(peer.radio_mac, gateway_mac, 6) == 0) {
+        already_listed = true;
+        break;
+      }
+    }
+    if (!already_listed) {
+      cJSON *link = cJSON_CreateObject();
+      if (link) {
+        char radio_mac[18]{};
+        int16_t rssi_dbm = 0;
+        std::snprintf(radio_mac, sizeof(radio_mac),
+                      "%02X:%02X:%02X:%02X:%02X:%02X",
+                      gateway_mac[0], gateway_mac[1], gateway_mac[2],
+                      gateway_mac[3], gateway_mac[4], gateway_mac[5]);
+        cJSON_AddStringToObject(link, "peerHalowMac", radio_mac);
+        cJSON_AddNumberToObject(link, "ageMs", 0);
+        if (halow_get_peer_rssi(gateway_mac, &rssi_dbm))
+          cJSON_AddNumberToObject(link, "rssi", rssi_dbm);
+        cJSON_AddItemToArray(links, link);
+      }
+    }
   }
   cJSON_AddItemToObject(entry, "topology", topology);
 }
@@ -773,6 +807,8 @@ void decode_remote_beacon(const BeaconFrame &frame) {
                 static_cast<unsigned long long>(beacon.user_id_low >> 48),
                 static_cast<unsigned long long>(beacon.user_id_low & 0xffffffffffffULL));
   if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) return;
+  std::memcpy(reading.halow_mac, frame.source_mac, sizeof(reading.halow_mac));
+  reading.halow_mac_valid = true;
   remember_topology_peer(reading.client_id, frame.source_mac, frame.rssi_dbm, frame.rssi_valid);
   float latitude = beacon.latitude;
   float longitude = beacon.longitude;
@@ -832,6 +868,18 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
     if (!entry) continue;
     cJSON_AddStringToObject(entry, "clientId", reading.client_id);
     cJSON_AddStringToObject(entry, "status", "online");
+    uint8_t local_halow_mac[6]{};
+    const uint8_t *halow_mac = reading.halow_mac_valid
+                                   ? reading.halow_mac
+                                   : (halow_get_local_mac(local_halow_mac)
+                                          ? local_halow_mac : nullptr);
+    if (halow_mac) {
+      char formatted[18]{};
+      std::snprintf(formatted, sizeof(formatted), "%02X:%02X:%02X:%02X:%02X:%02X",
+                    halow_mac[0], halow_mac[1], halow_mac[2],
+                    halow_mac[3], halow_mac[4], halow_mac[5]);
+      cJSON_AddStringToObject(entry, "halowMac", formatted);
+    }
     if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) {
       cJSON_AddStringToObject(entry, "firmwareVersion", esp_app_get_description()->version);
       append_topology(entry);

@@ -42,15 +42,18 @@ beforeEach(() => {
   process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
   process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
   process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
+  devices.get(gatewayId).metadata = { farmId: "farm-a", icon: "gateway", markerColor: "blue" };
+  devices.get(remoteId).metadata = { farmId: "farm-a", icon: "tracker", markerColor: "orange" };
   globalThis.fetch = async (url, options = {}) => {
-    if (url === "https://github.example/acme/live-stocking/releases/latest") {
+    const href = String(url);
+    if (href === "https://github.example/acme/live-stocking/releases/latest") {
       return { ok: true, status: 200, url: "https://github.example/acme/live-stocking/releases/tag/v0.0.4" };
     }
-    if (url === "https://appwrite.example/v1/timeseries/stores/project-a/points") {
+    if (href === "https://appwrite.example/v1/timeseries/stores/project-a/points") {
       timeseriesWrites.push(JSON.parse(options.body));
       return { ok: true, status: 201 };
     }
-    const device = devices.get(decodeURIComponent(url.split("/").pop()));
+    const device = devices.get(decodeURIComponent(href.split("/").pop()));
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
   TablesDB.prototype.createRow = async (args) => {
@@ -73,13 +76,18 @@ beforeEach(() => {
     rows.push(row);
     return row;
   };
-  TablesDB.prototype.listRows = async (args) => ({
-    rows: args.tableId === "topology-a"
+  TablesDB.prototype.listRows = async (args) => {
+    if (args.tableId === "telemetry-a") {
+      const equal = (args.queries || []).map((query) => JSON.parse(query))
+        .find((query) => query.method === "equal" && query.attribute === "halowMac");
+      return { rows: equal ? rows.filter((row) => row.data.halowMac === equal.values[0]).map((row) => ({ $id: row.$id, ...row.data })) : [] };
+    }
+    return { rows: args.tableId === "topology-a"
       ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId)
       : args.tableId === "ota-a"
         ? otaRows
-        : args.tableId === "downlink-a" ? downlinkRows : [],
-  });
+        : args.tableId === "downlink-a" ? downlinkRows : [] };
+  };
   TablesDB.prototype.updateRow = async (args) => {
     if (args.tableId === "telemetry-a") {
       const telemetry = rows.find((candidate) => candidate.$id === args.rowId);
@@ -106,6 +114,11 @@ after(() => {
 });
 
 async function publish(payload) {
+  const withHalowMac = (entry) => ({
+    halowMac: entry.clientId === remoteId ? "02:11:22:33:44:55" : "0C:BF:74:1A:AE:36",
+    ...entry,
+  });
+  const report = Array.isArray(payload) ? payload.map(withHalowMac) : withHalowMac(payload);
   const req = {
     headers: {
       "x-appwrite-event": `devices.${gatewayId}.mqtt.message.publish`,
@@ -114,7 +127,7 @@ async function publish(payload) {
     bodyJson: {
       event: "message.publish",
       topic: "projects/project-a/devices/AABBCCDDEEFF/telemetry/status",
-      payload: JSON.stringify(payload),
+      payload: JSON.stringify(report),
     },
   };
   return main({ req, res: { json: (body, status) => ({ body, status }) }, error: (message) => {
@@ -170,7 +183,7 @@ test("multiple queued readings remain in time series while TablesDB keeps one la
   assert.match(timeseriesWrites[0].data, /sensor_battery_voltage=3\.65/);
 });
 
-test("legacy single-device telemetry remains accepted", async () => {
+test("single-device telemetry remains accepted", async () => {
   const result = await publish({ status: "online", sensors: [{ type: 12, value: 3.8 }] });
   assert.equal(result.status, 201);
   assert.equal(rows.length, 1);
@@ -243,8 +256,11 @@ test("ordinary telemetry completes a pending OTA when the target version is runn
 });
 
 test("gateway topology upserts direct links and marks missing peers inactive", async () => {
-  const link = { peerId: remoteId, peerRadioMac: "02:11:22:33:44:55", rssi: -67, ageMs: 1200 };
-  let result = await publish({ clientId: gatewayId, status: "online", topology: { links: [link] } });
+  const link = { peerHalowMac: "02:11:22:33:44:55", rssi: -67, ageMs: 1200 };
+  let result = await publish([
+    { clientId: remoteId, status: "online" },
+    { clientId: gatewayId, status: "online", topology: { links: [link] } },
+  ]);
   assert.equal(result.status, 201);
   assert.equal(topologyRows.length, 1);
   assert.deepEqual(
@@ -259,20 +275,79 @@ test("gateway topology upserts direct links and marks missing peers inactive", a
 });
 
 test("relayed devices report topology under their own device identity", async () => {
-  const result = await publish([{ clientId: remoteId, topology: { links: [{
-    peerId: gatewayId, peerRadioMac: "02:11:22:33:44:55", rssi: -61, ageMs: 500,
-  }] } }]);
+  const result = await publish([
+    { clientId: gatewayId },
+    { clientId: remoteId, topology: { links: [{
+      peerHalowMac: "0C:BF:74:1A:AE:36", rssi: -61, ageMs: 500,
+    }] } },
+  ]);
   assert.equal(result.status, 201);
   assert.equal(topologyRows.length, 1);
   assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
   assert.equal(topologyRows[0].peerDeviceId, gatewayId);
 });
 
+test("MQTT report writes HaLow MAC to latest telemetry and resolves topology", async () => {
+  const result = await publish([
+    { clientId: gatewayId },
+    { clientId: remoteId, topology: { links: [{
+      peerHalowMac: "0C:BF:74:1A:AE:36", rssi: -66, ageMs: 0,
+    }] } },
+  ]);
+  assert.equal(result.status, 201);
+  assert.equal(rows.find((row) => row.data.deviceId === remoteId).data.halowMac, "02:11:22:33:44:55");
+  assert.equal(topologyRows.length, 1);
+  assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
+  assert.equal(topologyRows[0].peerDeviceId, gatewayId);
+  assert.equal(topologyRows[0].peerRadioMac, "0C:BF:74:1A:AE:36");
+  assert.equal(topologyRows[0].rssi, -66);
+});
+
+test("topology resolves a peer by indexed latest telemetry without listing devices", async () => {
+  rows.push({ $id: remoteId, data: {
+    deviceId: remoteId,
+    farmId: "farm-a",
+    serial: "112233445566",
+    halowMac: "02:11:22:33:44:55",
+  } });
+  const result = await publish({ clientId: gatewayId, topology: { links: [{
+    peerHalowMac: "02:11:22:33:44:55", rssi: -71, ageMs: 25,
+  }] } });
+  assert.equal(result.status, 201);
+  assert.equal(topologyRows.length, 1);
+  assert.equal(topologyRows[0].peerDeviceId, remoteId);
+  assert.equal(topologyRows[0].peerSerial, "112233445566");
+});
+
+test("a topology report cannot link to its own HaLow MAC", async () => {
+  const result = await publish({ clientId: gatewayId, topology: { links: [{
+    peerHalowMac: "0C:BF:74:1A:AE:36", ageMs: 0,
+  }] } });
+  assert.equal(result.status, 400);
+  assert.equal(topologyRows.length, 0);
+});
+
 test("a topology report rejects duplicate peers", async () => {
-  const link = { peerId: remoteId, peerRadioMac: "02:11:22:33:44:55", ageMs: 0 };
+  const link = { peerHalowMac: "02:11:22:33:44:55", ageMs: 0 };
   const result = await publish({ clientId: gatewayId, topology: { links: [link, link] } });
   assert.equal(result.status, 400);
   assert.equal(topologyRows.length, 0);
+});
+
+test("telemetry without a HaLow MAC is rejected before persistence", async () => {
+  const result = await publish({ status: "online", halowMac: undefined });
+  assert.equal(result.status, 400);
+  assert.match(result.body.error, /halowMac/);
+  assert.equal(rows.length, 0);
+});
+
+test("latest telemetry rejects a HaLow MAC already owned by another device", async () => {
+  rows.push({ $id: remoteId, data: {
+    deviceId: remoteId, farmId: "farm-a", serial: "112233445566", halowMac: "0C:BF:74:1A:AE:36",
+  } });
+  const result = await publish({ clientId: gatewayId, topology: { links: [] } });
+  assert.equal(result.status, 409);
+  assert.match(result.body.error, /belongs to another latest telemetry row/);
 });
 
 test("gateway downlink status is stored against the remote nRF device", async () => {

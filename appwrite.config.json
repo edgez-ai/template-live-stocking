@@ -72,6 +72,8 @@
       "enabled": true,
       "columns": [
         { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "farmId", "type": "varchar", "size": 36, "required": false, "array": false },
+        { "key": "halowMac", "type": "varchar", "size": 17, "required": false, "array": false },
         { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": false, "array": false },
         { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "channel", "type": "varchar", "size": 160, "required": true, "array": false },
@@ -86,6 +88,7 @@
       "indexes": [
         { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
         { "key": "device-id", "type": "unique", "attributes": ["deviceId"] },
+        { "key": "halow-mac", "type": "unique", "attributes": ["halowMac"] },
         { "key": "gateway-device-id", "type": "key", "attributes": ["gatewayDeviceId"] },
         { "key": "location-spatial", "type": "spatial", "attributes": ["location"] }
       ]
