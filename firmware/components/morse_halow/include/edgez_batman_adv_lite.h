@@ -14,15 +14,22 @@ extern "C" {
 #define EDGEZ_BATADV_BCAST 0x01U
 #define EDGEZ_BATADV_UNICAST 0x40U
 #define EDGEZ_BATADV_OGM_LEN 24U
+#define EDGEZ_BATADV_GATEWAY_OGM_LEN 36U
 #define EDGEZ_BATADV_UNICAST_HEADER_LEN 10U
 #define EDGEZ_BATADV_BCAST_HEADER_LEN 14U
-#define EDGEZ_BATADV_DEFAULT_TTL 8U
-#define EDGEZ_BATADV_HOP_PENALTY 30U
-#define EDGEZ_BATADV_ROUTE_SWITCH_HYSTERESIS 20U
-#define EDGEZ_BATADV_MAX_PACKET_LEN 512U
+#define EDGEZ_BATADV_DEFAULT_TTL 50U
+/* Full Ethernet/IP payload plus BATMAN headers, without private fragmentation. */
+#define EDGEZ_BATADV_MAX_PACKET_LEN 1536U
+#define EDGEZ_BATADV_MAX_OGM_LEN 512U
 #define EDGEZ_BATADV_MAX_PEERS 16U
 #define EDGEZ_BATADV_MAX_ROUTES 16U
 #define EDGEZ_BATADV_MAX_TT_CLIENTS 32U
+#define EDGEZ_BATADV_MQTT_GATEWAY_STALE_MS 15000U
+
+/* Borrow a local unicast's Ethernet payload. No state changes or copies.
+ * The returned view lives only as long as the input packet. */
+bool edgez_batadv_lite_local_unicast_view(const uint8_t local[6],
+    const uint8_t *packet, size_t len, const uint8_t **ethernet, size_t *ethernet_len);
 
 typedef struct {
     bool occupied;
@@ -52,6 +59,9 @@ typedef struct {
     bool gateway;
     uint32_t gateway_down;
     uint32_t gateway_up;
+    bool mqtt_gateway;
+    uint8_t mqtt_gateway_l2[6];
+    uint32_t mqtt_gateway_seen_ms;
 } edgez_batadv_route_t;
 
 typedef struct {
@@ -60,6 +70,12 @@ typedef struct {
     uint8_t tq;
     uint8_t hops;
     uint32_t age_ms;
+    bool gateway;
+    uint32_t gateway_down;
+    uint32_t gateway_up;
+    bool mqtt_gateway;
+    uint8_t mqtt_gateway_l2[6];
+    uint32_t mqtt_gateway_age_ms;
 } edgez_batadv_route_snapshot_t;
 
 typedef struct {
@@ -108,6 +124,7 @@ typedef struct {
     /* A locally addressed BATMAN data packet is copied here so callers can
      * deliver it after the BATMAN state lock has been released. */
     bool deliver_ready;
+    bool broadcast_duplicate; /* Diagnostic only: duplicate or outside RX window. */
     /* BATMAN originator which emitted a delivered broadcast. This can differ
      * from the source MAC of the encapsulated Ethernet frame. */
     uint8_t deliver_originator[6];
@@ -126,6 +143,12 @@ void edgez_batadv_lite_set_connected(edgez_batadv_lite_t *state,
 bool edgez_batadv_lite_build_periodic_ogm(edgez_batadv_lite_t *state,
                                           uint32_t now_ms,
                                           uint8_t out[EDGEZ_BATADV_OGM_LEN]);
+size_t edgez_batadv_lite_build_gateway_ogm(edgez_batadv_lite_t *state,
+    uint32_t now_ms, uint32_t down, uint32_t up,
+    uint8_t out[EDGEZ_BATADV_GATEWAY_OGM_LEN]);
+void edgez_batadv_lite_receive_into(edgez_batadv_lite_t *state,
+    const uint8_t ethernet_source[6], const uint8_t *packet, size_t len,
+    uint32_t now_ms, edgez_batadv_rx_result_t *result);
 edgez_batadv_rx_result_t edgez_batadv_lite_receive(edgez_batadv_lite_t *state,
                                                    const uint8_t ethernet_source[6],
                                                    const uint8_t *payload,
@@ -168,6 +191,14 @@ bool edgez_batadv_lite_build_broadcast(edgez_batadv_lite_t *state,
 bool edgez_batadv_lite_selected_gateway(edgez_batadv_lite_t *state,
                                         uint32_t now_ms,
                                         uint8_t gateway[6]);
+bool edgez_batadv_lite_mark_mqtt_gateway(edgez_batadv_lite_t *state,
+                                         const uint8_t originator[6],
+                                         const uint8_t ethernet_mac[6],
+                                         uint32_t now_ms);
+bool edgez_batadv_lite_selected_mqtt_gateway(edgez_batadv_lite_t *state,
+                                              uint32_t now_ms,
+                                              uint8_t gateway[6],
+                                              uint8_t ethernet_mac[6]);
 size_t edgez_batadv_lite_invalidate_next_hop(
     edgez_batadv_lite_t *state, const uint8_t next_hop[6], uint32_t now_ms);
 void edgez_batadv_lite_expire(edgez_batadv_lite_t *state, uint32_t now_ms);

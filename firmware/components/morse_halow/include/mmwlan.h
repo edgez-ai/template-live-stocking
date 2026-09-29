@@ -2639,6 +2639,35 @@ enum mmwlan_status mmwlan_update_beacon_vendor_ie_filter(
  */
 enum mmwlan_status mmwlan_update_mesh_vendor_ies(const uint8_t *ies, size_t ies_len);
 
+/** Maximum application payload carried by an EdgeZ vendor Public Action frame. */
+#define MMWLAN_VENDOR_ACTION_MAX_PAYLOAD (512)
+
+/**
+ * Callback for connectionless vendor Public Action frames.
+ *
+ * These frames do not require association or mesh peering. The callback runs in
+ * the MMWLAN processing context and must copy data and return without blocking.
+ */
+typedef void (*mmwlan_vendor_action_rx_cb_t)(const uint8_t source_mac[MMWLAN_MAC_ADDR_LEN],
+                                             const uint8_t *payload,
+                                             size_t payload_len,
+                                             int16_t rssi_dbm,
+                                             void *arg);
+
+/** Register (or clear with NULL) a receiver for one 24-bit vendor OUI. */
+enum mmwlan_status mmwlan_register_vendor_action_rx_cb(
+    const uint8_t oui[MMWLAN_OUI_SIZE], mmwlan_vendor_action_rx_cb_t callback, void *arg);
+
+/**
+ * Send a vendor-specific Public Action frame directly to a MAC address.
+ *
+ * The radio/interface must be active on the desired channel, but the destination
+ * does not need to be associated or joined to a mesh.
+ */
+enum mmwlan_status mmwlan_send_vendor_action(
+    const uint8_t destination_mac[MMWLAN_MAC_ADDR_LEN],
+    const uint8_t oui[MMWLAN_OUI_SIZE], const uint8_t *payload, size_t payload_len);
+
 /** @} */
 
 /*

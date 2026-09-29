@@ -23,7 +23,6 @@ constexpr size_t kEthernetHeaderLength = 14;
 constexpr size_t kFrameLimit = 480;
 constexpr size_t kMaxTopic = 383;
 constexpr size_t kMaxPayload = 16 * 1024;
-constexpr int64_t kGatewayMaxAgeUs = 15 * 1000000LL;
 constexpr size_t kPeerCount = 16;
 constexpr size_t kAssemblyCount = 4;
 
@@ -83,9 +82,6 @@ bool is_gateway;
 bool gateway_online;
 char local_serial[37];
 uint8_t local_mac[6];
-uint8_t gateway_mac[6];
-uint8_t gateway_l2_mac[6];
-int64_t gateway_seen_us;
 int64_t last_gateway_missing_log_us;
 Peer peers[kPeerCount]{};
 Assembly assemblies[kAssemblyCount]{};
@@ -257,19 +253,24 @@ void advertise_task(void *) {
     if (is_gateway && gateway_online) {
       (void)send_relay_frame(nullptr, nullptr, true, gateway_frame,
                              sizeof(gateway_frame));
-    } else if (!is_gateway && gateway_seen_us && local_serial[0] &&
-               esp_timer_get_time() - gateway_seen_us < kGatewayMaxAgeUs) {
+    } else if (!is_gateway && local_serial[0]) {
+      uint8_t gateway[6];
+      uint8_t gateway_l2[6];
+      if (!halow_selected_mqtt_gateway(gateway, gateway_l2)) {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        continue;
+      }
       uint8_t peer_frame[6 + sizeof(local_serial) - 1] = {
           'E', 'Z', 'M', 'Q', kVersion,
           static_cast<uint8_t>(FrameType::kPeerAdvertise)};
       const size_t serial_length = std::strlen(local_serial);
       std::memcpy(peer_frame + 6, local_serial, serial_length);
       const esp_err_t result = send_relay_frame(
-          gateway_mac, gateway_l2_mac, true, peer_frame, 6 + serial_length);
+          gateway, gateway_l2, true, peer_frame, 6 + serial_length);
       if (result == ESP_OK) {
         ESP_LOGI(kTag,
                  "Peer advertisement sent route=" MACSTR " ethernet=" MACSTR,
-                 MAC2STR(gateway_mac), MAC2STR(gateway_l2_mac));
+                 MAC2STR(gateway), MAC2STR(gateway_l2));
       } else {
         ESP_LOGW(kTag, "Peer advertisement failed: %s",
                  esp_err_to_name(result));
@@ -297,25 +298,32 @@ esp_err_t mqtt_l2_relay_init(bool gateway, const char *device_serial,
   delivery_queue = xQueueCreate(4, sizeof(Delivery *));
   if (!delivery_queue) return ESP_ERR_NO_MEM;
   if (xTaskCreate(delivery_task, "mqtt-l2-rx", 4096, nullptr, 6, nullptr) != pdPASS ||
-      xTaskCreate(advertise_task, "mqtt-l2-adv", 3072, nullptr, 5, nullptr) != pdPASS)
+      xTaskCreate(advertise_task, "mqtt-l2-adv", 5120, nullptr, 5, nullptr) != pdPASS)
     return ESP_ERR_NO_MEM;
   return ESP_OK;
 }
 
-void mqtt_l2_relay_set_gateway_online(bool online) { gateway_online = online; }
+void mqtt_l2_relay_set_gateway_online(bool online) {
+  gateway_online = online;
+  halow_set_batman_gateway(is_gateway && online);
+}
 
 bool mqtt_l2_relay_gateway_available() {
-  return !is_gateway && gateway_seen_us &&
-         esp_timer_get_time() - gateway_seen_us < kGatewayMaxAgeUs;
+  uint8_t gateway[6];
+  uint8_t gateway_l2[6];
+  return !is_gateway &&
+         halow_selected_mqtt_gateway(gateway, gateway_l2);
 }
 
 int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
                           int qos, bool retain) {
   if (is_gateway) return publish_callback ? publish_callback(topic, payload, length, qos, retain) : -1;
-  if (!mqtt_l2_relay_gateway_available()) {
+  uint8_t gateway[6];
+  uint8_t gateway_l2[6];
+  if (!halow_selected_mqtt_gateway(gateway, gateway_l2)) {
     const int64_t now = esp_timer_get_time();
     if (!last_gateway_missing_log_us || now - last_gateway_missing_log_us >= 10 * 1000000LL) {
-      ESP_LOGW(kTag, "Cannot relay MQTT payload: no gateway advertisement received");
+      ESP_LOGW(kTag, "Cannot relay MQTT payload: no MQTT-ready BATMAN gateway");
       last_gateway_missing_log_us = now;
     }
     return -1;
@@ -325,7 +333,7 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
   // Mixed ESP32/Linux meshes reliably forward BATMAN broadcast frames across
   // a shared HaLow hard interface. Keep the inner Ethernet destination
   // unicast so only the selected MQTT gateway consumes the opaque payload.
-  return send_message(FrameType::kPublish, gateway_mac, gateway_l2_mac, true, "",
+  return send_message(FrameType::kPublish, gateway, gateway_l2, true, "",
                       payload, length, qos, retain) == ESP_OK
       ? static_cast<int>(esp_random() & 0x7fffffff) : -1;
 }
@@ -379,13 +387,16 @@ void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,
     const auto control_type = static_cast<FrameType>(data[5]);
     if (control_type == FrameType::kAdvertise && length == 6) {
       if (!is_gateway) {
-        std::memcpy(gateway_mac, originator, 6);
-        std::memcpy(gateway_l2_mac, ethernet_source, 6);
-        gateway_seen_us = esp_timer_get_time();
-        ESP_LOGI(kTag,
-                 "Gateway advertisement accepted route=" MACSTR
-                 " ethernet=" MACSTR,
-                 MAC2STR(gateway_mac), MAC2STR(gateway_l2_mac));
+        if (halow_mark_mqtt_gateway(originator, ethernet_source)) {
+          ESP_LOGD(kTag,
+                   "MQTT gateway route refreshed originator=" MACSTR
+                   " ethernet=" MACSTR,
+                   MAC2STR(originator), MAC2STR(ethernet_source));
+        } else {
+          ESP_LOGD(kTag,
+                   "MQTT advertisement has no BATMAN gateway route yet: " MACSTR,
+                   MAC2STR(originator));
+        }
       }
       return;
     }

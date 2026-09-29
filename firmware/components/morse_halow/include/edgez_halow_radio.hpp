@@ -34,6 +34,7 @@ class HaLowInterface
   public:
     HaLowInterface() = default;
 
+    bool prepareRadio();
     bool init();
     bool reconfigure();
     bool sleep();
@@ -59,9 +60,13 @@ class HaLowInterface
     EdgezRadioError sendBatmanPayloadTo(const uint8_t destination[6],
                                         const uint8_t *payload,
                                         size_t payload_len,
-                                        const uint8_t forced_next_hop[6] = nullptr);
+                                        const uint8_t forced_next_hop[6] = nullptr,
+                                        uint8_t tid = 0,
+                                        uint32_t tx_ready_timeout_ms = 50);
     EdgezRadioError sendBatmanBroadcastPayload(const uint8_t *payload,
-                                                size_t payload_len);
+                                                size_t payload_len,
+                                                uint8_t tid = 0,
+                                                uint32_t tx_ready_timeout_ms = 50);
     void receiveBatmanAdv(const uint8_t ethernet_source[6],
                           const uint8_t *payload,
                           size_t payload_len);
@@ -72,6 +77,12 @@ class HaLowInterface
                            uint32_t *route_age_ms = nullptr);
     size_t snapshotBatmanRoutes(edgez_batadv_route_snapshot_t *routes,
                                 size_t capacity);
+    void setBatmanGateway(bool available);
+    bool selectedBatmanGateway(uint8_t gateway[6]);
+    bool markBatmanMqttGateway(const uint8_t originator[6],
+                               const uint8_t ethernet_mac[6]);
+    bool selectedBatmanMqttGateway(uint8_t gateway[6],
+                                   uint8_t ethernet_mac[6]);
     bool selectBatmanDirectPeer(const uint8_t exclude_a[6],
                                 const uint8_t exclude_b[6],
                                 const uint8_t exclude_c[6],
@@ -79,6 +90,7 @@ class HaLowInterface
                                 uint8_t peer[6]);
 
   private:
+    bool internetGateway = false;
     static constexpr uint8_t WLAN_IE_ID_MESH_CONFIG = 113;
     static constexpr uint8_t WLAN_IE_ID_MESH_ID = 114;
 
@@ -146,6 +158,9 @@ class HaLowInterface
 
 #if defined(CONFIG_MM_BATMAN_ADV_LITE) && CONFIG_MM_BATMAN_ADV_LITE
     static constexpr size_t BATMAN_FORWARD_QUEUE_DEPTH = 48;
+    // One extra slot belongs exclusively to the background consumer while
+    // sending/retrying. It is outside the producer's ring index range.
+    static constexpr size_t BATMAN_FORWARD_STORAGE_COUNT = BATMAN_FORWARD_QUEUE_DEPTH + 1;
     static constexpr uint8_t BATMAN_FORWARD_MAX_ATTEMPTS = 3;
     static constexpr uint8_t BATMAN_FORWARD_BATCH_SIZE = 10;
     static constexpr uint32_t BATMAN_FORWARD_TX_READY_TIMEOUT_MS = 20;

@@ -98,6 +98,22 @@ bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm) {
          mmwlan_get_mesh_peer_rssi(peer_mac, rssi_dbm) == MMWLAN_SUCCESS;
 }
 
+void halow_set_batman_gateway(bool available) {
+  radio.setBatmanGateway(available);
+}
+
+bool halow_mark_mqtt_gateway(const uint8_t originator[6],
+                             const uint8_t ethernet_mac[6]) {
+  return originator && ethernet_mac &&
+         radio.markBatmanMqttGateway(originator, ethernet_mac);
+}
+
+bool halow_selected_mqtt_gateway(uint8_t gateway[6],
+                                 uint8_t ethernet_mac[6]) {
+  return gateway && ethernet_mac &&
+         radio.selectedBatmanMqttGateway(gateway, ethernet_mac);
+}
+
 esp_err_t halow_send_batman(const uint8_t destination[6], const uint8_t *data,
                             size_t length) {
   if (!radio_started || !destination || !data || !length) return ESP_ERR_INVALID_STATE;
