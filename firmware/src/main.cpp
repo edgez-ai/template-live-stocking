@@ -100,6 +100,9 @@ struct RemoteBeacon {
   char client_id[37];
   uint8_t halow_mac[6];
   bool halow_mac_valid;
+  int16_t observer_rssi_dbm;
+  bool observer_rssi_valid;
+  int64_t observed_at_ms;
   pb_size_t sensor_data_count;
   ai_edgez_halow_SensorData sensor_data[9];
 };
@@ -815,6 +818,9 @@ void decode_remote_beacon(const BeaconFrame &frame) {
   if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) return;
   std::memcpy(reading.halow_mac, frame.source_mac, sizeof(reading.halow_mac));
   reading.halow_mac_valid = true;
+  reading.observer_rssi_dbm = frame.rssi_dbm;
+  reading.observer_rssi_valid = frame.rssi_valid;
+  reading.observed_at_ms = esp_timer_get_time() / 1000;
   remember_topology_peer(reading.client_id, frame.source_mac, frame.rssi_dbm, frame.rssi_valid);
   float latitude = beacon.latitude;
   float longitude = beacon.longitude;
@@ -894,7 +900,27 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
                     observer_halow_mac[0], observer_halow_mac[1],
                     observer_halow_mac[2], observer_halow_mac[3],
                     observer_halow_mac[4], observer_halow_mac[5]);
-      cJSON_AddStringToObject(entry, "observerHalowMac", observer);
+      const int64_t now_ms = esp_timer_get_time() / 1000;
+      const int64_t age_ms = reading.observed_at_ms > 0
+                                 ? now_ms - reading.observed_at_ms : 0;
+      if (age_ms >= 0 && age_ms <= kTopologyPeerMaxAgeMs) {
+        cJSON *topology = cJSON_CreateObject();
+        cJSON *links = cJSON_CreateArray();
+        cJSON *link = cJSON_CreateObject();
+        if (topology && links && link) {
+          cJSON_AddStringToObject(link, "peerHalowMac", observer);
+          cJSON_AddNumberToObject(link, "ageMs", static_cast<double>(age_ms));
+          if (reading.observer_rssi_valid)
+            cJSON_AddNumberToObject(link, "rssi", reading.observer_rssi_dbm);
+          cJSON_AddItemToArray(links, link);
+          cJSON_AddItemToObject(topology, "links", links);
+          cJSON_AddItemToObject(entry, "topology", topology);
+        } else {
+          cJSON_Delete(link);
+          cJSON_Delete(links);
+          cJSON_Delete(topology);
+        }
+      }
     }
     if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) {
       cJSON_AddStringToObject(entry, "firmwareVersion", esp_app_get_description()->version);

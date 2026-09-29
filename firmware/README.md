@@ -157,8 +157,7 @@ The QoS 0 JSON payload sent to
     "longitude": 18.0686,
     "topology": {
       "links": [{
-        "peerId": "22222222-2222-4222-8222-222222222222",
-        "peerRadioMac": "02:00:00:00:00:02",
+        "peerHalowMac": "02:00:00:00:00:02",
         "ageMs": 1250,
         "rssi": -61
       }]
@@ -169,10 +168,22 @@ The QoS 0 JSON payload sent to
     "status": "online",
     "batteryVoltageMv": 3700,
     "unit": "millivolt",
-    "sensors": [{ "type": 12, "value": 3.7 }]
+    "sensors": [{ "type": 12, "value": 3.7 }],
+    "topology": {
+      "links": [{
+        "peerHalowMac": "02:00:00:00:00:01",
+        "ageMs": 18,
+        "rssi": -68
+      }]
+    }
   }
 ]
 ```
+
+For a relayed beacon entry, `halowMac` identifies the beacon transmitter and
+the topology link's `peerHalowMac` is the observing relay's own HaLow MAC. The
+RF RSSI is copied from the received beacon frame. This uses the same topology
+contract as ordinary status reports; there is no separate observer-MAC field.
 
 The ADC is calibrated and the measured divider voltage is doubled to recover
 the battery voltage. A disconnected battery omits the voltage fields; status
