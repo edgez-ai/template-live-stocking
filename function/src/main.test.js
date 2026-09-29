@@ -319,6 +319,15 @@ test("topology resolves a peer by indexed latest telemetry without listing devic
   assert.equal(topologyRows[0].peerSerial, "112233445566");
 });
 
+test("an unresolved topology MAC does not reject otherwise valid telemetry", async () => {
+  const result = await publish({ clientId: gatewayId, topology: { links: [{
+    peerHalowMac: "02:AA:BB:CC:DD:EE", rssi: -80, ageMs: 0,
+  }] } });
+  assert.equal(result.status, 201);
+  assert.equal(rows.length, 1);
+  assert.equal(topologyRows.length, 0);
+});
+
 test("a topology report cannot link to its own HaLow MAC", async () => {
   const result = await publish({ clientId: gatewayId, topology: { links: [{
     peerHalowMac: "0C:BF:74:1A:AE:36", ageMs: 0,
@@ -334,11 +343,11 @@ test("a topology report rejects duplicate peers", async () => {
   assert.equal(topologyRows.length, 0);
 });
 
-test("telemetry without a HaLow MAC is rejected before persistence", async () => {
+test("telemetry without a HaLow MAC is stored without blocking the report", async () => {
   const result = await publish({ status: "online", halowMac: undefined });
-  assert.equal(result.status, 400);
-  assert.match(result.body.error, /halowMac/);
-  assert.equal(rows.length, 0);
+  assert.equal(result.status, 201);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].data.halowMac, undefined);
 });
 
 test("latest telemetry rejects a HaLow MAC already owned by another device", async () => {

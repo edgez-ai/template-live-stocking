@@ -490,7 +490,8 @@ export default async function main({ req, res, error, log = () => {} }) {
     if (entry.status !== undefined && (typeof entry.status !== "string" || entry.status.length > 32)) {
       return json(res, { error: "Telemetry status must be a string up to 32 characters" }, 400);
     }
-    if (!normalizedHalowMac(entry.halowMac)) {
+    if (entry.halowMac !== undefined && entry.halowMac !== null && entry.halowMac !== "" &&
+        !normalizedHalowMac(entry.halowMac)) {
       return json(res, { error: "Telemetry must include a valid unicast halowMac" }, 400);
     }
     if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
@@ -552,7 +553,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      targets.push({ entry, target, readPermissions, topologyPeers: [] });
+      targets.push({ entry, target, readPermissions, topologyLinks: [], topologyPeers: [] });
     }
 
     const devicesByHalowMac = new Map();
@@ -565,6 +566,7 @@ export default async function main({ req, res, error, log = () => {} }) {
     };
     for (const item of targets) {
       const halowMac = normalizedHalowMac(item.entry.halowMac);
+      if (!halowMac) continue;
       const owner = devicesByHalowMac.get(halowMac);
       if (owner && owner.$id !== item.target.$id) {
         return json(res, { error: `HaLow MAC ${halowMac} is reported by multiple devices` }, 409);
@@ -579,7 +581,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       const selfMac = normalizedHalowMac(item.entry.halowMac);
       for (const link of item.entry.topology?.links || []) {
         const peerMac = normalizedHalowMac(link.peerHalowMac);
-        if (peerMac === selfMac) {
+        if (selfMac && peerMac === selfMac) {
           return json(res, { error: "A topology link cannot target its reporting device" }, 400);
         }
         let peer = devicesByHalowMac.get(peerMac);
@@ -590,9 +592,14 @@ export default async function main({ req, res, error, log = () => {} }) {
               metadata: { farmId: peerTelemetry.farmId } };
           }
         }
-        if (!peer || peer.$id === item.target.$id) {
-          return json(res, { error: "Topology HaLow peer has no latest telemetry in the gateway farm" }, 403);
+        // Peer identity is eventually consistent: a newly seen radio may not
+        // have published its own latest-telemetry row yet. Keep the sensor
+        // report and retry topology resolution on the next status cycle.
+        if (!peer) continue;
+        if (peer.$id === item.target.$id) {
+          return json(res, { error: "A topology link cannot target its reporting device" }, 400);
         }
+        item.topologyLinks.push(link);
         item.topologyPeers.push(peer);
       }
     }
@@ -600,12 +607,13 @@ export default async function main({ req, res, error, log = () => {} }) {
     await writeTimeseries(req, targets.map(({ entry, target }, index) =>
       telemetryLine(target, entry, route.channel, receivedAt, index)));
     const telemetryIds = [];
-    for (const { entry, target, readPermissions, topologyPeers } of targets) {
+    for (const { entry, target, readPermissions, topologyLinks, topologyPeers } of targets) {
       const location = locationOf(entry);
+      const halowMac = normalizedHalowMac(entry.halowMac);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
         farmId: target.metadata.farmId,
-        halowMac: normalizedHalowMac(entry.halowMac),
+        ...(halowMac ? { halowMac } : {}),
         gatewayDeviceId: target.$id === device.$id ? null : device.$id,
         serial: target.serial,
         channel: route.channel,
@@ -621,7 +629,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       await reconcileOtaUpdate(tables, target, entry, readPermissions, receivedAt);
       if (entry.downlink) await syncDownlink(tables, device, target, entry.downlink, readPermissions, receivedAt);
       if (entry.topology) {
-        await syncTopology(tables, target, entry.topology.links, topologyPeers, readPermissions, receivedAt);
+        await syncTopology(tables, target, topologyLinks, topologyPeers, readPermissions, receivedAt);
       }
       telemetryIds.push(row.$id || target.$id);
     }
