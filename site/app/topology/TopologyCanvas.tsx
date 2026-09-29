@@ -1,5 +1,11 @@
 "use client";
 
+import {
+  mdiAccount, mdiBattery, mdiBellAlert, mdiBroadcast, mdiCamera, mdiCar, mdiCow,
+  mdiCrosshairsGps, mdiDog, mdiDrone, mdiElectricSwitch, mdiHorse, mdiLanConnect,
+  mdiMotionSensor, mdiPipeValve, mdiRouterWireless, mdiSheep, mdiSpeedometer,
+  mdiTractor, mdiTruck, mdiWaterPump,
+} from "@mdi/js";
 import ForceGraph2D, { ForceGraphMethods, GraphData, LinkObject, NodeObject } from "react-force-graph-2d";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -8,6 +14,8 @@ export type CanvasNode = {
   label: string;
   kind: "gateway" | "device" | "unresolved";
   online: boolean;
+  icon: string;
+  color: string;
 };
 
 export type CanvasLink = {
@@ -30,10 +38,23 @@ function signalColor(rssi?: number | null) {
   return "#d05b47";
 }
 
-function nodeColor(node: GraphNode) {
-  if (node.kind === "gateway") return "#0a8c87";
-  if (node.kind === "unresolved") return "#8b9f9c";
-  return node.online ? "#ff7657" : "#b8c6c3";
+const iconPaths: Record<string, string> = {
+  sheep: mdiSheep, cow: mdiCow, goat: mdiSheep, horse: mdiHorse, dog: mdiDog, person: mdiAccount,
+  tractor: mdiTractor, truck: mdiTruck, car: mdiCar, drone: mdiDrone, router: mdiRouterWireless,
+  gateway: mdiLanConnect, beacon: mdiBroadcast, tracker: mdiCrosshairsGps, sensor: mdiMotionSensor,
+  camera: mdiCamera, gps: mdiCrosshairsGps, meter: mdiSpeedometer, pump: mdiWaterPump,
+  valve: mdiPipeValve, switch: mdiElectricSwitch, battery: mdiBattery, alarm: mdiBellAlert,
+};
+const canvasPaths = new Map<string, Path2D>();
+
+function pathForIcon(icon: string) {
+  const path = iconPaths[icon] || mdiCrosshairsGps;
+  let canvasPath = canvasPaths.get(path);
+  if (!canvasPath) {
+    canvasPath = new Path2D(path);
+    canvasPaths.set(path, canvasPath);
+  }
+  return canvasPath;
 }
 
 export default function TopologyCanvas({
@@ -71,26 +92,49 @@ export default function TopologyCanvas({
   function paintNode(node: NodeObject<GraphNode>, context: CanvasRenderingContext2D, scale: number) {
     const x = node.x || 0;
     const y = node.y || 0;
-    const radius = node.kind === "gateway" ? 12 : node.kind === "unresolved" ? 8 : 10;
+    const radius = node.kind === "gateway" ? 6.5 : node.kind === "unresolved" ? 4.5 : 5.5;
     if (node.id === selectedId) {
       context.beginPath();
-      context.arc(x, y, radius + 4, 0, Math.PI * 2);
+      context.arc(x, y, radius + 2.3, 0, Math.PI * 2);
       context.fillStyle = "#ffcf5c";
       context.fill();
     }
+    if (node.kind === "gateway") {
+      context.beginPath();
+      context.arc(x, y, radius + 1.25, 0, Math.PI * 2);
+      context.lineWidth = 1.25 / scale;
+      context.strokeStyle = "#173f42";
+      context.stroke();
+    }
     context.beginPath();
     context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fillStyle = nodeColor(node);
+    context.fillStyle = node.color;
     context.fill();
-    context.lineWidth = 2 / scale;
+    context.lineWidth = 1.2 / scale;
     context.strokeStyle = "#ffffff";
     context.stroke();
 
-    const fontSize = 11 / scale;
+    const iconSize = radius * 1.25;
+    context.save();
+    context.translate(x - iconSize / 2, y - iconSize / 2);
+    context.scale(iconSize / 24, iconSize / 24);
+    context.fillStyle = "#ffffff";
+    context.fill(pathForIcon(node.icon));
+    context.restore();
+
+    context.beginPath();
+    context.arc(x + radius * .72, y - radius * .72, Math.max(1.15, radius * .22), 0, Math.PI * 2);
+    context.fillStyle = node.online ? "#16a085" : "#8b9f9c";
+    context.fill();
+    context.lineWidth = .8 / scale;
+    context.strokeStyle = "#ffffff";
+    context.stroke();
+
+    const fontSize = 9 / scale;
     context.font = `800 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
     context.textAlign = "center";
     context.textBaseline = "middle";
-    const labelY = y + radius + 9 / scale;
+    const labelY = y + radius + 7 / scale;
     const textWidth = context.measureText(node.label).width;
     context.fillStyle = "rgba(255, 255, 255, .9)";
     context.fillRect(x - textWidth / 2 - 3 / scale, labelY - fontSize / 2 - 2 / scale, textWidth + 6 / scale, fontSize + 4 / scale);
@@ -124,7 +168,7 @@ export default function TopologyCanvas({
       graphData={graphData}
       backgroundColor="rgba(0,0,0,0)"
       nodeCanvasObject={paintNode}
-      nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 15 : 12, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
+      nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 9 : 7, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
       nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"}`}
       linkColor={(link) => signalColor(link.rssi)}
       linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}

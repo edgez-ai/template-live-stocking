@@ -14,12 +14,14 @@ type Device = {
   serial: string;
   name: string;
   enabled: boolean;
-  metadata?: { farmId?: string; mqttGateway?: boolean; [key: string]: unknown };
+  metadata?: { farmId?: string; mqttGateway?: boolean; icon?: string; markerColor?: string; [key: string]: unknown };
 };
 type Telemetry = Models.Row & {
   deviceId: string;
   gatewayDeviceId?: string | null;
   halowMac?: string | null;
+  icon?: string | null;
+  markerColor?: string | null;
   receivedAt: string;
   payload: string;
 };
@@ -46,6 +48,8 @@ type GraphEntity = {
   gatewayStatus: string;
   lastSeenAt: string;
   gatewayDeviceId: string;
+  icon: string;
+  color: string;
 };
 
 const client = new Client()
@@ -59,6 +63,17 @@ const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const topologyRecentMs = 2 * 60 * 1000;
+const mapMarkerColors: Record<string, string> = {
+  red: "#E51B23", pink: "#FF4182", purple: "#9B24B2", deep_purple: "#6639BF",
+  blue: "#0066CC", light_blue: "#249CF2", cyan: "#14BECD", teal: "#00A58C",
+  green: "#3C8C3C", lime: "#93BF39", yellow: "#FFC800", orange: "#FF9600",
+  deep_orange: "#F06432", brown: "#804633", gray: "#737373", blue_gray: "#597380",
+};
+
+function deviceColor(device: Device, latest?: Telemetry) {
+  const saved = device.metadata?.markerColor || latest?.markerColor || "";
+  return mapMarkerColors[saved] || (device.enabled ? mapMarkerColors.blue : mapMarkerColors.gray);
+}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
@@ -188,16 +203,20 @@ export default function TopologyPage() {
         gatewayStatus: payloadGatewayStatus(latest),
         lastSeenAt: latest?.receivedAt || "",
         gatewayDeviceId: latest?.gatewayDeviceId || "",
+        icon: device.metadata?.icon || latest?.icon || "tracker",
+        color: deviceColor(device, latest),
       });
     }
     for (const link of farmLinks) {
       if (!entities.has(link.gatewayDeviceId)) entities.set(link.gatewayDeviceId, {
         id: link.gatewayDeviceId, name: link.gatewaySerial, serial: link.gatewaySerial, farmId: link.farmId,
         halowMac: "", kind: "gateway", online: true, gatewayStatus: "unknown", lastSeenAt: link.reportedAt, gatewayDeviceId: "",
+        icon: "gateway", color: mapMarkerColors.blue_gray,
       });
       if (!entities.has(link.peerDeviceId)) entities.set(link.peerDeviceId, {
         id: link.peerDeviceId, name: link.peerSerial, serial: link.peerSerial, farmId: link.farmId,
         halowMac: link.peerRadioMac, kind: "unresolved", online: true, gatewayStatus: "unknown", lastSeenAt: link.lastSeenAt, gatewayDeviceId: link.gatewayDeviceId,
+        icon: "beacon", color: mapMarkerColors.blue_gray,
       });
     }
 
@@ -206,6 +225,8 @@ export default function TopologyPage() {
       label: entity.name.length > 18 ? `${entity.name.slice(0, 17)}…` : entity.name,
       kind: entity.kind,
       online: entity.online,
+      icon: entity.icon,
+      color: entity.color,
     }));
     const graphLinks: CanvasLink[] = farmLinks.map((link) => ({
       id: link.$id,
@@ -241,7 +262,7 @@ export default function TopologyPage() {
       <div className="topology-stats"><article><span>VISIBLE DEVICES</span><strong>{graph.entities.size}</strong></article><article><span>ONLINE NOW</span><strong>{onlineCount}</strong></article><article><span>GATEWAYS</span><strong>{gatewayCount}</strong></article><article><span>ACTIVE LINKS</span><strong>{graph.rows.length}</strong></article><article><span>AVERAGE SIGNAL</span><strong>{averageRssi === null ? "—" : `${averageRssi} dBm`}</strong></article></div>
       <div className="topology-workspace">
         <section className="topology-stage" aria-label="Interactive HaLow mesh topology">
-          <div className="topology-legend"><span><i className="gateway" />Gateway</span><span><i className="online" />Online device</span><span><i className="offline" />Offline device</span><span><b className="signal excellent" />Excellent</span><span><b className="signal good" />Good</span><span><b className="signal weak" />Weak</span></div>
+          <div className="topology-legend"><span><i className="app-marker" />App icon + color</span><span><i className="gateway" />Gateway ring</span><span><i className="online" />Online</span><span><i className="offline" />Offline</span><span><b className="signal excellent" />Excellent</span><span><b className="signal good" />Good</span><span><b className="signal weak" />Weak</span></div>
           {graph.nodes.length ? <TopologyCanvas nodes={graph.nodes} links={graph.links} selectedId={selectedId} onSelect={setSelectedId} /> : <div className="topology-zero"><strong>No topology data</strong><span>No devices or active HaLow links are visible for this farm.</span></div>}
         </section>
         <aside className="topology-inspector">

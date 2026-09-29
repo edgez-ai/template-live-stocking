@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@mdi/js": "^7.4.47",
     "appwrite": "^20.0.0",
     "next": "^16.0.0",
     "react": "^19.2.0",

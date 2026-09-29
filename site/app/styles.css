@@ -178,9 +178,10 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-legend { position: absolute; z-index: 3; top: 14px; left: 14px; display: flex; flex-wrap: wrap; gap: 10px 14px; max-width: calc(100% - 28px); padding: 9px 12px; border: 1px solid #d7e3e0; border-radius: 12px; background: rgb(255 255 255 / 91%); box-shadow: 0 6px 18px rgb(9 46 53 / 7%); pointer-events: none; }
 .topology-legend span { display: inline-flex; align-items: center; gap: 6px; color: #59716f; font-size: 8px; font-weight: 900; text-transform: uppercase; }
 .topology-legend i { width: 11px; height: 11px; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 1px #9fb2ae; }
-.topology-legend i.gateway { background: #0a8c87; }
-.topology-legend i.online { background: #ff7657; }
-.topology-legend i.offline { background: #b8c6c3; }
+.topology-legend i.app-marker { background: #0066cc; }
+.topology-legend i.gateway { border: 3px double #173f42; background: white; box-shadow: none; }
+.topology-legend i.online { border-color: white; background: #16a085; }
+.topology-legend i.offline { border-color: white; background: #8b9f9c; }
 .topology-legend b.signal { width: 18px; height: 3px; border-radius: 3px; }
 .topology-legend b.excellent { background: #0a9b7d; }
 .topology-legend b.good { background: #d68a24; }
