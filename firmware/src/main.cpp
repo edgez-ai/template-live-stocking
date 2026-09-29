@@ -1350,7 +1350,7 @@ extern "C" void app_main() {
   const BaseType_t gateway_task_created = xTaskCreate(
       gateway_telemetry_task, "gateway_telemetry", 4096, nullptr, 5, nullptr);
   const BaseType_t publish_task_created = xTaskCreate(
-      telemetry_publish_task, "telemetry_publish", 4096, nullptr, 5, nullptr);
+      telemetry_publish_task, "telemetry_publish", 8192, nullptr, 5, nullptr);
   ESP_ERROR_CHECK(gateway_task_created == pdPASS && publish_task_created == pdPASS
                       ? ESP_OK : ESP_ERR_NO_MEM);
   ESP_ERROR_CHECK(xTaskCreate(ota_task, "ota", 8192, nullptr, 6, nullptr) == pdPASS
