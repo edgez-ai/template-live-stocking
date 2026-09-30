@@ -736,6 +736,7 @@ export default function App() {
   const [deviceColor, setDeviceColor] = useState<MapMarkerColor>("blue");
   const [deviceLocationChoice, setDeviceLocationChoice] = useState<DeviceLocationChoice>("none");
   const [deviceLocation, setDeviceLocation] = useState("");
+  const [deviceLocationLoading, setDeviceLocationLoading] = useState(false);
   const [deviceLocationPickerOpen, setDeviceLocationPickerOpen] = useState(false);
   const [upstreamConnection, setUpstreamConnection] = useState<UpstreamConnection | null>(null);
   const [upstreamWifiScanning, setUpstreamWifiScanning] = useState(false);
@@ -1271,7 +1272,7 @@ export default function App() {
   }
 
   async function chooseCurrentDeviceLocation() {
-    setBusy(true); setError("");
+    setDeviceLocationLoading(true); setError("");
     try {
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== "granted") throw new Error("Location permission is needed to use the phone's current location.");
@@ -1279,7 +1280,7 @@ export default function App() {
       setDeviceLocation(`${position.coords.latitude.toFixed(6)}, ${position.coords.longitude.toFixed(6)}`);
       setDeviceLocationChoice("current");
     } catch (caught) { setError(messageOf(caught)); }
-    finally { setBusy(false); }
+    finally { setDeviceLocationLoading(false); }
   }
 
   async function connectForProvisioning() {
@@ -1297,6 +1298,14 @@ export default function App() {
       if (!validDeviceWifiPassword(deviceWifiPassword)) { setError("The new device Wi-Fi password must be 8 to 63 printable characters."); return; }
       const coordinates = deviceLocationChoice === "none" ? null : coordinatesFromLocation(deviceLocation);
       if (deviceLocationChoice !== "none" && !coordinates) { setError("Choose a valid device location before provisioning."); return; }
+    }
+    if (selectedBleDevice.kind === "nrf54") {
+      setError("");
+      setUpstreamConnection("none");
+      setBleConnected(false);
+      setProvisioningStatus("Confirm the farm configuration. The app will connect to the nRF54 only when provisioning starts.");
+      setProvisioningStep(4);
+      return;
     }
     setBusy(true); setError("");
     try {
@@ -1354,7 +1363,7 @@ export default function App() {
     if (!user || (offline && !preparedProvisioning)) { setError("Provisioning requires a prepared MQTT credential. Reconnect the phone to the internet and restart H7608 provisioning."); return; }
     if (!farm) { setError("Select a farm before provisioning this device."); return; }
     if (!selectedBleDevice) { setError("Select a device before provisioning."); return; }
-    if (!bleConnected) { setError("The provisioning connection was lost. Go back and reconnect to the device."); return; }
+    if (selectedBleDevice.kind !== "nrf54" && !bleConnected) { setError("The provisioning connection was lost. Go back and reconnect to the device."); return; }
     if (selectedBleDevice.requiresDeviceName && !name.trim()) { setError("Enter a device and Wi-Fi AP name."); return; }
     if (name.trim().length > selectedBleDevice.deviceNameMaxLength) { setError(`The device name must not exceed ${selectedBleDevice.deviceNameMaxLength} characters.`); return; }
     if (selectedBleDevice.kind === "h7608" && !validDeviceWifiPassword(deviceWifiPassword)) { setError("The new device Wi-Fi password must be 8 to 63 printable characters."); return; }
@@ -1378,6 +1387,11 @@ export default function App() {
         throw new Error(`The server returned MQTT username ${mqtt.username}, but this device advertises serial ${serial}.`);
       }
 
+      if (selectedBleDevice.kind === "nrf54") {
+        setProvisioningStatus(`Connecting to ${selectedBleDevice.name}…`);
+        await provisioningManager.connect(selectedBleDevice);
+        setBleConnected(true);
+      }
       setProvisioningStatus(selectedBleDevice.supportsDeviceGps
         ? `Saving ${farm.name} configuration and waiting for NVS confirmation…`
         : `Sending ${farm.name} device configuration…`);
@@ -1936,13 +1950,13 @@ export default function App() {
               <Text style={styles.fieldHint}>{selectedBleDevice.requiresDeviceName ? "Required. This becomes the Wi-Fi AP SSID after provisioning." : "Optional. The serial is used when no name is entered."}</Text>
               <MapAppearancePicker icon={deviceIcon} color={deviceColor} onIconChange={setDeviceIcon} onColorChange={setDeviceColor} />
               <Text style={styles.fieldLabel}>LOCATION · OPTIONAL</Text>
-              <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
-              <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{busy ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
-              <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
-              {selectedBleDevice.supportsDeviceGps && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this device</Text></Pressable>}
+              <Pressable style={[styles.farmRow, deviceLocationChoice === "none" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }} disabled={busy || deviceLocationLoading} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "none" }}><Text style={styles.deviceNameDark}>None</Text></Pressable>
+              <Pressable style={[styles.farmRow, deviceLocationChoice === "current" && styles.farmRowSelected]} onPress={() => void chooseCurrentDeviceLocation()} disabled={busy || deviceLocationLoading} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "current" }}><Text style={styles.deviceNameDark}>{deviceLocationLoading ? "Finding current location…" : "Current location"}</Text>{deviceLocationChoice === "current" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
+              <Pressable style={[styles.farmRow, deviceLocationChoice === "map" && styles.farmRowSelected]} onPress={() => setDeviceLocationPickerOpen(true)} disabled={busy || deviceLocationLoading} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "map" }}><Text style={styles.deviceNameDark}>Choose on map</Text>{deviceLocationChoice === "map" && <Text style={styles.muted}>{deviceLocation}</Text>}</Pressable>
+              {selectedBleDevice.supportsDeviceGps && <Pressable style={[styles.farmRow, deviceLocationChoice === "gps" && styles.farmRowSelected]} onPress={() => { setDeviceLocationChoice("gps"); setDeviceLocation(""); }} disabled={busy || deviceLocationLoading} accessibilityRole="button" accessibilityState={{ selected: deviceLocationChoice === "gps" }}><Text style={styles.deviceNameDark}>Device GPS</Text><Text style={styles.muted}>Use the GPS connected to this device</Text></Pressable>}
               {selectedBleDevice.requiresProofOfPossession && <><Text style={styles.fieldLabel}>{selectedBleDevice.transport === "softap" ? "CURRENT PROVISIONING WI-FI PASSWORD" : "PROOF OF POSSESSION (PoP)"}</Text><PasswordField value={proofOfPossession} onChangeText={setProofOfPossession} placeholder={selectedBleDevice.transport === "softap" ? "Factory provisioning password" : "PoP shown on the device"} accessibilityName={selectedBleDevice.transport === "softap" ? "current provisioning Wi-Fi password" : "proof of possession"} /></>}
               {selectedBleDevice.kind === "h7608" && <><Text style={styles.fieldLabel}>NEW DEVICE WI-FI PASSWORD</Text><PasswordField value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" accessibilityName="new device Wi-Fi password" maxLength={63} /><Text style={[styles.fieldHint, Boolean(deviceWifiPassword) && !validDeviceWifiPassword(deviceWifiPassword) && styles.fieldHintError]}>{deviceWifiPassword && !validDeviceWifiPassword(deviceWifiPassword) ? "Use 8 to 63 printable characters." : "This replaces the factory password when the device finishes provisioning."}</Text></>}
-              <Pressable style={[styles.primary, busy && styles.disabledButton]} onPress={connectForProvisioning} disabled={busy}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : "CONNECT DEVICE"}</Text></Pressable>
+              <Pressable style={[styles.primary, (busy || deviceLocationLoading) && styles.disabledButton]} onPress={connectForProvisioning} disabled={busy || deviceLocationLoading}><Text style={styles.primaryText}>{busy ? "CONNECTING…" : selectedBleDevice.kind === "nrf54" ? "REVIEW SETUP" : "CONNECT DEVICE"}</Text></Pressable>
             </>}
             {provisioningStep === 3 && selectedBleDevice && <>
               <Text style={styles.dialogHelp}>Choose how this device reaches its upstream network. It will receive the farm mesh settings either way.</Text>
