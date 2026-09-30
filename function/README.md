@@ -1,7 +1,7 @@
 # Provisioning Function
 
 This Function subscribes to Appwrite's
-`devices.*.mqtt.message.publish` event. Appwrite has already authenticated the
+`devices.*.mqtt.message.publish` and `devices.*.delete` events. Appwrite has already authenticated the
 EMQX webhook and resolved its MQTT client to an internal device ID. The
 Function validates `projects/<projectId>/devices/<serial>/telemetry/<channel>`
 against the actual Appwrite Device and copies its read permissions to that
@@ -21,6 +21,11 @@ A legacy single JSON object follows the same path for the publishing device.
 The unified `status` payload may include an integer `batteryVoltageMv` from
 2500 to 5000 with `unit: "millivolt"`, plus valid latitude and longitude.
 Other telemetry channels keep their JSON payloads.
+
+When an Appwrite Device is deleted, the same Function removes its deterministic
+latest-telemetry row. This releases the unique HaLow MAC mapping before a device
+with the same serial and radio is recreated; deleting an already-absent row is
+treated as success.
 
 Any entry may include `topology.links`, including a relayed beacon entry whose
 peer is the observing relay. The Function validates each peer against the

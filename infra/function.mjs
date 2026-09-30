@@ -4,7 +4,7 @@ export function installFunction() {
   const id = config.name;
   const settings = [
     "--function-id", id, "--name", `${config.name} MQTT ingest`,
-    "--runtime", "node-24", "--events", "devices.*.mqtt.message.publish", "--timeout", "15",
+    "--runtime", "node-24", "--events", "devices.*.mqtt.message.publish", "devices.*.delete", "--timeout", "15",
     "--enabled", "true", "--logging", "true", "--entrypoint", "src/main.js",
     "--commands", "npm install", "--scopes", "devices.read", "rows.read", "rows.write", "timeseries.write",
   ];

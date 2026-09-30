@@ -236,7 +236,7 @@
       "entrypoint": "src/main.js",
       "commands": "npm ci",
       "execute": [],
-      "events": ["devices.*.mqtt.message.publish"],
+      "events": ["devices.*.mqtt.message.publish", "devices.*.delete"],
       "schedule": "",
       "timeout": 15,
       "enabled": true,

@@ -55,10 +55,6 @@ beforeEach(() => {
       return { ok: true, status: 201 };
     }
     const device = devices.get(decodeURIComponent(href.split("/").pop()));
-    if (device && options.method === "PATCH") {
-      device.metadata = JSON.parse(options.body).metadata;
-      return { ok: true, status: 200, json: async () => device };
-    }
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
   TablesDB.prototype.createRow = async (args) => {
@@ -145,6 +141,17 @@ async function publish(payload) {
   return main({ req, res: { json: (body, status) => ({ body, status }) }, error: (message) => {
     throw new Error(message);
   } });
+}
+
+async function deleteDevice(deviceId) {
+  return main({
+    req: { headers: {
+      "x-appwrite-event": `devices.${deviceId}.delete`,
+      "x-appwrite-key": "test-key",
+    } },
+    res: { json: (body, status = 200) => ({ body, status }) },
+    error: (message) => { throw new Error(message); },
+  });
 }
 
 test("one MQTT batch saves each clientId under its own device and permissions", async () => {
@@ -308,9 +315,6 @@ test("MQTT report writes HaLow MAC to latest telemetry and resolves topology", a
   ]);
   assert.equal(result.status, 201);
   assert.equal(rows.find((row) => row.data.deviceId === remoteId).data.halowMac, "02:11:22:33:44:55");
-  assert.equal(devices.get(gatewayId).metadata.halowMac, "0C:BF:74:1A:AE:36");
-  assert.equal(devices.get(remoteId).metadata.halowMac, "02:11:22:33:44:55");
-  assert.equal(devices.get(gatewayId).metadata.icon, "gateway");
   assert.equal(topologyRows.length, 1);
   assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
   assert.equal(topologyRows[0].peerDeviceId, gatewayId);
@@ -365,25 +369,29 @@ test("telemetry without a HaLow MAC is stored without blocking the report", asyn
   assert.equal(rows[0].data.halowMac, undefined);
 });
 
-test("a conflicting HaLow MAC does not block otherwise valid telemetry", async () => {
+test("latest telemetry rejects a HaLow MAC already owned by another device", async () => {
   rows.push({ $id: remoteId, data: {
     deviceId: remoteId, farmId: "farm-a", serial: "112233445566", halowMac: "0C:BF:74:1A:AE:36",
   } });
   const result = await publish({ clientId: gatewayId, topology: { links: [] } });
-  assert.equal(result.status, 201);
-  const current = rows.find((row) => row.data.deviceId === gatewayId);
-  assert.equal(current.data.halowMac, undefined);
+  assert.equal(result.status, 409);
+  assert.match(result.body.error, /belongs to another latest telemetry row/);
 });
 
-test("a re-registered device migrates stale same-serial HaLow MAC ownership", async () => {
-  const staleId = "33333333-3333-4333-8333-333333333333";
-  rows.push({ $id: staleId, data: {
-    deviceId: staleId, farmId: "farm-a", serial: "AABBCCDDEEFF", halowMac: "0C:BF:74:1A:AE:36",
+test("device deletion removes its latest telemetry row", async () => {
+  rows.push({ $id: gatewayId, data: {
+    deviceId: gatewayId, farmId: "farm-a", serial: "AABBCCDDEEFF", halowMac: "0C:BF:74:1A:AE:36",
   } });
-  const result = await publish({ clientId: gatewayId, topology: { links: [] } });
-  assert.equal(result.status, 201);
-  assert.equal(rows.some((row) => row.$id === staleId), false);
-  assert.equal(rows.find((row) => row.$id === gatewayId).data.halowMac, "0C:BF:74:1A:AE:36");
+  const result = await deleteDevice(gatewayId);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.deletedTelemetryDeviceId, gatewayId);
+  assert.equal(rows.length, 0);
+});
+
+test("device deletion is idempotent when latest telemetry is absent", async () => {
+  const result = await deleteDevice(gatewayId);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.accepted, true);
 });
 
 test("gateway downlink status is stored against the remote nRF device", async () => {

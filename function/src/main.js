@@ -410,6 +410,11 @@ function eventDeviceId(req) {
   return /^devices\.(.+)\.mqtt\.message\.publish$/.exec(event)?.[1] || "";
 }
 
+function deletedDeviceId(req) {
+  const event = req.headers["x-appwrite-event"] || "";
+  return /^devices\.(.+)\.delete$/.exec(event)?.[1] || "";
+}
+
 function topicParts(topic) {
   const match = /^projects\/([^/]+)\/devices\/([A-Za-z0-9][A-Za-z0-9._:-]{0,35})\/telemetry\/(.+)$/.exec(topic);
   return match ? { projectId: match[1], serial: match[2], channel: match[3] } : null;
@@ -428,23 +433,6 @@ async function getDevice(req, deviceId) {
   return response.json();
 }
 
-async function updateDeviceHalowMac(req, device, halowMac) {
-  if (device.metadata?.halowMac === halowMac) return;
-  const metadata = { ...(device.metadata || {}), halowMac };
-  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
-  const response = await fetch(`${endpoint}/devices/${encodeURIComponent(device.$id)}`, {
-    method: "PATCH",
-    headers: {
-      "content-type": "application/json",
-      "x-appwrite-project": process.env.APPWRITE_FUNCTION_PROJECT_ID,
-      "x-appwrite-key": req.headers["x-appwrite-key"],
-    },
-    body: JSON.stringify({ metadata }),
-  });
-  if (!response.ok) throw new Error(`Device HaLow MAC update failed with ${response.status}`);
-  device.metadata = metadata;
-}
-
 async function latestTelemetryByHalowMac(tables, halowMac) {
   const result = await tables.listRows({
     databaseId: DATABASE_ID,
@@ -458,6 +446,28 @@ async function latestTelemetryByHalowMac(tables, halowMac) {
 export default async function main({ req, res, error, log = () => {} }) {
   if (!DATABASE_ID || !TELEMETRY_TABLE_ID) {
     return json(res, { error: "Function environment is incomplete" }, 500);
+  }
+
+  const removedDeviceId = deletedDeviceId(req);
+  if (removedDeviceId) {
+    const client = new Client()
+      .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+      .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
+      .setKey(req.headers["x-appwrite-key"]);
+    const tables = new TablesDB(client);
+    try {
+      await tables.deleteRow({
+        databaseId: DATABASE_ID, tableId: TELEMETRY_TABLE_ID, rowId: removedDeviceId,
+      });
+      log(`Deleted latest telemetry for removed device ${removedDeviceId}`);
+    } catch (caught) {
+      const code = caught?.code ?? caught?.status;
+      if (code !== 404) {
+        error(caught instanceof Error ? caught.message : String(caught));
+        return json(res, { error: "Could not delete latest telemetry" }, 500);
+      }
+    }
+    return json(res, { accepted: true, deletedTelemetryDeviceId: removedDeviceId });
   }
 
   const body = bodyOf(req);
@@ -570,7 +580,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      targets.push({ entry, target, readPermissions, halowMac: "", topologyLinks: [], topologyPeers: [] });
+      targets.push({ entry, target, readPermissions, topologyLinks: [], topologyPeers: [] });
     }
 
     const devicesByHalowMac = new Map();
@@ -590,20 +600,9 @@ export default async function main({ req, res, error, log = () => {} }) {
       }
       const existing = await findTelemetryByHalowMac(halowMac);
       if (existing && existing.deviceId !== item.target.$id) {
-        if (existing.serial === item.target.serial) {
-          await tables.deleteRow({
-            databaseId: DATABASE_ID, tableId: TELEMETRY_TABLE_ID, rowId: existing.$id,
-          });
-          telemetryByHalowMac.set(halowMac, null);
-          log(`Migrated stale latest telemetry for ${item.target.serial} from ${existing.deviceId} to ${item.target.$id}`);
-        } else {
-          log(`Ignored conflicting HaLow MAC ${halowMac} already owned by ${existing.deviceId}`);
-          continue;
-        }
+        return json(res, { error: `HaLow MAC ${halowMac} belongs to another latest telemetry row` }, 409);
       }
-      item.halowMac = halowMac;
       devicesByHalowMac.set(halowMac, item.target);
-      await updateDeviceHalowMac(req, item.target, halowMac);
     }
     for (const item of targets) {
       const selfMac = normalizedHalowMac(item.entry.halowMac);
@@ -635,8 +634,9 @@ export default async function main({ req, res, error, log = () => {} }) {
     await writeTimeseries(req, targets.map(({ entry, target }, index) =>
       telemetryLine(target, entry, route.channel, receivedAt, index)));
     const telemetryIds = [];
-    for (const { entry, target, readPermissions, halowMac, topologyLinks, topologyPeers } of targets) {
+    for (const { entry, target, readPermissions, topologyLinks, topologyPeers } of targets) {
       const location = locationOf(entry);
+      const halowMac = normalizedHalowMac(entry.halowMac);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
         farmId: target.metadata.farmId,
