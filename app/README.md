@@ -54,7 +54,15 @@ on that target.
 
 The signed-in home screen opens with a full-screen Organic Maps view from
 `@edgez/react-native-sdk`. The top-right menu switches between map and list
-views or signs out; `+ ADD` remains beside it. Operators can download the
+views, opens the dedicated **Trace** screen, or signs out; `+ ADD` remains beside it. The
+Trace screen draws the signed-in user's timestamped phone-GPS route and filters
+it to the last hour, six hours, 24 hours, or seven days. Its Settings button
+enables or disables background tracking and selects a one-, five-, or
+fifteen-minute save interval. Every position is cached before upload, so an
+offline walk or drive appears locally and synchronizes later. Server rows in
+`mobile-trace-points` are protected with per-user row permissions. Android shows
+a persistent foreground-service notification while tracking; both Android and
+iOS require background location permission. Operators can download the
 current map region once and continue viewing it offline; cached farms, geofence
 areas and rules, devices, and latest telemetry provide the map state. Devices
 are displayed as map nodes when latitude and longitude are present. List view

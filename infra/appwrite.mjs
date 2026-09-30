@@ -14,15 +14,16 @@ const farmTable = appwriteConfig.tables?.find((table) => table.$id === "farms");
 const geofenceAreaTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas");
 const geofenceRuleTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules");
 const geofenceAlarmTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-alarms");
+const traceTable = appwriteConfig.tables?.find((table) => table.$id === "mobile-trace-points");
 const database = appwriteConfig.tablesDB?.find(
   (candidate) => candidate.$id === telemetryTable?.databaseId,
 );
 const timeseriesStore = appwriteConfig.timeseriesStores?.find(
   (candidate) => candidate.enabled !== false && candidate.$id === "<PROJECT_ID>",
 );
-if (!database || !telemetryTable || !topologyTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+if (!database || !telemetryTable || !topologyTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable || !traceTable ||
     !timeseriesStore || !timeseriesStore.name || !Array.isArray(timeseriesStore.permissions) ||
-    [topologyTable, farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
+    [topologyTable, farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable, traceTable].some((table) => table.databaseId !== database.$id)) {
   throw new Error("appwrite.config.json must define the Time Series Store and all Live Stocking tables");
 }
 
@@ -67,6 +68,7 @@ export const config = {
   geofenceAreaTableId: geofenceAreaTable.$id,
   geofenceRuleTableId: geofenceRuleTable.$id,
   geofenceAlarmTableId: geofenceAlarmTable.$id,
+  traceTableId: traceTable.$id,
 };
 export const domainPrefix = `${config.projectName}-${config.name}`;
 export const webDomain = `${domainPrefix}.sites.${config.domainSuffix}`;

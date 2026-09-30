@@ -12,6 +12,8 @@ import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Location from "expo-location";
 import { centerChannelForCountry, channelsForCountry, halowCountries } from "./halowChannels";
+import { disableTraceTracking, enableTraceTracking, loadTracePoints, loadTracePreferences, saveTracePreferences, syncPendingTracePoints } from "./traceTracking";
+import type { TracePoint, TracePreferences, TraceRange } from "./traceTracking";
 type ProvisioningDevice = EdgezProvisioningDevice;
 
 type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; icon?: EdgezMapIcon; markerColor?: MapMarkerColor; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
@@ -32,7 +34,7 @@ type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: stri
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "gatewayDeviceId" | "halowMac" | "serial" | "channel" | "topic" | "payload" | "location" | "icon" | "markerColor" | "receivedAt">;
 type CachedGeofenceArea = Pick<GeofenceArea, "$id" | "farmId" | "name" | "shape" | "geometry">;
 type CachedGeofenceRule = Pick<GeofenceRule, "$id" | "farmId" | "name" | "areaId" | "deviceIds" | "enterAlert" | "exitAlert">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string; traceTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -278,6 +280,7 @@ const config: AppConfig = {
   geofenceRuleTableId: appConfig.geofenceRuleTableId || "geofence-rules",
   geofenceAlarmTableId: appConfig.geofenceAlarmTableId || "geofence-alarms",
   otaUpdateTableId: appConfig.otaUpdateTableId || "ota-updates",
+  traceTableId: appConfig.traceTableId || "mobile-trace-points",
 };
 const endpoint = config.appwriteEndpoint.replace(/\/+$/, "");
 const otaRepositoryUrl = (config.otaRepositoryUrl || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -304,6 +307,16 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "24h", label: "24 HOURS", duration: 24 * 60 * 60 * 1000 },
 ];
 const topologyRecentMs = 2 * 60 * 1000;
+const traceRanges: { key: TraceRange; label: string; duration: number }[] = [
+  { key: "1h", label: "1 HOUR", duration: 60 * 60 * 1000 },
+  { key: "6h", label: "6 HOURS", duration: 6 * 60 * 60 * 1000 },
+  { key: "24h", label: "24 HOURS", duration: 24 * 60 * 60 * 1000 },
+  { key: "7d", label: "7 DAYS", duration: 7 * 24 * 60 * 60 * 1000 },
+];
+
+function traceRangeDuration(range: TraceRange) {
+  return traceRanges.find((choice) => choice.key === range)?.duration ?? 24 * 60 * 60 * 1000;
+}
 
 function measurementForDevice(deviceId: string) {
   return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
@@ -677,6 +690,60 @@ function OfflineMap({ devices, telemetry, location, areas = [] }: { devices: Dev
   </View>;
 }
 
+function traceDistanceMeters(points: TracePoint[]) {
+  let total = 0;
+  for (let index = 1; index < points.length; index++) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const latitudeDelta = (current.latitude - previous.latitude) * Math.PI / 180;
+    const longitudeDelta = (current.longitude - previous.longitude) * Math.PI / 180;
+    const a = Math.sin(latitudeDelta / 2) ** 2 + Math.cos(previous.latitude * Math.PI / 180) * Math.cos(current.latitude * Math.PI / 180) * Math.sin(longitudeDelta / 2) ** 2;
+    total += 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+  return total;
+}
+
+function TraceView({ points, preferences, loading, error, fallbackLocation, onClose, onRefresh, onSave }: { points: TracePoint[]; preferences: TracePreferences; loading: boolean; error: string; fallbackLocation?: string; onClose: () => void; onRefresh: () => void; onSave: (preferences: TracePreferences) => Promise<void> }) {
+  const [settings, setSettings] = useState(false);
+  const [draft, setDraft] = useState(preferences);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDraft(preferences), [preferences]);
+  const latest = points[points.length - 1];
+  const fallback = coordinatesFromLocation(fallbackLocation || "");
+  const center = latest ?? fallback ?? { latitude: 59.3293, longitude: 18.0686 };
+  const line = useMemo<EdgezMapLine[]>(() => points.length > 1 ? [{ id: "mobile-trace", points: points.map(({ latitude, longitude }) => ({ latitude, longitude })), color: "#0A8C87" }] : [], [points]);
+  const nodes = useMemo<EdgezMapNode[]>(() => latest ? [{ id: "trace-current", label: "Current position", latitude: latest.latitude, longitude: latest.longitude, marker: "#FF8264", icon: "person" }] : [], [latest]);
+  const distance = traceDistanceMeters(points);
+
+  if (settings) return <SafeAreaView style={styles.dialogPage}>
+    <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>TRACE SETTINGS</Text><Text style={styles.dialogTitle}>Movement tracking</Text></View><Pressable onPress={() => setSettings(false)}><Text style={styles.close}>BACK</Text></Pressable></View>
+    <ScrollView contentContainerStyle={styles.dialogContent}>
+      <Text style={styles.dialogHelp}>When enabled, the phone records GPS positions in the background, caches them locally, and uploads them to your private Appwrite trace history.</Text>
+      <Pressable style={[styles.traceToggle, draft.enabled && styles.traceToggleEnabled]} onPress={() => setDraft({ ...draft, enabled: !draft.enabled })} accessibilityRole="switch" accessibilityState={{ checked: draft.enabled }}>
+        <View><Text style={[styles.traceToggleTitle, draft.enabled && styles.traceToggleTitleEnabled]}>BACKGROUND TRACKING</Text><Text style={[styles.traceToggleDetail, draft.enabled && styles.traceToggleDetailEnabled]}>{draft.enabled ? "Enabled · a persistent location notice will be shown" : "Disabled · no new positions are recorded"}</Text></View><Text style={[styles.traceToggleState, draft.enabled && styles.traceToggleStateEnabled]}>{draft.enabled ? "ON" : "OFF"}</Text>
+      </Pressable>
+      <Text style={styles.fieldLabel}>SAVE INTERVAL</Text>
+      <View style={styles.rangeSelector}>{[1, 5, 15].map((minutes) => <Pressable key={minutes} style={[styles.rangeButton, draft.intervalMinutes === minutes && styles.rangeButtonActive]} onPress={() => setDraft({ ...draft, intervalMinutes: minutes })}><Text style={[styles.rangeButtonText, draft.intervalMinutes === minutes && styles.rangeButtonTextActive]}>{minutes} MIN</Text></Pressable>)}</View>
+      <Text style={styles.fieldHint}>GPS may also wait for at least 10 metres of movement to reduce battery use.</Text>
+      <Text style={styles.fieldLabel}>DEFAULT PREVIEW RANGE</Text>
+      <View style={styles.rangeSelector}>{traceRanges.map((range) => <Pressable key={range.key} style={[styles.rangeButton, draft.range === range.key && styles.rangeButtonActive]} onPress={() => setDraft({ ...draft, range: range.key })}><Text style={[styles.rangeButtonText, draft.range === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
+      <Pressable style={[styles.primary, saving && styles.disabledButton]} disabled={saving} onPress={() => void (async () => { setSaving(true); try { await onSave(draft); setSettings(false); } finally { setSaving(false); } })()}><Text style={styles.primaryText}>{saving ? "SAVING…" : "SAVE TRACE SETTINGS"}</Text></Pressable>
+      {error ? <Text style={styles.dialogError}>{error}</Text> : null}
+    </ScrollView>
+  </SafeAreaView>;
+
+  return <SafeAreaView style={styles.dialogPage}>
+    <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>MOBILE GPS</Text><Text style={styles.dialogTitle}>Trace</Text></View><View style={styles.traceHeaderActions}><Pressable onPress={() => { setDraft(preferences); setSettings(true); }}><Text style={styles.close}>SETTINGS</Text></Pressable><Pressable onPress={onClose}><Text style={styles.close}>CLOSE</Text></Pressable></View></View>
+    <View style={styles.traceRangeBar}>{traceRanges.map((range) => <Pressable key={range.key} style={[styles.traceRangeButton, preferences.range === range.key && styles.traceRangeButtonActive]} onPress={() => void onSave({ ...preferences, range: range.key })}><Text style={[styles.rangeButtonText, preferences.range === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
+    <View style={styles.traceMap}>
+      <EdgezOrganicMap nodes={nodes} lines={line} centerLatitude={center.latitude} centerLongitude={center.longitude} zoom={latest ? 15 : 10} enableMapDownloads style={styles.map} />
+      <View style={styles.traceSummary}><Text style={styles.traceSummaryTitle}>{preferences.enabled ? "TRACKING ACTIVE" : "TRACKING PAUSED"}</Text><Text style={styles.traceSummaryValue}>{points.length} points · {distance >= 1000 ? `${(distance / 1000).toFixed(2)} km` : `${Math.round(distance)} m`}</Text><Text style={styles.traceSummaryDetail}>{latest ? `Last fix ${new Date(latest.recordedAt).toLocaleString()}${latest.synced ? " · synced" : " · waiting to sync"}` : "No positions in this time range yet."}</Text></View>
+      <Pressable style={styles.traceRefresh} onPress={onRefresh} disabled={loading}><Text style={styles.traceRefreshText}>{loading ? "LOADING…" : "REFRESH"}</Text></Pressable>
+      {error ? <View style={[styles.mapNotice, styles.mapError]}><Text style={styles.mapNoticeText}>{error}</Text></View> : null}
+    </View>
+  </SafeAreaView>;
+}
+
 async function deviceApi<T>(path = "", method: "GET" | "POST" | "PATCH" | "DELETE" = "GET", body?: object) {
   const response = await fetch(`${endpoint}/devices${path}`, {
     method,
@@ -716,6 +783,11 @@ export default function App() {
   const [geofenceAreas, setGeofenceAreas] = useState<GeofenceArea[]>([]);
   const [geofenceRules, setGeofenceRules] = useState<GeofenceRule[]>([]);
   const [geofenceAlarms, setGeofenceAlarms] = useState<GeofenceAlarm[]>([]);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [tracePreferences, setTracePreferences] = useState<TracePreferences>({ enabled: false, intervalMinutes: 5, range: "24h" });
+  const [tracePoints, setTracePoints] = useState<TracePoint[]>([]);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState("");
   const [areaDraft, setAreaDraft] = useState<AreaDraft>(emptyAreaDraft);
   const [areaEditingId, setAreaEditingId] = useState<string | null>(null);
   const [areaPickerOpen, setAreaPickerOpen] = useState(false);
@@ -809,6 +881,63 @@ export default function App() {
     void markAppBundleUpdateHealthy()
       .catch((caught) => console.warn("Could not mark app bundle update healthy", caught));
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setTracePreferences({ enabled: false, intervalMinutes: 5, range: "24h" });
+      setTracePoints([]);
+      return;
+    }
+    void loadTracePreferences(user.$id).then(setTracePreferences);
+    void syncPendingTracePoints(user.$id).catch(() => undefined);
+  }, [user?.$id]);
+
+  useEffect(() => {
+    if (!traceOpen || !user) return;
+    void refreshTrace();
+    const timer = setInterval(() => void refreshTrace(), 30000);
+    return () => clearInterval(timer);
+  }, [traceOpen, user?.$id, tracePreferences.range]);
+
+  async function refreshTrace(range = tracePreferences.range) {
+    if (!user) return;
+    setTraceLoading(true);
+    setTraceError("");
+    try {
+      await syncPendingTracePoints(user.$id);
+      setTracePoints(await loadTracePoints(user.$id, new Date(Date.now() - traceRangeDuration(range))));
+    } catch (caught) {
+      setTraceError(messageOf(caught));
+    } finally {
+      setTraceLoading(false);
+    }
+  }
+
+  async function applyTracePreferences(next: TracePreferences) {
+    if (!user) return;
+    setTraceError("");
+    try {
+      if (next.enabled && (!tracePreferences.enabled || next.intervalMinutes !== tracePreferences.intervalMinutes)) {
+        await enableTraceTracking(user.$id, currentFarmId || undefined, next);
+      } else if (!next.enabled && tracePreferences.enabled) {
+        await disableTraceTracking(user.$id, next);
+      } else {
+        await saveTracePreferences(user.$id, next);
+      }
+      setTracePreferences(next);
+      await refreshTrace(next.range);
+    } catch (caught) {
+      setTraceError(messageOf(caught));
+      setTracePreferences(await loadTracePreferences(user.$id));
+      throw caught;
+    }
+  }
+
+  function openTrace() {
+    setMenuOpen(false);
+    setTraceError("");
+    setTraceOpen(true);
+  }
 
   async function checkForAppUpdate() {
     setMenuOpen(false);
@@ -1483,6 +1612,7 @@ export default function App() {
   async function signOut() {
     setMenuOpen(false);
     if (selectedBleDevice) await provisioningManager.disconnect(selectedBleDevice);
+    if (user) await disableTraceTracking(user.$id, tracePreferences).catch(() => undefined);
     activeUserId.current = null;
     if (offline) await AsyncStorage.setItem(pendingSignOutKey, "1");
     else {
@@ -1497,7 +1627,7 @@ export default function App() {
     if (user) await clearCachedUser(user.$id);
     farmsRef.current = []; devicesRef.current = []; telemetryRef.current = [];
     geofenceAreasRef.current = []; geofenceRulesRef.current = []; currentFarmIdRef.current = "";
-    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setOffline(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setSettingsOpen(false); setLocationPickerOpen(false); setFarmFormMode(null); setMembers([]); setTelemetry([]); setGeofenceAreas([]); setGeofenceRules([]); setGeofenceAlarms([]); setTopology([]); setOtaUpdates([]); setBleDevices([]); setSelectedBleDevice(null); setProofOfPossession(provisioningPop); setDeviceWifiPassword(""); setBleConnected(false); setProvisioningDialogOpen(false); setDetailDevice(null); setDashboardView("map"); setTraceOpen(false); setTracePoints([]); setOffline(false);
   }
 
   function openSettings() {
@@ -1776,6 +1906,7 @@ export default function App() {
         </View>
         {menuOpen && <View style={styles.dropdownMenu}>
           <Pressable style={styles.menuItem} onPress={() => { setDashboardView(dashboardView === "map" ? "list" : "map"); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>{dashboardView === "map" ? "List view" : "Map view"}</Text></Pressable>
+          <Pressable style={styles.menuItem} onPress={openTrace} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Trace{tracePreferences.enabled ? " · ON" : ""}</Text></Pressable>
           <Pressable style={styles.menuItem} onPress={() => { setAlarmsOpen(true); setMenuOpen(false); }} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Alarms{geofenceAlarms.filter((alarm) => !alarm.acknowledged).length ? ` · ${geofenceAlarms.filter((alarm) => !alarm.acknowledged).length}` : ""}</Text></Pressable>
           {Platform.OS === "android" && <Pressable style={styles.menuItem} onPress={openFlasher} accessibilityRole="menuitem"><Text style={styles.menuItemText}>Flash hardware</Text></Pressable>}
           {Platform.OS === "android" && <Pressable style={styles.menuItem} onPress={() => void checkForAppUpdate()} disabled={appUpdateChecking} accessibilityRole="menuitem" accessibilityState={{ disabled: appUpdateChecking }}><Text style={styles.menuItemText}>{appUpdateChecking ? "Checking for updates…" : "Check for updates"}</Text></Pressable>}
@@ -1785,6 +1916,9 @@ export default function App() {
         </View>}
       </View>
     </View>}
+    <Modal visible={traceOpen && Boolean(user)} animationType="slide" onRequestClose={() => setTraceOpen(false)}>
+      <TraceView points={tracePoints} preferences={tracePreferences} loading={traceLoading} error={traceError} fallbackLocation={currentFarm?.location} onClose={() => setTraceOpen(false)} onRefresh={() => void refreshTrace()} onSave={applyTracePreferences} />
+    </Modal>
     <Modal visible={flasherOpen && Boolean(user)} animationType="slide" onRequestClose={() => void closeFlasher()}>
       <SafeAreaView style={styles.dialogPage}>
         <View style={styles.dialogHeader}><View><Text style={styles.stepLabel}>USB-C FIRMWARE</Text><Text style={styles.dialogTitle}>Flash hardware</Text></View><Pressable onPress={() => void closeFlasher()} disabled={flashing}><Text style={styles.close}>CLOSE</Text></Pressable></View>
@@ -2010,6 +2144,7 @@ const styles = StyleSheet.create({
   input: { height: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, color: "white", fontSize: 16 }, primary: { minHeight: 54, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87", marginTop: 5 }, primaryText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, secondary: { minHeight: 52, alignItems: "center", justifyContent: "center" }, secondaryText: { color: "#69cfc7", fontSize: 11, fontWeight: "900", letterSpacing: 1 },
   listScroll: { flex: 1 }, listContent: { paddingHorizontal: 22, paddingTop: 94, paddingBottom: 30, gap: 12 }, inputLight: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, paddingHorizontal: 15, color: "#0a3037", backgroundColor: "white" }, muted: { color: "#59716f", fontSize: 11 },
   mapCard: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, map: { ...StyleSheet.absoluteFill }, mapPrompt: { position: "absolute", left: 12, right: 12, bottom: 28, padding: 14, borderRadius: 14, backgroundColor: "#092e35f2" }, mapPromptTitle: { color: "white", fontSize: 14, fontWeight: "900" }, mapPromptText: { color: "#b8cdca", fontSize: 11, lineHeight: 16, marginTop: 3 }, mapPromptActions: { flexDirection: "row", gap: 8, marginTop: 10 }, mapDownloadButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13, borderRadius: 9, backgroundColor: "#0a8c87" }, mapDownloadText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapLaterButton: { minHeight: 38, justifyContent: "center", paddingHorizontal: 13 }, mapLaterText: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, mapNotice: { position: "absolute", left: 12, right: 90, top: 68, borderRadius: 9, padding: 9, backgroundColor: "#092e35e8" }, mapError: { backgroundColor: "#8f3422e8" }, mapNoticeText: { color: "white", fontSize: 10, fontWeight: "700" }, mapAttribution: { position: "absolute", left: 10, right: 10, bottom: 5, color: "#173e43", fontSize: 9, textShadowColor: "white", textShadowRadius: 4 },
+  traceHeaderActions: { flexDirection: "row", alignItems: "center", gap: 18 }, traceRangeBar: { flexDirection: "row", gap: 4, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: "#dce8e5" }, traceRangeButton: { flex: 1, minHeight: 34, borderRadius: 8, alignItems: "center", justifyContent: "center" }, traceRangeButtonActive: { backgroundColor: "#0a8c87" }, traceMap: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" }, traceSummary: { position: "absolute", left: 12, right: 12, top: 12, padding: 14, borderRadius: 14, backgroundColor: "#092e35e8" }, traceSummaryTitle: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, traceSummaryValue: { color: "white", fontSize: 18, fontWeight: "900", marginTop: 4 }, traceSummaryDetail: { color: "#b8cdca", fontSize: 10, marginTop: 3 }, traceRefresh: { position: "absolute", right: 12, bottom: 16, minHeight: 40, paddingHorizontal: 14, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8" }, traceRefreshText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .7 }, traceToggle: { minHeight: 84, padding: 16, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 14, backgroundColor: "white", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }, traceToggleEnabled: { borderColor: "#0a8c87", backgroundColor: "#0a3037" }, traceToggleTitle: { color: "#385753", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, traceToggleTitleEnabled: { color: "#69cfc7" }, traceToggleDetail: { color: "#718783", fontSize: 10, lineHeight: 15, marginTop: 5, maxWidth: 250 }, traceToggleDetailEnabled: { color: "#b8cdca" }, traceToggleState: { color: "#718783", fontSize: 16, fontWeight: "900" }, traceToggleStateEnabled: { color: "#69cfc7" },
   farmRow: { padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", gap: 4 }, currentFarmCard: { padding: 16, borderRadius: 14, backgroundColor: "#e9f7f5", gap: 8 }, settingsTabs: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, settingsTab: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, settingsTabActive: { backgroundColor: "#0a8c87" }, settingsTabText: { color: "#59716f", fontSize: 9, fontWeight: "900", letterSpacing: .5 }, settingsTabTextActive: { color: "white" }, farmRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#e9f7f5" },
   geofenceForm: { gap: 10, padding: 12, borderRadius: 12, backgroundColor: "#e9f2f0" }, smallOption: { flex: 1, minHeight: 42, paddingHorizontal: 8, borderRadius: 10, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", alignItems: "center", justifyContent: "center" }, dimensionInput: { flex: 1 },
   settingsActions: { flexDirection: "row", gap: 10 }, settingsAction: { flex: 1 }, outlineButton: { minHeight: 54, borderRadius: 14, borderWidth: 1, borderColor: "#0a8c87", alignItems: "center", justifyContent: "center", marginTop: 5 }, outlineButtonText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, memberRow: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#cedbdc", backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 }, memberInfo: { flex: 1, gap: 4 }, removeMemberText: { color: "#b9472f", fontSize: 10, fontWeight: "900" },

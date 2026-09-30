@@ -10,13 +10,14 @@ const farmTableId = appwriteConfig.tables?.find((table) => table.$id === "farms"
 const geofenceAreaTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas")?.$id;
 const geofenceRuleTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules")?.$id;
 const geofenceAlarmTableId = appwriteConfig.tables?.find((table) => table.$id === "geofence-alarms")?.$id;
+const traceTableId = appwriteConfig.tables?.find((table) => table.$id === "mobile-trace-points")?.$id;
 const appName = process.env.APP_NAME || edgezProject.name;
 const domainSuffix = process.env.DOMAIN_SUFFIX;
 const configuredEndpoint =
   process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT || appwriteConfig.endpoint;
 const projectId = process.env.APPWRITE_PROJECT_ID;
 
-if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !topologyTableId || !otaUpdateTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlarmTableId) {
+if (!appName || !domainSuffix || !configuredEndpoint || !projectId || !databaseId || !telemetryTableId || !topologyTableId || !otaUpdateTableId || !farmTableId || !geofenceAreaTableId || !geofenceRuleTableId || !geofenceAlarmTableId || !traceTableId) {
   throw new Error("Appwrite project and telemetry table environment is incomplete");
 }
 
@@ -45,7 +46,13 @@ module.exports = {
     userInterfaceStyle: "light",
     plugins: [
       "expo-status-bar",
-      ["expo-location", { locationWhenInUsePermission: "Use your current location when placing a device on the farm map." }],
+      ["expo-location", {
+        locationWhenInUsePermission: "Use your location to place devices and record your movement trace.",
+        locationAlwaysAndWhenInUsePermission: "Allow Live Stocking to record your movement trace while the app is in the background.",
+        isAndroidBackgroundLocationEnabled: true,
+        isAndroidForegroundServiceEnabled: true,
+        isIosBackgroundLocationEnabled: true,
+      }],
       "@edgez/react-native-sdk",
       "./plugins/withOrganicMaps",
       ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
@@ -65,6 +72,7 @@ module.exports = {
       geofenceAreaTableId,
       geofenceRuleTableId,
       geofenceAlarmTableId,
+      traceTableId,
       otaRepositoryUrl: vcsRepositoryUrl.replace(/\.git$/, "").replace(/\/$/, ""),
       otaProxyUrl,
       bundleRuntimeVersion,

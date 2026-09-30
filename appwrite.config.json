@@ -224,6 +224,28 @@
         { "key": "farm-active", "type": "key", "attributes": ["farmId", "active"], "orders": ["ASC", "ASC"] },
         { "key": "rule-device-event", "type": "unique", "attributes": ["ruleId", "deviceId", "event"] }
       ]
+    },
+    {
+      "$id": "mobile-trace-points",
+      "databaseId": "live-stocking",
+      "name": "Mobile movement trace points",
+      "permissions": ["create(\"users\")"],
+      "rowSecurity": true,
+      "enabled": true,
+      "columns": [
+        { "key": "userId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "farmId", "type": "varchar", "size": 36, "required": false, "array": false },
+        { "key": "location", "type": "point", "required": true, "array": false },
+        { "key": "accuracy", "type": "double", "required": false, "array": false },
+        { "key": "altitude", "type": "double", "required": false, "array": false },
+        { "key": "speed", "type": "double", "required": false, "array": false },
+        { "key": "heading", "type": "double", "required": false, "array": false },
+        { "key": "recordedAt", "type": "varchar", "size": 40, "required": true, "array": false }
+      ],
+      "indexes": [
+        { "key": "user-recorded-at", "type": "key", "attributes": ["userId", "recordedAt"], "orders": ["ASC", "ASC"] },
+        { "key": "location-spatial", "type": "spatial", "attributes": ["location"] }
+      ]
     }
   ],
   "buckets": [],

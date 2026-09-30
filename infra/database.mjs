@@ -161,4 +161,29 @@ export function installDatabase() {
   ensure("geofence alarms rule device event index",
     ["tables-db", "get-index", ...alarms, "--key", "rule-device-event"],
     ["tables-db", "create-index", ...alarms, "--key", "rule-device-event", "--type", "unique", "--columns", "ruleId", "deviceId", "event"]);
+
+  const trace = ["--database-id", config.databaseId, "--table-id", config.traceTableId];
+  ensure("mobile trace points table",
+    ["tables-db", "get-table", ...trace],
+    ["tables-db", "create-table", ...trace, "--name", "Mobile movement trace points", "--permissions", 'create("users")', "--row-security", "true"]);
+  run(["tables-db", "update-table", ...trace, "--permissions", 'create("users")', "--row-security", "true"]);
+  for (const [key, size, required] of [["userId", "36", true], ["farmId", "36", false], ["recordedAt", "40", true]]) {
+    ensure(`mobile trace points.${key} column`,
+      ["tables-db", "get-column", ...trace, "--key", key],
+      ["tables-db", "create-string-column", ...trace, "--key", key, "--size", size, ...(required ? ["--required", "true"] : [])]);
+  }
+  ensure("mobile trace points.location column",
+    ["tables-db", "get-column", ...trace, "--key", "location"],
+    ["tables-db", "create-point-column", ...trace, "--key", "location", "--required", "true"]);
+  for (const key of ["accuracy", "altitude", "speed", "heading"]) {
+    ensure(`mobile trace points.${key} column`,
+      ["tables-db", "get-column", ...trace, "--key", key],
+      ["tables-db", "create-float-column", ...trace, "--key", key]);
+  }
+  ensure("mobile trace points user/time index",
+    ["tables-db", "get-index", ...trace, "--key", "user-recorded-at"],
+    ["tables-db", "create-index", ...trace, "--key", "user-recorded-at", "--type", "key", "--columns", "userId", "recordedAt", "--orders", "ASC", "ASC"]);
+  ensure("mobile trace points spatial index",
+    ["tables-db", "get-index", ...trace, "--key", "location-spatial"],
+    ["tables-db", "create-index", ...trace, "--key", "location-spatial", "--type", "spatial", "--columns", "location"]);
 }
