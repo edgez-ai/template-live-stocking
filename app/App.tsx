@@ -367,7 +367,7 @@ async function cacheSnapshot(user: CurrentUser, farms: Farm[], areas: GeofenceAr
   const safeFarms: CachedFarm[] = farms.map(({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }) =>
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
   const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
-    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor, firmwareTarget: metadata?.firmwareTarget, mqttGateway: metadata?.mqttGateway } }));
+    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor, firmwareTarget: metadata?.firmwareTarget, mqttGateway: metadata?.mqttGateway, upstreamConnection: metadata?.upstreamConnection } }));
   const safeAreas: CachedGeofenceArea[] = areas.map(({ $id, farmId, name, shape, geometry }) =>
     ({ $id, farmId, name, shape, geometry }));
   const safeRules: CachedGeofenceRule[] = rules.map(({ $id, farmId, name, areaId, deviceIds, enterAlert, exitAlert }) =>
@@ -1377,9 +1377,9 @@ export default function App() {
       const mqttGateway = upstreamConnection === "wifi" || upstreamConnection === "ethernet";
       const backend = preparedProvisioning ?? await prepareDeviceCredential(selectedBleDevice, farm);
       let appwriteDevice = backend.device;
-      if (!offline && (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway)) {
+      if (!offline && (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway || appwriteDevice.metadata?.upstreamConnection !== upstreamConnection)) {
         appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
-          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway },
+          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway, upstreamConnection },
         });
       }
       const mqtt = backend.credential;

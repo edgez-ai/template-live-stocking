@@ -3,8 +3,10 @@
 import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import FarmSelector, { preferredFarmId, selectedFarmStorageKey } from "./FarmSelector";
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { firmwareTarget?: string; [key: string]: unknown } };
+type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; firmwareTarget?: string; [key: string]: unknown } };
+type Farm = Models.Row & { name: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
@@ -24,6 +26,7 @@ const client = new Client()
 const account = new Account(client);
 const tables = new TablesDB(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
+const farmTableId = process.env.NEXT_PUBLIC_FARM_TABLE_ID!;
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
@@ -338,6 +341,8 @@ async function sendRandomTemperatureScript(deviceId: string, requestId: string, 
 export default function Home() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
+  const [farms, setFarms] = useState<Farm[]>([]);
+  const [currentFarmId, setCurrentFarmId] = useState("");
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
@@ -362,13 +367,15 @@ export default function Home() {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, telemetryRows, topologyRows, otaRows] = await Promise.all([
+    const [deviceResult, farmRows, telemetryRows, topologyRows, otaRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
+      tables.listRows<Farm>({ databaseId, tableId: farmTableId, queries: [Query.limit(100)] }),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
     ]);
     setDevices(deviceResult.devices);
+    setFarms([...farmRows.rows].sort((left, right) => left.name.localeCompare(right.name)));
     setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
     setTopology(topologyRows.rows as unknown as TopologyLink[]);
     setOtaUpdates(otaRows.rows as unknown as OtaUpdate[]);
@@ -401,8 +408,23 @@ export default function Home() {
   }, [refresh, user]);
 
   useEffect(() => {
-    setSelectedDeviceId((current) => devices.some((device) => device.$id === current) ? current : devices[0]?.$id || "");
-  }, [devices]);
+    if (!user || !farms.length) return;
+    setCurrentFarmId((current) => farms.some((farm) => farm.$id === current)
+      ? current
+      : preferredFarmId(user.$id, farms, (user.prefs as { currentFarmId?: string }).currentFarmId));
+  }, [farms, user]);
+
+  useEffect(() => {
+    if (!user || !currentFarmId || !farms.some((farm) => farm.$id === currentFarmId)) return;
+    window.localStorage.setItem(selectedFarmStorageKey(user.$id), currentFarmId);
+  }, [currentFarmId, farms, user]);
+
+  const farmDevices = useMemo(() => devices.filter((device) => device.metadata?.farmId === currentFarmId), [currentFarmId, devices]);
+  const currentFarm = farms.find((farm) => farm.$id === currentFarmId);
+
+  useEffect(() => {
+    setSelectedDeviceId((current) => farmDevices.some((device) => device.$id === current) ? current : farmDevices[0]?.$id || "");
+  }, [farmDevices]);
 
   useEffect(() => {
     if (!selectedDeviceId) { setHistorySeries([]); setHistoryReadings([]); return; }
@@ -437,7 +459,7 @@ export default function Home() {
 
   async function signOut() {
     await account.deleteSession({ sessionId: "current" });
-    setUser(null); setDevices([]); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
+    setUser(null); setDevices([]); setFarms([]); setCurrentFarmId(""); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
   }
 
   async function removeSelectedDevice() {
@@ -504,7 +526,7 @@ export default function Home() {
     }
     return latest;
   }, [telemetry]);
-  const selectedDevice = devices.find((device) => device.$id === selectedDeviceId);
+  const selectedDevice = farmDevices.find((device) => device.$id === selectedDeviceId);
   const selectedLatestTelemetry = selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined;
   const selectedGateway = selectedLatestTelemetry?.gatewayDeviceId
     ? devices.find((device) => device.$id === selectedLatestTelemetry.gatewayDeviceId) : undefined;
@@ -541,7 +563,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Live Stocking</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <FarmSelector farms={farms} value={currentFarmId} onChange={setCurrentFarmId} />}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read the latest device state from TablesDB and permitted history from Time Series.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void authenticate(false); }}>
@@ -551,12 +573,12 @@ export default function Home() {
         <div className="actions"><button disabled={busy}>Sign in</button><button className="secondary" type="button" disabled={busy} onClick={() => authenticate(true)}>Create account</button></div>
       </form>
     </section> : <section className="dashboard">
-      <div className="heading-row"><div><p className="eyebrow">SIGNED IN AS {user.email}</p><h1>Device telemetry</h1></div><span className="count">{devices.length} DEVICES · TABLESDB LATEST · INFLUXDB HISTORY</span></div>
+      <div className="heading-row"><div><p className="eyebrow">{currentFarm ? currentFarm.name : "SELECT A FARM"} · SIGNED IN AS {user.email}</p><h1>Device telemetry</h1></div><span className="count">{farmDevices.length} DEVICES · TABLESDB LATEST · INFLUXDB HISTORY</span></div>
       <div className={`master-detail ${mobileDetailOpen ? "mobile-detail-open" : ""}`}>
         <aside className="device-master">
-          <div className="master-heading"><div><p className="eyebrow">DEVICES</p><h2>Provisioned devices</h2></div><span>{devices.length}</span></div>
+          <div className="master-heading"><div><p className="eyebrow">{currentFarm?.name || "FARM"}</p><h2>Provisioned devices</h2></div><span>{farmDevices.length}</span></div>
           <p className="master-help">Onboard new devices from the mobile app over BLE.</p>
-          <div className="device-list">{devices.map((device) => {
+          <div className="device-list">{farmDevices.map((device) => {
             const latest = latestVoltageByDevice.get(device.$id);
             const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
             return <button key={device.$id} className={`device-card ${selectedDeviceId === device.$id ? "selected" : ""}`} onClick={() => selectDevice(device)}>
@@ -565,7 +587,7 @@ export default function Home() {
               <span className="device-seen">{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for telemetry"}<i>›</i></span>
             </button>;
           })}</div>
-          {!devices.length && <p className="empty">No devices provisioned yet.</p>}
+          {!farmDevices.length && <p className="empty">No devices provisioned for {currentFarm?.name || "this farm"}.</p>}
         </aside>
         <section className="device-detail">
           {selectedDevice ? <>

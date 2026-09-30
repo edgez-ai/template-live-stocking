@@ -4,7 +4,7 @@ import {
   mdiAccount, mdiBattery, mdiBellAlert, mdiBroadcast, mdiCamera, mdiCar, mdiCow,
   mdiCrosshairsGps, mdiDog, mdiDrone, mdiElectricSwitch, mdiHorse, mdiLanConnect,
   mdiMotionSensor, mdiPipeValve, mdiRouterWireless, mdiSheep, mdiSpeedometer,
-  mdiTractor, mdiTruck, mdiWaterPump,
+  mdiTractor, mdiTruck, mdiWaterPump, mdiWeb, mdiWifi,
 } from "@mdi/js";
 import ForceGraph2D, { ForceGraphMethods, GraphData, LinkObject, NodeObject } from "react-force-graph-2d";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +16,9 @@ export type CanvasNode = {
   online: boolean;
   icon: string;
   color: string;
+  wifiOnline: boolean;
+  internetOnline: boolean;
+  mqttDirect: boolean;
 };
 
 export type CanvasLink = {
@@ -44,6 +47,7 @@ const iconPaths: Record<string, string> = {
   gateway: mdiLanConnect, beacon: mdiBroadcast, tracker: mdiCrosshairsGps, sensor: mdiMotionSensor,
   camera: mdiCamera, gps: mdiCrosshairsGps, meter: mdiSpeedometer, pump: mdiWaterPump,
   valve: mdiPipeValve, switch: mdiElectricSwitch, battery: mdiBattery, alarm: mdiBellAlert,
+  __internet: mdiWeb, __wifi: mdiWifi,
 };
 const canvasPaths = new Map<string, Path2D>();
 
@@ -114,6 +118,30 @@ export default function TopologyCanvas({
     context.strokeStyle = "#ffffff";
     context.stroke();
 
+    const annotationRadius = Math.max(1.7, radius * .29);
+    const annotations = [
+      { x: x - radius * .8, path: mdiWeb, active: node.internetOnline, color: "#087f73" },
+      { x, path: mdiWifi, active: node.wifiOnline, color: "#247cbd" },
+      ...(node.mqttDirect ? [{ x: x + radius * .8, path: mdiLanConnect, active: true, color: "#7849a8" }] : []),
+    ];
+    for (const annotation of annotations) {
+      const annotationY = y + radius * .85;
+      context.beginPath();
+      context.arc(annotation.x, annotationY, annotationRadius, 0, Math.PI * 2);
+      context.fillStyle = annotation.active ? annotation.color : "#8b9f9c";
+      context.fill();
+      context.lineWidth = .7 / scale;
+      context.strokeStyle = "#ffffff";
+      context.stroke();
+      const badgeIconSize = annotationRadius * 1.35;
+      context.save();
+      context.translate(annotation.x - badgeIconSize / 2, annotationY - badgeIconSize / 2);
+      context.scale(badgeIconSize / 24, badgeIconSize / 24);
+      context.fillStyle = "#ffffff";
+      context.fill(pathForIcon(annotation.path === mdiWeb ? "__internet" : annotation.path === mdiWifi ? "__wifi" : "gateway"));
+      context.restore();
+    }
+
     const iconSize = radius * 1.25;
     context.save();
     context.translate(x - iconSize / 2, y - iconSize / 2);
@@ -134,7 +162,7 @@ export default function TopologyCanvas({
     context.font = `800 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
     context.textAlign = "center";
     context.textBaseline = "middle";
-    const labelY = y + radius + 7 / scale;
+    const labelY = y + radius + 9 / scale;
     const textWidth = context.measureText(node.label).width;
     context.fillStyle = "rgba(255, 255, 255, .9)";
     context.fillRect(x - textWidth / 2 - 3 / scale, labelY - fontSize / 2 - 2 / scale, textWidth + 6 / scale, fontSize + 4 / scale);
@@ -169,7 +197,7 @@ export default function TopologyCanvas({
       backgroundColor="rgba(0,0,0,0)"
       nodeCanvasObject={paintNode}
       nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 9 : 7, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
-      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"}`}
+      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"} · Internet ${node.internetOnline ? "reachable" : "unavailable"} · Wi-Fi ${node.wifiOnline ? "connected" : "no active link"}${node.mqttDirect ? " · MQTT direct" : ""}`}
       linkColor={(link) => signalColor(link.rssi)}
       linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
       linkDirectionalArrowLength={4}

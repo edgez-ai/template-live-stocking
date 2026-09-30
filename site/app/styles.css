@@ -11,6 +11,9 @@ button { cursor: pointer; }
 .topnav { display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 12px; background: #dfeae8; }
 .topnav a { padding: 8px 12px; border-radius: 9px; color: #59716f; font-size: 11px; font-weight: 900; text-decoration: none; }
 .topnav a.active { color: white; background: #0a7c78; box-shadow: 0 4px 12px rgb(10 124 120 / 18%); }
+.farm-selector { display: flex; align-items: center; gap: 7px; margin: 0 2px 0 8px; }
+.farm-selector span { color: #718783; font-size: 8px; font-weight: 900; letter-spacing: .7px; text-transform: uppercase; }
+.farm-selector select { max-width: 190px; min-height: 38px; padding: 0 30px 0 10px; border: 1px solid #c6d6d3; border-radius: 10px; color: #173f42; background: white; font-size: 11px; font-weight: 800; }
 .auth-grid { min-height: calc(100vh - 72px); display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 70px; }
 .eyebrow { margin: 0 0 10px; color: #0a8c87; font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase; }
 h1 { margin: 0; font-size: clamp(44px, 6vw, 72px); line-height: 1; letter-spacing: -3px; }
@@ -163,11 +166,9 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-page-heading { display: flex; align-items: end; justify-content: space-between; gap: 32px; margin-bottom: 24px; }
 .topology-page-heading h1 { font-size: clamp(38px, 5vw, 62px); }
 .topology-page-heading > div:first-child > p:last-child { max-width: 720px; margin: 12px 0 0; color: #5d7180; font-size: 13px; line-height: 1.6; }
-.topology-controls { display: grid; grid-template-columns: minmax(180px, 1fr) auto; align-items: end; gap: 8px; min-width: 380px; }
-.topology-controls label { margin: 0; }
-.topology-controls select { min-height: 40px; padding: 0 34px 0 12px; border: 1px solid #c6d6d3; border-radius: 10px; color: #173f42; background: white; }
+.topology-controls { display: grid; justify-items: end; gap: 8px; min-width: 150px; }
 .topology-controls button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 10px; color: white; background: #0a7c78; font-size: 10px; font-weight: 900; }
-.topology-controls small { grid-column: 1 / -1; color: #718783; font-size: 9px; text-align: right; }
+.topology-controls small { color: #718783; font-size: 9px; text-align: right; }
 .topology-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .topology-stats article { display: grid; gap: 5px; padding: 16px 18px; border: 1px solid #d6e2df; border-radius: 15px; background: white; }
 .topology-stats span { color: #718783; font-size: 8px; font-weight: 900; letter-spacing: .8px; }
@@ -182,6 +183,9 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-legend i.gateway { border: 3px double #173f42; background: white; box-shadow: none; }
 .topology-legend i.online { border-color: white; background: #16a085; }
 .topology-legend i.offline { border-color: white; background: #8b9f9c; }
+.topology-legend i.internet { background: #087f73; box-shadow: inset 0 0 0 2px #bce7df; }
+.topology-legend i.wifi { background: #247cbd; box-shadow: inset 0 0 0 2px #c8e4f5; }
+.topology-legend i.mqtt { background: #7849a8; box-shadow: inset 0 0 0 2px #e1d0f2; }
 .topology-legend b.signal { width: 18px; height: 3px; border-radius: 3px; }
 .topology-legend b.excellent { background: #0a9b7d; }
 .topology-legend b.good { background: #d68a24; }
@@ -230,6 +234,9 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
   .topbar > strong { display: none; }
   .topnav { margin-left: auto; }
   .topnav a { padding: 7px 9px; font-size: 9px; }
+  .farm-selector { order: 5; margin-left: 48px; }
+  .farm-selector span { display: none; }
+  .farm-selector select { max-width: 120px; min-height: 34px; font-size: 9px; }
   .auth-grid { min-height: calc(100vh - 64px); grid-template-columns: 1fr; padding: 38px 0; gap: 28px; }
   h1 { letter-spacing: -2px; }
   .dashboard { padding: 26px 0; }
