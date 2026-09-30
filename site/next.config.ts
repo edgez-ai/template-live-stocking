@@ -7,12 +7,10 @@ function localResourceIds() {
   if (!existsSync(configPath)) return {};
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   const telemetryTable = config.tables?.find((table: { $id?: string }) => table.$id === "telemetry");
-  const farmTable = config.tables?.find((table: { $id?: string }) => table.$id === "farms");
   const topologyTable = config.tables?.find((table: { $id?: string }) => table.$id === "topology-links");
   const otaUpdateTable = config.tables?.find((table: { $id?: string }) => table.$id === "ota-updates");
   return {
     databaseId: telemetryTable?.databaseId as string | undefined,
-    farmTableId: farmTable?.$id as string | undefined,
     telemetryTableId: telemetryTable?.$id as string | undefined,
     topologyTableId: topologyTable?.$id as string | undefined,
     otaUpdateTableId: otaUpdateTable?.$id as string | undefined,
@@ -39,8 +37,6 @@ const required = {
     process.env.APPWRITE_SITE_PROJECT_ID,
   NEXT_PUBLIC_DATABASE_ID:
     process.env.LIVE_STOCKING_DATABASE_ID || localResources.databaseId,
-  NEXT_PUBLIC_FARM_TABLE_ID:
-    process.env.LIVE_STOCKING_FARM_TABLE_ID || localResources.farmTableId,
   NEXT_PUBLIC_TELEMETRY_TABLE_ID:
     process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || localResources.telemetryTableId,
   NEXT_PUBLIC_TOPOLOGY_TABLE_ID:
