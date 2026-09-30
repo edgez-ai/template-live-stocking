@@ -16,6 +16,7 @@ export function installSite() {
     ["LIVE_STOCKING_ENDPOINT", config.publicEndpoint],
     ["LIVE_STOCKING_PROJECT_ID", config.projectId],
     ["LIVE_STOCKING_DATABASE_ID", config.databaseId],
+    ["LIVE_STOCKING_FARM_TABLE_ID", config.farmTableId],
     ["LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId],
     ["LIVE_STOCKING_TOPOLOGY_TABLE_ID", config.topologyTableId],
   ];

@@ -274,6 +274,7 @@
       "vars": [
         { "key": "LIVE_STOCKING_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
+        { "key": "LIVE_STOCKING_FARM_TABLE_ID", "value": "farms" },
         { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
         { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" },
         { "key": "LIVE_STOCKING_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
