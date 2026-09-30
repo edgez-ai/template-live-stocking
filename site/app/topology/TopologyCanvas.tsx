@@ -4,7 +4,7 @@ import {
   mdiAccount, mdiBattery, mdiBellAlert, mdiBroadcast, mdiCamera, mdiCar, mdiCow,
   mdiCrosshairsGps, mdiDog, mdiDrone, mdiElectricSwitch, mdiHorse, mdiLanConnect,
   mdiMotionSensor, mdiPipeValve, mdiRouterWireless, mdiSheep, mdiSpeedometer,
-  mdiTractor, mdiTruck, mdiWaterPump, mdiWeb, mdiWifi,
+  mdiTractor, mdiTruck, mdiWaterPump, mdiWifi,
 } from "@mdi/js";
 import ForceGraph2D, { ForceGraphMethods, GraphData, LinkObject, NodeObject } from "react-force-graph-2d";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -47,7 +47,7 @@ const iconPaths: Record<string, string> = {
   gateway: mdiLanConnect, beacon: mdiBroadcast, tracker: mdiCrosshairsGps, sensor: mdiMotionSensor,
   camera: mdiCamera, gps: mdiCrosshairsGps, meter: mdiSpeedometer, pump: mdiWaterPump,
   valve: mdiPipeValve, switch: mdiElectricSwitch, battery: mdiBattery, alarm: mdiBellAlert,
-  __internet: mdiWeb, __wifi: mdiWifi,
+  __wifi: mdiWifi,
 };
 const canvasPaths = new Map<string, Path2D>();
 
@@ -120,9 +120,8 @@ export default function TopologyCanvas({
 
     const annotationRadius = Math.max(1.7, radius * .29);
     const annotations = [
-      { x: x - radius * .8, path: mdiWeb, active: node.internetOnline, color: "#087f73" },
-      { x, path: mdiWifi, active: node.wifiOnline, color: "#247cbd" },
-      ...(node.mqttDirect ? [{ x: x + radius * .8, path: mdiLanConnect, active: true, color: "#7849a8" }] : []),
+      { x: node.mqttDirect ? x - radius * .45 : x, icon: "__wifi", active: node.wifiOnline, color: "#247cbd" },
+      ...(node.mqttDirect ? [{ x: x + radius * .45, icon: "gateway", active: true, color: "#7849a8" }] : []),
     ];
     for (const annotation of annotations) {
       const annotationY = y + radius * .85;
@@ -138,7 +137,7 @@ export default function TopologyCanvas({
       context.translate(annotation.x - badgeIconSize / 2, annotationY - badgeIconSize / 2);
       context.scale(badgeIconSize / 24, badgeIconSize / 24);
       context.fillStyle = "#ffffff";
-      context.fill(pathForIcon(annotation.path === mdiWeb ? "__internet" : annotation.path === mdiWifi ? "__wifi" : "gateway"));
+      context.fill(pathForIcon(annotation.icon));
       context.restore();
     }
 
