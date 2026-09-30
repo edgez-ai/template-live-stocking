@@ -22,6 +22,7 @@ const devices = new Map([
 ]);
 const originalFetch = globalThis.fetch;
 const originalCreateRow = TablesDB.prototype.createRow;
+const originalDeleteRow = TablesDB.prototype.deleteRow;
 const originalListRows = TablesDB.prototype.listRows;
 const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
@@ -54,6 +55,10 @@ beforeEach(() => {
       return { ok: true, status: 201 };
     }
     const device = devices.get(decodeURIComponent(href.split("/").pop()));
+    if (device && options.method === "PATCH") {
+      device.metadata = JSON.parse(options.body).metadata;
+      return { ok: true, status: 200, json: async () => device };
+    }
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
   TablesDB.prototype.createRow = async (args) => {
@@ -88,6 +93,12 @@ beforeEach(() => {
         ? otaRows
         : args.tableId === "downlink-a" ? downlinkRows : [] };
   };
+  TablesDB.prototype.deleteRow = async (args) => {
+    const index = rows.findIndex((candidate) => candidate.$id === args.rowId);
+    if (index < 0) throw Object.assign(new Error("not found"), { code: 404 });
+    rows.splice(index, 1);
+    return {};
+  };
   TablesDB.prototype.updateRow = async (args) => {
     if (args.tableId === "telemetry-a") {
       const telemetry = rows.find((candidate) => candidate.$id === args.rowId);
@@ -109,6 +120,7 @@ beforeEach(() => {
 after(() => {
   globalThis.fetch = originalFetch;
   TablesDB.prototype.createRow = originalCreateRow;
+  TablesDB.prototype.deleteRow = originalDeleteRow;
   TablesDB.prototype.listRows = originalListRows;
   TablesDB.prototype.updateRow = originalUpdateRow;
 });
@@ -296,6 +308,9 @@ test("MQTT report writes HaLow MAC to latest telemetry and resolves topology", a
   ]);
   assert.equal(result.status, 201);
   assert.equal(rows.find((row) => row.data.deviceId === remoteId).data.halowMac, "02:11:22:33:44:55");
+  assert.equal(devices.get(gatewayId).metadata.halowMac, "0C:BF:74:1A:AE:36");
+  assert.equal(devices.get(remoteId).metadata.halowMac, "02:11:22:33:44:55");
+  assert.equal(devices.get(gatewayId).metadata.icon, "gateway");
   assert.equal(topologyRows.length, 1);
   assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
   assert.equal(topologyRows[0].peerDeviceId, gatewayId);
@@ -350,13 +365,25 @@ test("telemetry without a HaLow MAC is stored without blocking the report", asyn
   assert.equal(rows[0].data.halowMac, undefined);
 });
 
-test("latest telemetry rejects a HaLow MAC already owned by another device", async () => {
+test("a conflicting HaLow MAC does not block otherwise valid telemetry", async () => {
   rows.push({ $id: remoteId, data: {
     deviceId: remoteId, farmId: "farm-a", serial: "112233445566", halowMac: "0C:BF:74:1A:AE:36",
   } });
   const result = await publish({ clientId: gatewayId, topology: { links: [] } });
-  assert.equal(result.status, 409);
-  assert.match(result.body.error, /belongs to another latest telemetry row/);
+  assert.equal(result.status, 201);
+  const current = rows.find((row) => row.data.deviceId === gatewayId);
+  assert.equal(current.data.halowMac, undefined);
+});
+
+test("a re-registered device migrates stale same-serial HaLow MAC ownership", async () => {
+  const staleId = "33333333-3333-4333-8333-333333333333";
+  rows.push({ $id: staleId, data: {
+    deviceId: staleId, farmId: "farm-a", serial: "AABBCCDDEEFF", halowMac: "0C:BF:74:1A:AE:36",
+  } });
+  const result = await publish({ clientId: gatewayId, topology: { links: [] } });
+  assert.equal(result.status, 201);
+  assert.equal(rows.some((row) => row.$id === staleId), false);
+  assert.equal(rows.find((row) => row.$id === gatewayId).data.halowMac, "0C:BF:74:1A:AE:36");
 });
 
 test("gateway downlink status is stored against the remote nRF device", async () => {
