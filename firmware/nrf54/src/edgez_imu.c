@@ -1,11 +1,9 @@
 #include "edgez_imu.h"
 
 #include <errno.h>
-#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -17,8 +15,6 @@ LOG_MODULE_REGISTER(edgez_imu, LOG_LEVEL_INF);
 #define EDGEZ_IMU_SAMPLE_RATE_HZ 12
 #define EDGEZ_IMU_SETTLE_MS 100
 #define EDGEZ_IMU_SAMPLE_PERIOD_MS (1000 / EDGEZ_IMU_SAMPLE_RATE_HZ)
-#define EDGEZ_IMU_STRONG_MOTION_DELTA_M_S2 2.5f
-#define EDGEZ_IMU_MOTION_HOLD_MS 15000U
 #define EDGEZ_IMU_REINIT_TIMEOUT_SECONDS 60U
 #define EDGEZ_IMU_REINIT_FAILURE_LIMIT \
 	(EDGEZ_IMU_SAMPLE_RATE_HZ * EDGEZ_IMU_REINIT_TIMEOUT_SECONDS)
@@ -29,24 +25,15 @@ LOG_MODULE_REGISTER(edgez_imu, LOG_LEVEL_INF);
 #define EDGEZ_IMU_CTRL2_G_REG 0x11U
 #define EDGEZ_IMU_CTRL3_C_REG 0x12U
 #define EDGEZ_IMU_CTRL6_C_REG 0x15U
-#define EDGEZ_IMU_WAKE_UP_SRC_REG 0x1BU
-#define EDGEZ_IMU_OUTX_L_A_REG 0x28U
-#define EDGEZ_IMU_TAP_CFG_REG 0x58U
-#define EDGEZ_IMU_WAKE_UP_THS_REG 0x5BU
-#define EDGEZ_IMU_WAKE_UP_DUR_REG 0x5CU
-#define EDGEZ_IMU_MD1_CFG_REG 0x5EU
+#define EDGEZ_IMU_CTRL7_G_REG 0x16U
+#define EDGEZ_IMU_OUTX_L_G_REG 0x22U
 #define EDGEZ_IMU_CTRL3_SW_RESET BIT(0)
 #define EDGEZ_IMU_CTRL3_IF_INC BIT(2)
 #define EDGEZ_IMU_CTRL3_BDU BIT(6)
 #define EDGEZ_IMU_ODR_12_5_HZ BIT(4)
-#define EDGEZ_IMU_INTERRUPTS_ENABLE BIT(7)
-#define EDGEZ_IMU_LATCH_INTERRUPTS BIT(0)
-#define EDGEZ_IMU_INT1_WAKE_UP BIT(5)
-/* At the +/-2 g scale one threshold LSB is 2 g / 64 = 31.25 mg. Eight
- * counts is approximately 2.45 m/s2, matching the software fallback. */
-#define EDGEZ_IMU_WAKE_THRESHOLD 8U
-#define EDGEZ_IMU_WAKE_DURATION BIT(5)
+#define EDGEZ_IMU_GYRO_FS_125_DPS BIT(1)
 #define EDGEZ_IMU_ACCEL_M_S2_PER_LSB 0.00059820565f
+#define EDGEZ_IMU_GYRO_RAD_S_PER_LSB 0.00007635815f
 #define EDGEZ_IMU_RESET_TIMEOUT_MS 50U
 #define EDGEZ_IMU_BUS_RECOVERY_SETTLE_MS 10U
 
@@ -54,54 +41,18 @@ K_MUTEX_DEFINE(imu_lock);
 
 #if DT_HAS_ALIAS(imu0) && DT_NODE_HAS_STATUS(DT_ALIAS(imu0), okay)
 static const struct i2c_dt_spec imu_i2c = I2C_DT_SPEC_GET(DT_ALIAS(imu0));
-#if DT_NODE_HAS_PROP(DT_ALIAS(imu0), irq_gpios)
-static const struct gpio_dt_spec imu_irq =
-	GPIO_DT_SPEC_GET(DT_ALIAS(imu0), irq_gpios);
-#define EDGEZ_IMU_HAS_IRQ 1
-#else
-static const struct gpio_dt_spec imu_irq = {0};
-#define EDGEZ_IMU_HAS_IRQ 0
-#endif
 #else
 static const struct i2c_dt_spec imu_i2c;
-static const struct gpio_dt_spec imu_irq = {0};
-#define EDGEZ_IMU_HAS_IRQ 0
 #endif
 
 static bool imu_ready;
 static bool imu_sample_valid;
 static uint32_t imu_sample_failure_count;
 static atomic_t halow_last_tx_ms;
-static atomic_t last_strong_motion_ms;
 static struct edgez_imu_sample latest_sample;
-static float previous_accel_m_s2[3];
-static bool previous_accel_valid;
-static bool imu_irq_ready;
-static struct gpio_callback imu_irq_callback;
 
 static void imu_sample_work_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(imu_sample_work, imu_sample_work_handler);
-
-static void note_strong_motion(void)
-{
-	uint32_t now_ms = k_uptime_get_32();
-
-	atomic_set(&last_strong_motion_ms,
-		   (atomic_val_t)(now_ms == 0U ? 1U : now_ms));
-}
-
-static void imu_irq_handler(const struct device *port, struct gpio_callback *cb,
-			    uint32_t pins)
-{
-	ARG_UNUSED(port);
-	ARG_UNUSED(cb);
-	ARG_UNUSED(pins);
-
-	/* GPIO callbacks run in interrupt context: latch the event and defer the
-	 * EasyDMA I2C transfer and WAKE_UP_SRC acknowledgement to system work. */
-	note_strong_motion();
-	(void)k_work_reschedule(&imu_sample_work, K_NO_WAIT);
-}
 
 static uint32_t halow_tx_quiet_remaining_ms(void)
 {
@@ -129,15 +80,16 @@ bool edgez_imu_halow_tx_quiet(void)
 static int set_sampling_rate(int hz)
 {
 	uint8_t accel_ctrl = hz > 0 ? EDGEZ_IMU_ODR_12_5_HZ : 0U;
+	uint8_t gyro_ctrl = hz > 0 ?
+		EDGEZ_IMU_ODR_12_5_HZ | EDGEZ_IMU_GYRO_FS_125_DPS : 0U;
 	int rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL1_XL_REG,
 				       accel_ctrl);
 
 	if (rc < 0) {
 		return rc;
 	}
-	/* Motion detection only needs acceleration. Leaving CTRL2_G at zero keeps
-	 * the substantially more expensive gyroscope powered down. */
-	return i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL2_G_REG, 0U);
+	return i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL2_G_REG,
+				      gyro_ctrl);
 }
 
 static int imu_configure(void)
@@ -209,55 +161,10 @@ static int imu_configure(void)
 		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL6_C_REG, BIT(4));
 	}
 	if (rc == 0) {
-		rc = set_sampling_rate(EDGEZ_IMU_SAMPLE_RATE_HZ);
+		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL7_G_REG, BIT(7));
 	}
-	if (rc == 0 && EDGEZ_IMU_HAS_IRQ && gpio_is_ready_dt(&imu_irq)) {
-		uint8_t wake_source;
-		int irq_rc;
-
-		irq_rc = gpio_pin_configure_dt(&imu_irq, GPIO_INPUT);
-		if (irq_rc == 0) {
-			gpio_init_callback(&imu_irq_callback, imu_irq_handler,
-					   BIT(imu_irq.pin));
-			irq_rc = gpio_add_callback(imu_irq.port, &imu_irq_callback);
-		}
-		if (irq_rc == 0) {
-			irq_rc = gpio_pin_interrupt_configure_dt(&imu_irq,
-							     GPIO_INT_EDGE_TO_ACTIVE);
-		}
-		if (irq_rc == 0) {
-			irq_rc = i2c_reg_write_byte_dt(&imu_i2c,
-							   EDGEZ_IMU_WAKE_UP_THS_REG,
-							   EDGEZ_IMU_WAKE_THRESHOLD);
-		}
-		if (irq_rc == 0) {
-			irq_rc = i2c_reg_write_byte_dt(&imu_i2c,
-							   EDGEZ_IMU_WAKE_UP_DUR_REG,
-							   EDGEZ_IMU_WAKE_DURATION);
-		}
-		if (irq_rc == 0) {
-			irq_rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_TAP_CFG_REG,
-							   EDGEZ_IMU_INTERRUPTS_ENABLE |
-							   EDGEZ_IMU_LATCH_INTERRUPTS);
-		}
-		if (irq_rc == 0) {
-			irq_rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_MD1_CFG_REG,
-							   EDGEZ_IMU_INT1_WAKE_UP);
-		}
-		if (irq_rc == 0) {
-			/* Clear a wake condition that may have accumulated while the GPIO
-			 * callback was being installed. */
-			irq_rc = i2c_reg_read_byte_dt(&imu_i2c, EDGEZ_IMU_WAKE_UP_SRC_REG,
-							    &wake_source);
-		}
-		if (irq_rc == 0) {
-			imu_irq_ready = true;
-		} else {
-			(void)gpio_pin_interrupt_configure_dt(&imu_irq, GPIO_INT_DISABLE);
-			(void)gpio_remove_callback(imu_irq.port, &imu_irq_callback);
-			LOG_WRN("IMU wake interrupt unavailable rc=%d; using 12.5 Hz polling fallback",
-				irq_rc);
-		}
+	if (rc == 0) {
+		rc = set_sampling_rate(EDGEZ_IMU_SAMPLE_RATE_HZ);
 	}
 	return rc;
 }
@@ -265,7 +172,7 @@ static int imu_configure(void)
 static void imu_sample_work_handler(struct k_work *work)
 {
 	struct edgez_imu_sample next_sample;
-	uint8_t raw[6];
+	uint8_t raw[12];
 	uint32_t quiet_remaining_ms;
 	int rc;
 
@@ -281,39 +188,18 @@ static void imu_sample_work_handler(struct k_work *work)
 		return;
 	}
 
-	/* The nRF TWIM driver moves this burst through EasyDMA. Reading only the
-	 * accelerometer halves the transfer and lets the gyroscope remain off. */
-	if (imu_irq_ready) {
-		uint8_t wake_source;
-
-		/* Reading WAKE_UP_SRC acknowledges the latched INT1 signal. */
-		(void)i2c_reg_read_byte_dt(&imu_i2c, EDGEZ_IMU_WAKE_UP_SRC_REG,
-					    &wake_source);
-	}
-	rc = i2c_burst_read_dt(&imu_i2c, EDGEZ_IMU_OUTX_L_A_REG,
+	rc = i2c_burst_read_dt(&imu_i2c, EDGEZ_IMU_OUTX_L_G_REG,
 			    raw, sizeof(raw));
 	if (rc == 0) {
-		float motion_delta_sq = 0.0f;
-
-		memset(&next_sample, 0, sizeof(next_sample));
 		for (size_t i = 0; i < 3; i++) {
-			int16_t accel_raw = (int16_t)sys_get_le16(&raw[i * 2U]);
+			int16_t gyro_raw = (int16_t)sys_get_le16(&raw[i * 2U]);
+			int16_t accel_raw = (int16_t)sys_get_le16(&raw[6U + i * 2U]);
 
 			next_sample.accel_m_s2[i] =
 				(float)accel_raw * EDGEZ_IMU_ACCEL_M_S2_PER_LSB;
-			if (previous_accel_valid) {
-				float delta = next_sample.accel_m_s2[i] - previous_accel_m_s2[i];
-
-				motion_delta_sq += delta * delta;
-			}
-			previous_accel_m_s2[i] = next_sample.accel_m_s2[i];
+			next_sample.gyro_rad_s[i] =
+				(float)gyro_raw * EDGEZ_IMU_GYRO_RAD_S_PER_LSB;
 		}
-		if (previous_accel_valid &&
-		    motion_delta_sq >= EDGEZ_IMU_STRONG_MOTION_DELTA_M_S2 *
-					       EDGEZ_IMU_STRONG_MOTION_DELTA_M_S2) {
-			note_strong_motion();
-		}
-		previous_accel_valid = true;
 		k_mutex_lock(&imu_lock, K_FOREVER);
 		latest_sample = next_sample;
 		imu_sample_valid = true;
@@ -338,12 +224,7 @@ static void imu_sample_work_handler(struct k_work *work)
 		}
 	}
 
-	/* With INT1 available, the sensor's wake engine is the sampler clock and
-	 * the CPU can stay asleep. Boards without that wire retain polling. */
-	if (!imu_irq_ready) {
-		(void)k_work_schedule(&imu_sample_work,
-				      K_MSEC(EDGEZ_IMU_SAMPLE_PERIOD_MS));
-	}
+	(void)k_work_schedule(&imu_sample_work, K_MSEC(EDGEZ_IMU_SAMPLE_PERIOD_MS));
 }
 
 int edgez_imu_init(void)
@@ -370,21 +251,11 @@ int edgez_imu_init(void)
 	}
 	imu_ready = true;
 	imu_sample_failure_count = 0;
-	previous_accel_valid = false;
 	init_failure_count = 0;
 	(void)k_work_schedule(&imu_sample_work, K_MSEC(EDGEZ_IMU_SETTLE_MS));
-	LOG_INF("Low-power accelerometer ready bus=%s addr=0x%02x rate=%d Hz wake_irq=%u",
-		imu_i2c.bus->name, imu_i2c.addr, EDGEZ_IMU_SAMPLE_RATE_HZ,
-		imu_irq_ready);
+	LOG_INF("6-axis IMU ready bus=%s addr=0x%02x async_sample_rate=%d Hz",
+		imu_i2c.bus->name, imu_i2c.addr, EDGEZ_IMU_SAMPLE_RATE_HZ);
 	return 0;
-}
-
-bool edgez_imu_motion_active(void)
-{
-	uint32_t last_motion_ms = (uint32_t)atomic_get(&last_strong_motion_ms);
-
-	return last_motion_ms != 0U &&
-		(k_uptime_get_32() - last_motion_ms) < EDGEZ_IMU_MOTION_HOLD_MS;
 }
 
 bool edgez_imu_is_ready(void)
@@ -409,11 +280,4 @@ int edgez_imu_read(struct edgez_imu_sample *sample)
 	*sample = latest_sample;
 	k_mutex_unlock(&imu_lock);
 	return 0;
-}
-
-void edgez_imu_request_sample(void)
-{
-	if (imu_ready) {
-		(void)k_work_reschedule(&imu_sample_work, K_NO_WAIT);
-	}
 }

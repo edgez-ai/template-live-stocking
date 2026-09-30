@@ -49,8 +49,6 @@ LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 #define HALOW_MANUAL_BOOT_THREAD_STACK_SIZE 6144
 #define HALOW_MANUAL_BOOT_THREAD_PRIORITY 7
 #define HALOW_START_DELAY_MS 3000
-#define HALOW_IDLE_BEACON_PERIOD_MS 60000U
-#define HALOW_MOTION_BEACON_PERIOD_SECONDS 5U
 #define HALOW_BEACON_TX_FAILURE_REBOOT_LIMIT 20
 #define HALOW_BEACON_REBOOT_DELAY_MS 250
 #define REBOOT_BLE_RECHECK_MS 500
@@ -58,7 +56,6 @@ LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 #define BUTTON_LONG_PRESS_MS 5000
 
 static atomic_t halow_beacon_tx_failure_count;
-static atomic_t halow_beacon_tx_success_count;
 static atomic_t pending_reboot_reasons;
 static atomic_t reboot_waiting_for_ble;
 
@@ -104,7 +101,6 @@ void mmwlan_mesh_beacon_tx_status(bool success)
 {
 	if (success) {
 		atomic_set(&halow_beacon_tx_failure_count, 0);
-		atomic_inc(&halow_beacon_tx_success_count);
 		return;
 	}
 
@@ -245,7 +241,6 @@ static bool wifi_connect_warned;
 static struct net_mgmt_event_callback wifi_cb;
 static struct net_mgmt_event_callback ipv4_cb;
 static struct net_if *wifi_iface;
-static bool wifi_callbacks_registered;
 static struct k_thread wifi_connect_thread_data;
 K_THREAD_STACK_DEFINE(wifi_connect_stack, WIFI_CONNECT_THREAD_STACK_SIZE);
 #endif
@@ -255,12 +250,6 @@ static uint32_t edgez_applied_generation;
 static bool edgez_restart_pending;
 static atomic_t edgez_start_pending;
 static int64_t edgez_next_start_attempt_ms;
-static bool halow_duty_cycle_enabled;
-static bool halow_radio_requested = true;
-static bool halow_shutdown_pending;
-static bool halow_motion_was_active;
-static uint32_t halow_duty_tx_baseline;
-static int64_t halow_next_idle_wake_ms;
 static struct k_thread halow_manual_boot_thread_data;
 K_THREAD_STACK_DEFINE(halow_manual_boot_stack, HALOW_MANUAL_BOOT_THREAD_STACK_SIZE);
 #endif
@@ -1327,16 +1316,12 @@ static void start_halow_connect(void)
 	printk("[MM_MESH] app using Zephyr Wi-Fi iface=%p\n", wifi_iface);
 	LOG_INF("MM_MESH app using Zephyr Wi-Fi iface=%p", wifi_iface);
 
-	if (!wifi_callbacks_registered) {
-		net_mgmt_init_event_callback(&wifi_cb, wifi_mgmt_event,
-					     NET_EVENT_WIFI_CONNECT_RESULT |
-						     NET_EVENT_WIFI_DISCONNECT_RESULT);
-		net_mgmt_add_event_callback(&wifi_cb);
-		net_mgmt_init_event_callback(&ipv4_cb, ipv4_event_handler,
-					     NET_EVENT_IPV4_ADDR_ADD);
-		net_mgmt_add_event_callback(&ipv4_cb);
-		wifi_callbacks_registered = true;
-	}
+	net_mgmt_init_event_callback(&wifi_cb, wifi_mgmt_event,
+				     NET_EVENT_WIFI_CONNECT_RESULT |
+					     NET_EVENT_WIFI_DISCONNECT_RESULT);
+	net_mgmt_add_event_callback(&wifi_cb);
+	net_mgmt_init_event_callback(&ipv4_cb, ipv4_event_handler, NET_EVENT_IPV4_ADDR_ADD);
+	net_mgmt_add_event_callback(&ipv4_cb);
 
 	atomic_set(&edgez_start_pending, 1);
 	k_thread_create(&wifi_connect_thread_data, wifi_connect_stack,
@@ -1452,8 +1437,7 @@ static void configure_halow_power(void)
 	}
 
 	if (!HAS_HALOW_POWER_EN) {
-		/* Shields without a load switch still benefit from mmwlan_shutdown(). */
-		halow_power_ready = true;
+		LOG_WRN("HaLow power-enable GPIO is not configured");
 		return;
 	}
 
@@ -1473,108 +1457,6 @@ static void configure_halow_power(void)
 		halow_power_en.port->name, halow_power_en.pin);
 	k_msleep(500);
 }
-
-#if defined(CONFIG_WIFI_MORSE_SM)
-static bool halow_profile_uses_motion_duty_cycle(void)
-{
-	struct edgez_halow_profile profile = {0};
-
-	edgez_config_get_profile(&profile);
-	return profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
-	       profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
-}
-
-static bool power_down_halow(void)
-{
-	enum mmwlan_status status;
-
-	/* mmwlan_shutdown() already performs the clean station disconnect. Calling
-	 * mmwlan_sta_disable() first deadlocks the discovery-only mesh advertiser
-	 * while it waits for a VIF state transition that this mode never emits. */
-	LOG_INF("HaLow duty-cycle clean shutdown begin");
-	status = mmwlan_shutdown();
-	if (status != MMWLAN_SUCCESS && status != MMWLAN_NOT_RUNNING) {
-		LOG_WRN("HaLow duty-cycle shutdown deferred status=%d", status);
-		return false;
-	}
-	LOG_INF("HaLow duty-cycle clean shutdown complete status=%d", status);
-	if (HAS_HALOW_POWER_EN && halow_power_ready) {
-		int rc = gpio_pin_set_dt(&halow_power_en, 0);
-
-		if (rc < 0) {
-			LOG_WRN("Failed to remove HaLow power after shutdown: %d", rc);
-			return false;
-		}
-	}
-
-	halow_power_ready = false;
-	edgez_applied_generation = 0;
-	edgez_restart_pending = false;
-	edgez_next_start_attempt_ms = 0;
-	atomic_set(&edgez_start_pending, 0);
-	edgez_config_set_halow_ready(false);
-	atomic_set(&halow_state, HALOW_IDLE);
-	LOG_INF("HaLow transceiver shut down between beacon windows");
-	return true;
-}
-
-static void manage_halow_motion_duty_cycle(void)
-{
-	bool motion_active;
-	uint32_t tx_count;
-	int64_t now;
-
-	if (!halow_duty_cycle_enabled) {
-		return;
-	}
-
-	now = k_uptime_get();
-	motion_active = edgez_imu_motion_active();
-	if (motion_active != halow_motion_was_active) {
-		LOG_INF("Strong motion %s; HaLow beacon cadence=%u seconds",
-			motion_active ? "detected" : "ended",
-			motion_active ? (unsigned int)HALOW_MOTION_BEACON_PERIOD_SECONDS : 60U);
-		halow_motion_was_active = motion_active;
-	}
-
-	if (motion_active) {
-		halow_shutdown_pending = false;
-		if (!halow_radio_requested) {
-			halow_radio_requested = true;
-			edgez_imu_request_sample();
-			halow_duty_tx_baseline =
-				(uint32_t)atomic_get(&halow_beacon_tx_success_count);
-			edgez_next_start_attempt_ms = 0;
-			LOG_INF("Waking HaLow immediately for strong motion");
-		}
-		return;
-	}
-
-	if (!halow_radio_requested) {
-		if (now >= halow_next_idle_wake_ms) {
-			halow_radio_requested = true;
-			edgez_imu_request_sample();
-			halow_duty_tx_baseline =
-				(uint32_t)atomic_get(&halow_beacon_tx_success_count);
-			edgez_next_start_attempt_ms = 0;
-			LOG_INF("Waking HaLow for one-minute idle beacon");
-		}
-		return;
-	}
-
-	tx_count = (uint32_t)atomic_get(&halow_beacon_tx_success_count);
-	if (tx_count != halow_duty_tx_baseline) {
-		halow_duty_tx_baseline = tx_count;
-		halow_next_idle_wake_ms = now + HALOW_IDLE_BEACON_PERIOD_MS;
-		halow_shutdown_pending = true;
-	}
-
-	if (halow_shutdown_pending && power_down_halow()) {
-		halow_shutdown_pending = false;
-		halow_radio_requested = false;
-	}
-}
-#endif
 
 #if defined(CONFIG_WIFI_MORSE_SM)
 static int connect_morse_sdk_sta(void)
@@ -1632,7 +1514,7 @@ static int connect_morse_sdk_sta(void)
 		uint32_t beacon_interval_seconds =
 			(edgez_profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
 			 edgez_profile.device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR) ?
-			HALOW_MOTION_BEACON_PERIOD_SECONDS : profile.beacon_interval_seconds;
+			1U : profile.beacon_interval_seconds;
 		uint64_t beacon_interval_tus =
 			((uint64_t)beacon_interval_seconds * 1000000ULL + 512ULL) / 1024ULL;
 
@@ -1758,9 +1640,6 @@ static void maybe_refresh_edgez_halow_beacon(void)
 	int64_t now = k_uptime_get();
 
 	if (!edgez_config_is_complete()) {
-		return;
-	}
-	if (halow_duty_cycle_enabled && !halow_radio_requested) {
 		return;
 	}
 
@@ -1948,15 +1827,6 @@ int main(void)
 	livestock_config_init();
 	struct edgez_halow_profile provisioning_profile = {0};
 	edgez_config_get_profile(&provisioning_profile);
-#if defined(CONFIG_WIFI_MORSE_SM)
-	halow_duty_cycle_enabled = halow_profile_uses_motion_duty_cycle();
-	halow_duty_tx_baseline =
-		(uint32_t)atomic_get(&halow_beacon_tx_success_count);
-	LOG_INF("HaLow motion duty cycle %s idle_period=%us motion_period=%us",
-		halow_duty_cycle_enabled ? "enabled" : "disabled",
-		(unsigned int)(HALOW_IDLE_BEACON_PERIOD_MS / 1000U),
-		(unsigned int)HALOW_MOTION_BEACON_PERIOD_SECONDS);
-#endif
 	bool provisioning_complete = livestock_config_is_provisioned() &&
 		provisioning_profile.mesh_id[0] != '\0' &&
 		provisioning_profile.mesh_frequency_khz > 0 &&
@@ -2005,11 +1875,7 @@ int main(void)
 	publish_heartbeat();
 
 	while (1) {
-		uint32_t heartbeat_elapsed_ms = 0;
-
-		while (heartbeat_elapsed_ms < HEARTBEAT_PERIOD_SECONDS * 1000U) {
-			uint32_t loop_sleep_ms = 20U;
-
+		for (int i = 0; i < HEARTBEAT_PERIOD_SECONDS * 50; i++) {
 			poll_button();
 #if !defined(CONFIG_WIFI_MORSE_TEST)
 #if defined(CONFIG_WIFI)
@@ -2020,19 +1886,11 @@ int main(void)
 			maybe_init_gps_after_halow_start();
 			edgez_gps_poll();
 			maybe_refresh_edgez_sensor_beacon();
-			manage_halow_motion_duty_cycle();
-			if (halow_duty_cycle_enabled && !halow_radio_requested &&
-			    !edgez_ble_is_connected()) {
-				/* The IMU GPIO remains an immediate wake source. Slower button
-				 * polling lets the nRF spend longer stretches in CPU idle. */
-				loop_sleep_ms = 100U;
-			}
 #endif
 #endif
 #endif
 			update_status_leds();
-			k_msleep(loop_sleep_ms);
-			heartbeat_elapsed_ms += loop_sleep_ms;
+			k_msleep(20);
 		}
 
 		publish_heartbeat();
