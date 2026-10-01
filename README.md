@@ -52,6 +52,46 @@ with selectable history ranges.
   <img src="docs/screenshots/mobile-device-details.jpg" width="360" alt="Android device details showing telemetry route, map appearance, battery voltage, and history controls">
 </p>
 
+### Provision every supported platform through one flow
+
+The app presents one **Add device** experience for OpenWrt gateways such as the
+H7608, the ESP32 series, and nRF54L15 devices. The first step scans Bluetooth
+for ESP32 and nRF54 advertisements while also scanning nearby provisioning
+Wi-Fi for an unconfigured OpenWrt gateway.
+
+<table>
+  <tr>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-1-discovery.jpg" width="220" alt="Step 1 scans Bluetooth and provisioning Wi-Fi for ESP32, nRF54, and H7608 devices">
+      <br><strong>1. Discover</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-2-device-details.jpg" width="220" alt="Step 2 configures the device name, map icon, marker color, location, and proof of possession">
+      <br><strong>2. Describe</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-3-upstream.jpg" width="220" alt="Step 3 selects an upstream Wi-Fi network or a HaLow-only configuration">
+      <br><strong>3. Connect</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-4-confirm.jpg" width="220" alt="Step 4 confirms the farm, HaLow mesh, device location, and upstream network before provisioning">
+      <br><strong>4. Provision</strong>
+    </td>
+  </tr>
+</table>
+
+The shared details step assigns the device name, map icon, marker color, and
+optional location. An ESP32 can also request its proof of possession. The
+connection step then adapts to the detected platform: ESP32 supports upstream
+Wi-Fi or HaLow-only operation; an OpenWrt H7608 supports Wi-Fi, Ethernet, or no
+upstream connection; and an nRF54L15 uses the farm's HaLow profile and skips
+upstream selection.
+
+On confirmation, the app creates or reuses the Appwrite Device and sends its
+MQTT credential, farm country and channel, mesh credentials, and optional
+location through the platform's provisioning transport. The SDK handles the
+different BLE and provisioning Wi-Fi protocols behind the same operator flow.
+
 ### Manage farms and access
 
 Farm settings bring the operational boundary into one place. Owners can manage
@@ -73,6 +113,59 @@ phone carries the control and USB traffic.
 <p align="center">
   <img src="docs/screenshots/mobile-flash-hardware.jpg" width="360" alt="Android USB-C firmware workflow with supported hardware profiles and flash timeout settings">
 </p>
+
+## Hardware used in this example
+
+The example deployment combines a HaLow gateway with two supported tracker
+platforms. Select a product image or product name to open the manufacturer's
+official page.
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <a href="https://heltec.org/project/ht-h7608/">
+        <img src="docs/hardware/heltec-ht-h7608.png" width="240" alt="Heltec HT-H7608 Wi-Fi HaLow router and gateway">
+      </a>
+      <br>
+      <strong><a href="https://heltec.org/project/ht-h7608/">Heltec HT-H7608</a></strong>
+    </td>
+    <td width="33%" align="center">
+      <a href="https://heltec.org/project/ht-hc33/">
+        <img src="docs/hardware/heltec-ht-hc33.png" width="240" alt="Heltec HT-HC33 ESP32-S3 Wi-Fi HaLow development board">
+      </a>
+      <br>
+      <strong><a href="https://heltec.org/project/ht-hc33/">Heltec HT-HC33</a></strong>
+    </td>
+    <td width="34%" align="center">
+      <a href="https://www.seeedstudio.com/XIAO-nRF54L15-Sense-p-6494.html">
+        <img src="docs/hardware/seeed-xiao-nrf54l15-sense.jpg" width="150" alt="Seeed Studio XIAO nRF54L15 Sense development board">
+      </a>
+      <a href="https://www.seeedstudio.com/Wio-WM6180-Wi-Fi-HaLow-Module-for-XIAO-p-6395.html">
+        <img src="docs/hardware/seeed-wio-wm6180-halow.jpg" width="150" alt="Seeed Studio Wio-WM6180 Wi-Fi HaLow transceiver for XIAO">
+      </a>
+      <br>
+      <strong><a href="https://www.seeedstudio.com/XIAO-nRF54L15-Sense-p-6494.html">Seeed Studio XIAO nRF54L15 Sense</a> + <a href="https://www.seeedstudio.com/Wio-WM6180-Wi-Fi-HaLow-Module-for-XIAO-p-6395.html">Wi-Fi HaLow transceiver</a></strong>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      The farm gateway connects the HaLow network to Ethernet or 2.4 GHz Wi-Fi
+      and provides the upstream path used by MQTT telemetry.
+    </td>
+    <td valign="top">
+      This ESP32-S3 board integrates an HT-HC01/MM6108 HaLow radio. The example
+      firmware reads its battery ADC, publishes status telemetry, and can relay
+      traffic for HaLow-only leaf devices.
+    </td>
+    <td valign="top">
+      The nRF54L15 Sense provides the low-power MCU, Bluetooth provisioning,
+      microphone, and IMU. This example pairs it with Seeed's FGH100M-H-based
+      Wio-WM6180 transceiver for Wi-Fi HaLow connectivity.
+    </td>
+  </tr>
+</table>
+
+Product images are from the linked Heltec and Seeed Studio product pages.
 
 ## Repository layout
 
