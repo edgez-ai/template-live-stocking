@@ -16,7 +16,7 @@ export type CanvasNode = {
   online: boolean;
   icon: string;
   color: string;
-  gatewayOnline: boolean;
+  gatewayStatus: "online" | "offline" | null;
   mqttDirect: boolean;
 };
 
@@ -121,7 +121,7 @@ export default function TopologyCanvas({
 
     const annotationRadius = Math.max(1.7, radius * .29);
     const annotations = [
-      { x: node.mqttDirect ? x - radius * .45 : x, icon: "__gatewayStatus", active: node.gatewayOnline, color: "#247cbd" },
+      ...(node.gatewayStatus ? [{ x: node.mqttDirect ? x - radius * .45 : x, icon: "__gatewayStatus", active: node.gatewayStatus === "online", color: "#247cbd" }] : []),
       ...(node.mqttDirect ? [{ x: x + radius * .45, icon: "gateway", active: true, color: "#7849a8" }] : []),
     ];
     for (const annotation of annotations) {
@@ -189,7 +189,7 @@ export default function TopologyCanvas({
       backgroundColor="rgba(0,0,0,0)"
       nodeCanvasObject={paintNode}
       nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 9 : 7, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
-      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"} · Gateway ${node.gatewayOnline ? "online" : "offline"}${node.mqttDirect ? " · MQTT direct" : ""}`}
+      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"}${node.gatewayStatus ? ` · Gateway ${node.gatewayStatus}` : ""}${node.mqttDirect ? " · MQTT direct" : ""}`}
       linkColor={(link) => signalColor(link.rssi)}
       linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
       linkDirectionalArrowLength={4}

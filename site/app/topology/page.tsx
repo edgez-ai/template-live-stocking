@@ -51,7 +51,7 @@ type GraphEntity = {
   gatewayDeviceId: string;
   icon: string;
   color: string;
-  gatewayOnline: boolean;
+  gatewayStatus: "online" | "offline" | null;
   mqttDirect: boolean;
 };
 
@@ -91,12 +91,12 @@ function relativeTime(value: string) {
 }
 
 function payloadGatewayStatus(row?: Telemetry) {
-  if (!row) return "unknown";
+  if (!row) return null;
   try {
     const value = (JSON.parse(row.payload) as { gateway_status?: unknown }).gateway_status;
-    return typeof value === "string" ? value : "unknown";
+    return value === "online" || value === "offline" ? value : null;
   } catch {
-    return "unknown";
+    return null;
   }
 }
 
@@ -223,7 +223,7 @@ export default function TopologyPage() {
         gatewayDeviceId: linkedGatewayId,
         icon: device.metadata?.icon || latest?.icon || "tracker",
         color: deviceColor(device, latest),
-        gatewayOnline: gatewayStatus === "online",
+        gatewayStatus,
         mqttDirect,
       });
     }
@@ -232,13 +232,13 @@ export default function TopologyPage() {
         id: link.gatewayDeviceId, name: link.gatewaySerial, serial: link.gatewaySerial, farmId: link.farmId,
         halowMac: "", kind: "gateway", online: true, lastSeenAt: link.reportedAt, gatewayDeviceId: "",
         icon: "gateway", color: mapMarkerColors.blue_gray,
-        gatewayOnline: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)) === "online", mqttDirect: false,
+        gatewayStatus: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)), mqttDirect: false,
       });
       if (!entities.has(link.peerDeviceId)) entities.set(link.peerDeviceId, {
         id: link.peerDeviceId, name: link.peerSerial, serial: link.peerSerial, farmId: link.farmId,
         halowMac: link.peerRadioMac, kind: "unresolved", online: true, lastSeenAt: link.lastSeenAt, gatewayDeviceId: link.gatewayDeviceId,
         icon: "beacon", color: mapMarkerColors.blue_gray,
-        gatewayOnline: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)) === "online", mqttDirect: false,
+        gatewayStatus: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)), mqttDirect: false,
       });
     }
 
@@ -249,7 +249,7 @@ export default function TopologyPage() {
       online: entity.online,
       icon: entity.icon,
       color: entity.color,
-      gatewayOnline: entity.gatewayOnline,
+      gatewayStatus: entity.gatewayStatus,
       mqttDirect: entity.mqttDirect,
     }));
     const graphLinks: CanvasLink[] = farmLinks.map((link) => ({
@@ -291,7 +291,7 @@ export default function TopologyPage() {
           {graph.nodes.length ? <TopologyCanvas nodes={graph.nodes} links={graph.links} selectedId={selectedId} onSelect={setSelectedId} /> : <div className="topology-zero"><strong>No topology data</strong><span>No devices or active HaLow links are visible for this farm.</span></div>}
         </section>
         <aside className="topology-inspector">
-          {selected ? <><p className="eyebrow">SELECTED NODE</p><h2>{selected.name}</h2><code>{selected.serial}</code><div className="inspector-grid"><div><span>ROLE</span><strong>{selected.kind === "gateway" ? "MQTT gateway" : selected.kind === "unresolved" ? "Observed peer" : "Mesh device"}</strong></div><div><span>STATE</span><strong className={selected.online ? "available" : "unavailable"}>{selected.online ? "Online" : "Offline"}</strong></div><div><span>GATEWAY STATUS</span><strong className={selected.gatewayOnline ? "available" : "unavailable"}>{selected.gatewayOnline ? "Online" : "Offline"}</strong></div><div><span>MQTT CLIENT</span><strong>{selected.mqttDirect ? "Direct" : selected.gatewayDeviceId ? "Via gateway" : "Not reported"}</strong></div><div><span>HALOW MAC</span><strong>{selected.halowMac || "Not reported"}</strong></div><div><span>LAST TELEMETRY</span><strong>{relativeTime(selected.lastSeenAt)}</strong></div><div><span>FARM</span><strong>{currentFarm?.name || selected.farmId || "Unassigned"}</strong></div></div><h3>{selectedLinks.length} direct link{selectedLinks.length === 1 ? "" : "s"}</h3><div className="inspector-links">{selectedLinks.map((link) => { const peerSerial = link.gatewayDeviceId === selected.id ? link.peerSerial : link.gatewaySerial; return <article key={link.$id}><div><strong>{peerSerial}</strong><span>{relativeTime(link.lastSeenAt)}</span></div><b>{typeof link.rssi === "number" ? `${link.rssi} dBm` : "—"}<small>{signalLabel(link.rssi)}</small></b></article>; })}{!selectedLinks.length && <p>No active links in the last two minutes.</p>}</div></> : <div className="inspector-empty"><span>↖</span><strong>Select a node</strong><p>Device identity, gateway status, HaLow MAC, and direct RF links will appear here.</p></div>}
+          {selected ? <><p className="eyebrow">SELECTED NODE</p><h2>{selected.name}</h2><code>{selected.serial}</code><div className="inspector-grid"><div><span>ROLE</span><strong>{selected.kind === "gateway" ? "MQTT gateway" : selected.kind === "unresolved" ? "Observed peer" : "Mesh device"}</strong></div><div><span>STATE</span><strong className={selected.online ? "available" : "unavailable"}>{selected.online ? "Online" : "Offline"}</strong></div>{selected.gatewayStatus && <div><span>GATEWAY STATUS</span><strong className={selected.gatewayStatus === "online" ? "available" : "unavailable"}>{selected.gatewayStatus === "online" ? "Online" : "Offline"}</strong></div>}<div><span>MQTT CLIENT</span><strong>{selected.mqttDirect ? "Direct" : selected.gatewayDeviceId ? "Via gateway" : "Not reported"}</strong></div><div><span>HALOW MAC</span><strong>{selected.halowMac || "Not reported"}</strong></div><div><span>LAST TELEMETRY</span><strong>{relativeTime(selected.lastSeenAt)}</strong></div><div><span>FARM</span><strong>{currentFarm?.name || selected.farmId || "Unassigned"}</strong></div></div><h3>{selectedLinks.length} direct link{selectedLinks.length === 1 ? "" : "s"}</h3><div className="inspector-links">{selectedLinks.map((link) => { const peerSerial = link.gatewayDeviceId === selected.id ? link.peerSerial : link.gatewaySerial; return <article key={link.$id}><div><strong>{peerSerial}</strong><span>{relativeTime(link.lastSeenAt)}</span></div><b>{typeof link.rssi === "number" ? `${link.rssi} dBm` : "—"}<small>{signalLabel(link.rssi)}</small></b></article>; })}{!selectedLinks.length && <p>No active links in the last two minutes.</p>}</div></> : <div className="inspector-empty"><span>↖</span><strong>Select a node</strong><p>Device identity, gateway status, HaLow MAC, and direct RF links will appear here.</p></div>}
         </aside>
       </div>
       <section className="topology-table-card"><header><div><p className="eyebrow">RELATIONSHIPS</p><h2>Active HaLow links</h2></div><span>REPORTING WINDOW · 2 MINUTES</span></header><div className="topology-table-scroll"><table><thead><tr><th>Gateway</th><th>Peer</th><th>Peer HaLow MAC</th><th>RF signal</th><th>Quality</th><th>Last seen</th></tr></thead><tbody>{graph.rows.map((link) => <tr key={link.$id}><td>{link.gatewaySerial}</td><td>{link.peerSerial}</td><td><code>{link.peerRadioMac}</code></td><td>{typeof link.rssi === "number" ? `${link.rssi} dBm` : "—"}</td><td><span className={`signal-pill ${typeof link.rssi !== "number" ? "unknown" : link.rssi >= -60 ? "excellent" : link.rssi >= -75 ? "good" : "weak"}`}>{signalLabel(link.rssi)}</span></td><td>{relativeTime(link.lastSeenAt)}</td></tr>)}</tbody></table>{!graph.rows.length && <p className="empty">No active relationships reported.</p>}</div></section>
