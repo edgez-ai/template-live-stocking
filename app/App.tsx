@@ -38,6 +38,7 @@ type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 type UpstreamConnection = "wifi" | "ethernet" | "none";
 type VoltagePoint = { timestamp: number; value: number };
+type SensorSeries = { field: string; label: string; color: string; points: VoltagePoint[] };
 type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown };
 type AreaDraft = { name: string; shape: GeofenceShape; location: string; primary: string; secondary: string; vertices: string; color: string };
 type GeofenceGeometry = { center?: { latitude: number; longitude: number }; radiusMeters?: number; radiusXMeters?: number; radiusYMeters?: number; widthMeters?: number; heightMeters?: number; rotationDegrees?: number; vertices?: { latitude: number; longitude: number }[]; color?: string };
@@ -50,7 +51,22 @@ type FlashMethod = "esp32" | "jlink" | "openocd";
 const emptyFarmDetails: FarmDetails = { name: "", country: "", location: "", halowChannel: "", meshId: "", meshPassphrase: "" };
 const defaultAreaColor = "#E88D29";
 const emptyAreaDraft: AreaDraft = { name: "", shape: "circle", location: "", primary: "100", secondary: "100", vertices: "", color: defaultAreaColor };
-const flashSdk = new EdgezMeshSdk();
+class SessionEdgezMeshSdk extends EdgezMeshSdk {
+  async startManagedUsbFlashTunnel(options: Parameters<EdgezMeshSdk["startManagedUsbFlashTunnel"]>[0]) {
+    const apiEndpoint = (options.endpoint ?? "https://appwrite.edgez.ai/v1").replace(/\/$/, "");
+    const response = await fetch(`${apiEndpoint}/teams/${encodeURIComponent(options.teamId)}/usb-flash/sessions`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json", "x-appwrite-project": options.projectId },
+      body: "{}",
+    });
+    if (!response.ok) throw new Error(`Unable to create USB flash session (${response.status}): ${await response.text()}`);
+    const session = await response.json() as { url?: string; token?: string };
+    if (!session.url?.startsWith("wss://") || !session.token) throw new Error("USB flash session response is invalid");
+    return this.startUsbFlashTunnel({ url: session.url, token: session.token, busId: options.busId });
+  }
+}
+const flashSdk = new SessionEdgezMeshSdk();
 const flashTargets: { key: FlashTarget; label: string; detail: string; assetName: string; method: FlashMethod }[] = [
   { key: "ht-hc33", label: "HT-HC33", detail: "ESP32-S3 companion · esptool", assetName: "live-stocking-flash.bin", method: "esp32" },
   { key: "nrf54l15-hc01", label: "nRF54L15 + HT-HC01", detail: "nRF54L15 application · J-Link SWD", assetName: "live-stocking-hc01.hex", method: "jlink" },
@@ -304,6 +320,7 @@ const historyRanges: { key: HistoryRange; label: string; duration: number }[] = 
   { key: "24h", label: "24 HOURS", duration: 24 * 60 * 60 * 1000 },
 ];
 const topologyRecentMs = 2 * 60 * 1000;
+const chartColors = ["#0a8c87", "#d47a1f", "#7c5ce5", "#d14b78", "#3977c3", "#6c8f2d", "#a75b32", "#53646f"];
 
 function measurementForDevice(deviceId: string) {
   return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
@@ -316,13 +333,12 @@ function timeseriesRange(duration: number) {
 }
 
 async function queryDeviceTimeseries(deviceId: string, duration: number) {
-  const jwt = (await account.createJWT()).jwt;
   const response = await fetch(`${endpoint}/timeseries/stores/${encodeURIComponent(config.appwriteProjectId)}/queries`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       "x-appwrite-project": config.appwriteProjectId,
-      "x-appwrite-jwt": jwt,
     },
     body: JSON.stringify({
       measurement: measurementForDevice(deviceId),
@@ -335,14 +351,56 @@ async function queryDeviceTimeseries(deviceId: string, duration: number) {
   return payload.rows || [];
 }
 
-function timeseriesPoints(rows: TimeseriesRow[], fields: string[], duration: number): VoltagePoint[] {
+function sensorLabel(field: string) {
+  if (!field.startsWith("sensor_")) return field;
+  const name = field.slice("sensor_".length).replaceAll("_", " ");
+  return name.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function timeseriesSensorSeries(rows: TimeseriesRow[], duration: number): SensorSeries[] {
   const since = Date.now() - duration;
-  return rows.flatMap((row) => {
-    if (typeof row._field !== "string" || !fields.includes(row._field)) return [];
+  const pointsByField = new Map<string, VoltagePoint[]>();
+  for (const row of rows) {
+    if (typeof row._field !== "string" || !row._field.startsWith("sensor_")) continue;
     const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
     const value = typeof row._value === "number" ? row._value : Number(row._value);
-    return Number.isFinite(timestamp) && timestamp >= since && Number.isFinite(value) ? [{ timestamp, value }] : [];
-  }).sort((a, b) => a.timestamp - b.timestamp);
+    if (!Number.isFinite(timestamp) || timestamp < since || !Number.isFinite(value)) continue;
+    const points = pointsByField.get(row._field) || [];
+    points.push({ timestamp, value });
+    pointsByField.set(row._field, points);
+  }
+  return [...pointsByField.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+    .map(([field, points], index) => ({
+      field,
+      label: sensorLabel(field),
+      color: chartColors[index % chartColors.length],
+      points: points.sort((left, right) => left.timestamp - right.timestamp),
+    }));
+}
+
+function cachedSensorSeries(rows: Telemetry[], deviceId: string, duration: number): SensorSeries[] {
+  const since = Date.now() - duration;
+  const pointsByField = new Map<string, VoltagePoint[]>();
+  for (const row of rows) {
+    const timestamp = Date.parse(row.receivedAt);
+    if (row.deviceId !== deviceId || !Number.isFinite(timestamp) || timestamp < since) continue;
+    try {
+      const payload = JSON.parse(row.payload) as SensorPayload;
+      for (const sensor of payload.sensors || []) {
+        const type = Number(sensor?.type);
+        const value = Number(sensor?.value);
+        if (!Number.isInteger(type) || !Number.isFinite(value)) continue;
+        const field = `sensor_${type}`;
+        const points = pointsByField.get(field) || [];
+        points.push({ timestamp, value });
+        pointsByField.set(field, points);
+      }
+    } catch { /* Ignore malformed cached telemetry. */ }
+  }
+  return [...pointsByField.entries()]
+    .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
+    .map(([field, points], index) => ({ field, label: sensorLabel(field), color: chartColors[index % chartColors.length], points: points.sort((left, right) => left.timestamp - right.timestamp) }));
 }
 
 function isAuthError(error: unknown) {
@@ -407,24 +465,6 @@ function temperatureOf(row: Telemetry) {
   catch { return null; }
 }
 
-function cachedVoltagePoints(rows: Telemetry[], deviceId: string, duration: number): VoltagePoint[] {
-  const since = Date.now() - duration;
-  return rows.filter((row) => row.deviceId === deviceId && new Date(row.receivedAt).getTime() >= since)
-    .flatMap((row) => {
-      const value = voltageOf(row);
-      return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
-    }).sort((a, b) => a.timestamp - b.timestamp);
-}
-
-function cachedTemperaturePoints(rows: Telemetry[], deviceId: string, duration: number): VoltagePoint[] {
-  const since = Date.now() - duration;
-  return rows.filter((row) => row.deviceId === deviceId && new Date(row.receivedAt).getTime() >= since)
-    .flatMap((row) => {
-      const value = temperatureOf(row);
-      return value === null ? [] : [{ timestamp: new Date(row.receivedAt).getTime(), value }];
-    }).sort((a, b) => a.timestamp - b.timestamp);
-}
-
 function statusOf(device: Device, latest?: Telemetry) {
   if (!device.enabled) return "Disabled";
   if (!latest) return "No data";
@@ -463,16 +503,11 @@ function mqttGatewayFor(device: Device, devices: Device[], topology: TopologyLin
   return devices.find((candidate) => candidate.metadata?.mqttGateway === true && candidate.metadata?.farmId === farmId)?.$id;
 }
 
-function SensorChart({ points, duration, unit, decimals, emptyMessage, color = "#0a8c87" }: { points: VoltagePoint[]; duration: number; unit: string; decimals: number; emptyMessage: string; color?: string }) {
+function SensorChart({ series, duration }: { series: SensorSeries[]; duration: number }) {
   const [width, setWidth] = useState(0);
   const height = 210;
   const inset = 18;
-  const sampled = useMemo(() => {
-    if (points.length <= 180) return points;
-    const stride = Math.ceil(points.length / 180);
-    return points.filter((_, index) => index % stride === 0 || index === points.length - 1);
-  }, [points]);
-  const values = points.map((point) => point.value);
+  const values = series.flatMap((item) => item.points.map((point) => point.value));
   const rawMin = values.length ? Math.min(...values) : 0;
   const rawMax = values.length ? Math.max(...values) : 0;
   const padding = Math.max(0.05, (rawMax - rawMin) * .15);
@@ -482,22 +517,28 @@ function SensorChart({ points, duration, unit, decimals, emptyMessage, color = "
   const start = end - duration;
   const plotWidth = Math.max(0, width - inset * 2);
   const plotHeight = height - inset * 2;
-  const coordinates = sampled.map((point) => ({
-    x: inset + Math.max(0, Math.min(1, (point.timestamp - start) / duration)) * plotWidth,
-    y: inset + (1 - (point.value - min) / (max - min)) * plotHeight,
-  }));
 
   return <View style={styles.chart} onLayout={(event: LayoutChangeEvent) => setWidth(event.nativeEvent.layout.width)}>
     {[0, 1, 2, 3].map((line) => <View key={line} style={[styles.chartGrid, { top: inset + line * plotHeight / 3 }]} />)}
-    {width > 0 && coordinates.slice(1).map((point, index) => {
-      const previous = coordinates[index];
-      const length = Math.hypot(point.x - previous.x, point.y - previous.y);
-      const angle = Math.atan2(point.y - previous.y, point.x - previous.x);
-      return <View key={`${sampled[index + 1].timestamp}-${index}`} style={[styles.chartLine, { backgroundColor: color, left: (previous.x + point.x) / 2 - length / 2, top: (previous.y + point.y) / 2 - 1, width: length, transform: [{ rotateZ: `${angle}rad` }] }]} />;
+    {width > 0 && series.map((item) => {
+      const stride = Math.max(1, Math.ceil(item.points.length / 180));
+      const sampled = item.points.filter((_, index) => index % stride === 0 || index === item.points.length - 1);
+      const coordinates = sampled.map((point) => ({
+        x: inset + Math.max(0, Math.min(1, (point.timestamp - start) / duration)) * plotWidth,
+        y: inset + (1 - (point.value - min) / (max - min)) * plotHeight,
+      }));
+      return <React.Fragment key={item.field}>
+        {coordinates.slice(1).map((point, index) => {
+          const previous = coordinates[index];
+          const length = Math.hypot(point.x - previous.x, point.y - previous.y);
+          const angle = Math.atan2(point.y - previous.y, point.x - previous.x);
+          return <View key={`${item.field}-${sampled[index + 1].timestamp}-${index}`} style={[styles.chartLine, { backgroundColor: item.color, left: (previous.x + point.x) / 2 - length / 2, top: (previous.y + point.y) / 2 - 1, width: length, transform: [{ rotateZ: `${angle}rad` }] }]} />;
+        })}
+        {coordinates.length ? <View style={[styles.chartDot, { backgroundColor: item.color, left: coordinates[coordinates.length - 1].x - 4, top: coordinates[coordinates.length - 1].y - 4 }]} /> : null}
+      </React.Fragment>;
     })}
-    {coordinates.length ? <View style={[styles.chartDot, { backgroundColor: color, left: coordinates[coordinates.length - 1].x - 4, top: coordinates[coordinates.length - 1].y - 4 }]} /> : null}
-    {!points.length ? <Text style={styles.chartEmpty}>{emptyMessage}</Text> : null}
-    {points.length ? <><Text style={styles.chartMax}>{rawMax.toFixed(decimals)} {unit}</Text><Text style={styles.chartMin}>{rawMin.toFixed(decimals)} {unit}</Text></> : null}
+    {!series.length ? <Text style={styles.chartEmpty}>Select a sensor with data in this range.</Text> : null}
+    {series.length ? <><Text style={styles.chartMax}>{rawMax.toFixed(2)}</Text><Text style={styles.chartMin}>{rawMin.toFixed(2)}</Text></> : null}
   </View>;
 }
 
@@ -752,8 +793,8 @@ export default function App() {
   const [detailIcon, setDetailIcon] = useState<EdgezMapIcon>("tracker");
   const [detailColor, setDetailColor] = useState<MapMarkerColor>("blue");
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
-  const [historyPoints, setHistoryPoints] = useState<VoltagePoint[]>([]);
-  const [temperatureHistoryPoints, setTemperatureHistoryPoints] = useState<VoltagePoint[]>([]);
+  const [historySeries, setHistorySeries] = useState<SensorSeries[]>([]);
+  const [selectedSensorFields, setSelectedSensorFields] = useState<string[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [scriptDeployingDeviceId, setScriptDeployingDeviceId] = useState("");
@@ -905,15 +946,14 @@ export default function App() {
     setFlashing(true); setFlashJobId(jobId); setFlashProgress(null); setFlashError("");
     setFlashElapsedSeconds(0);
     setFlashMessages([]);
-    setFlashStage({ label: "AUTHENTICATING", message: "Creating a short-lived user token…" });
+    setFlashStage({ label: "STARTING RUNTIME", message: "Preparing the organization USB flash runtime…" });
     try {
-      const jwt = (await account.createJWT()).jwt;
-      setFlashStage({ label: "STARTING RUNTIME", message: "Preparing the organization USB flash runtime…" });
       const common = {
         endpoint,
         projectId: config.appwriteProjectId,
         teamId: currentFarm.teamId,
-        jwt,
+        // Required by the upstream option type; SessionEdgezMeshSdk uses the active session cookie instead.
+        jwt: "",
         busId: flashBusId,
         firmwareUrl: latestFlashRelease.url,
         sha256: latestFlashRelease.sha256,
@@ -1132,18 +1172,24 @@ export default function App() {
     if (!detailDevice) return;
     let active = true;
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
+    const applySeries = (series: SensorSeries[]) => {
+      setHistorySeries(series);
+      setSelectedSensorFields((current) => {
+        const available = new Set(series.map((item) => item.field));
+        const retained = current.filter((field) => available.has(field));
+        return retained.length ? retained : series.slice(0, 3).map((item) => item.field);
+      });
+    };
     if (offline) {
-      setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration));
-      setTemperatureHistoryPoints(cachedTemperaturePoints(telemetryRef.current, detailDevice.$id, duration));
+      applySeries(cachedSensorSeries(telemetryRef.current, detailDevice.$id, duration));
       setHistoryLoading(false); setHistoryError("");
       return;
     }
-    setHistoryLoading(true); setHistoryError(""); setHistoryPoints([]); setTemperatureHistoryPoints([]);
+    setHistoryLoading(true); setHistoryError(""); setHistorySeries([]);
     queryDeviceTimeseries(detailDevice.$id, duration).then((rows) => {
       if (!active) return;
-      setHistoryPoints(timeseriesPoints(rows, ["sensor_battery_voltage", `sensor_${sensorType.batteryVoltage}`], duration));
-      setTemperatureHistoryPoints(timeseriesPoints(rows, ["sensor_temperature", `sensor_${sensorType.temperature}`], duration));
-    }).catch((caught) => { if (active) { setHistoryPoints(cachedVoltagePoints(telemetryRef.current, detailDevice.$id, duration)); setTemperatureHistoryPoints(cachedTemperaturePoints(telemetryRef.current, detailDevice.$id, duration)); setHistoryError(messageOf(caught)); } })
+      applySeries(timeseriesSensorSeries(rows, duration));
+    }).catch((caught) => { if (active) { applySeries(cachedSensorSeries(telemetryRef.current, detailDevice.$id, duration)); setHistoryError(messageOf(caught)); } })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
   }, [detailDevice, historyRange, offline]);
@@ -1697,16 +1743,8 @@ export default function App() {
     }
     return latest;
   }, [telemetry]);
-  const historyStats = useMemo(() => {
-    if (!historyPoints.length) return null;
-    const values = historyPoints.map((point) => point.value);
-    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
-  }, [historyPoints]);
-  const temperatureHistoryStats = useMemo(() => {
-    if (!temperatureHistoryPoints.length) return null;
-    const values = temperatureHistoryPoints.map((point) => point.value);
-    return { min: Math.min(...values), max: Math.max(...values), average: values.reduce((sum, value) => sum + value, 0) / values.length };
-  }, [temperatureHistoryPoints]);
+  const selectedHistorySeries = useMemo(() => historySeries.filter((series) => selectedSensorFields.includes(series.field)), [historySeries, selectedSensorFields]);
+  const historyReadingCount = selectedHistorySeries.reduce((total, series) => total + series.points.length, 0);
   const activeHistoryRange = historyRanges.find((range) => range.key === historyRange)!;
   const activeHistoryDuration = activeHistoryRange.duration;
   const detailLatest = detailDevice ? latestVoltageByDevice.get(detailDevice.$id) : undefined;
@@ -1998,12 +2036,33 @@ export default function App() {
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>
             <View style={styles.rangeSelector}>{historyRanges.map((range) => <Pressable key={range.key} style={[styles.rangeButton, historyRange === range.key && styles.rangeButtonActive]} onPress={() => setHistoryRange(range.key)} disabled={historyLoading}><Text style={[styles.rangeButtonText, historyRange === range.key && styles.rangeButtonTextActive]}>{range.label}</Text></Pressable>)}</View>
-            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Battery voltage</Text><Text style={styles.chartSubtitle}>Device battery ADC · {historyPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View><SensorChart points={historyPoints} duration={activeHistoryDuration} unit="V" decimals={2} emptyMessage="No battery voltage data in this range." /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
-            {historyStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{historyStats.min.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{historyStats.average.toFixed(2)} V</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{historyStats.max.toFixed(2)} V</Text></View></View> : null}
-            <Text style={styles.sensorNote}>Battery voltage is measured by the device ADC; no reading appears when a battery is disconnected.</Text>
+            <View style={styles.chartCard}>
+              <View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Sensor history</Text><Text style={styles.chartSubtitle}>{historyReadingCount} selected readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#0a8c87" /> : null}</View>
+              <View style={styles.sensorPicker}>
+                {historySeries.map((series) => {
+                  const selected = selectedSensorFields.includes(series.field);
+                  return <Pressable key={series.field} style={[styles.sensorChoice, selected && styles.sensorChoiceSelected]} onPress={() => setSelectedSensorFields((current) => selected ? current.filter((field) => field !== series.field) : [...current, series.field])}>
+                    <View style={[styles.sensorChoiceDot, { backgroundColor: series.color }]} />
+                    <Text style={[styles.sensorChoiceText, selected && styles.sensorChoiceTextSelected]}>{series.label}</Text>
+                    <Text style={styles.sensorChoiceCount}>{series.points.length}</Text>
+                  </Pressable>;
+                })}
+                {!historyLoading && !historySeries.length ? <Text style={styles.sensorNote}>No sensor fields found in this range.</Text> : null}
+              </View>
+              <SensorChart series={selectedHistorySeries} duration={activeHistoryDuration} />
+              <View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>
+              {historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}
+            </View>
+            {selectedHistorySeries.map((series) => {
+              const values = series.points.map((point) => point.value);
+              const latest = series.points[series.points.length - 1]?.value;
+              const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+              return <View key={series.field} style={styles.seriesStat}>
+                <View style={styles.seriesStatHeader}><View style={[styles.seriesStatDot, { backgroundColor: series.color }]} /><Text style={styles.seriesStatLabel}>{series.label.toUpperCase()}</Text><Text style={styles.seriesStatValue}>{latest.toFixed(2)}</Text></View>
+                <Text style={styles.seriesStatSummary}>MIN {Math.min(...values).toFixed(2)}   ·   AVG {average.toFixed(2)}   ·   MAX {Math.max(...values).toFixed(2)}</Text>
+              </View>;
+            })}
             <View style={[styles.detailLatest, styles.temperatureLatest]}><Text style={styles.temperatureMetricLabel}>TEMPERATURE · SENSOR TYPE 1</Text><Text style={styles.detailMetricValue}>{detailTemperature ? `${detailTemperature.value.toFixed(1)} °C` : "—"}</Text><Text style={styles.temperatureMetricTime}>{detailTemperature ? `Updated ${relativeTime(detailTemperature.row.receivedAt)}` : "No temperature readings received"}</Text></View>
-            <View style={styles.chartCard}><View style={styles.chartCardHeader}><View><Text style={styles.chartTitle}>Temperature history</Text><Text style={styles.chartSubtitle}>Unified Lua sensor · {temperatureHistoryPoints.length} readings{offline ? " · cached" : ""}</Text></View>{historyLoading ? <ActivityIndicator color="#d47a1f" /> : null}</View><SensorChart points={temperatureHistoryPoints} duration={activeHistoryDuration} unit="°C" decimals={1} emptyMessage="No temperature data in this range." color="#d47a1f" /><View style={styles.chartAxis}><Text style={styles.chartAxisText}>{activeHistoryRange.label} AGO</Text><Text style={styles.chartAxisText}>NOW</Text></View>{historyError ? <Text style={styles.historyError}>{historyError}</Text> : null}</View>
-            {temperatureHistoryStats ? <View style={styles.statsRow}><View style={styles.stat}><Text style={styles.statLabel}>MIN</Text><Text style={styles.statValue}>{temperatureHistoryStats.min.toFixed(1)} °C</Text></View><View style={styles.stat}><Text style={styles.statLabel}>AVERAGE</Text><Text style={styles.statValue}>{temperatureHistoryStats.average.toFixed(1)} °C</Text></View><View style={styles.stat}><Text style={styles.statLabel}>MAX</Text><Text style={styles.statValue}>{temperatureHistoryStats.max.toFixed(1)} °C</Text></View></View> : null}
             <TopologyCard device={detailDevice} links={detailTopology} />
             {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.sensorScriptZone}><Text style={styles.otaTitle}>RANDOM TEMPERATURE SENSOR</Text><Text style={styles.otaDescription}>Deploys the EdgeZ Lua sample as the device&apos;s unified sensor script. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the active script.</Text>{detailTemperature ? <Text style={styles.sensorScriptReading}>LATEST · {detailTemperature.value.toFixed(1)} °C · {relativeTime(detailTemperature.row.receivedAt)}</Text> : <Text style={styles.sensorScriptReading}>NO TEMPERATURE READING YET</Text>}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || scriptDeployingDeviceId === detailDevice.$id) && styles.disabledButton]} onPress={() => requestRandomTemperatureSensor(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || scriptDeployingDeviceId === detailDevice.$id}><Text style={styles.otaButtonText}>{scriptDeployingDeviceId === detailDevice.$id ? "DEPLOYING…" : "DEPLOY SENSOR SCRIPT"}</Text></Pressable></View> : null}
             {detailDevice.metadata?.firmwareTarget === "heltec-hc33" || detailFirmwareVersion ? <View style={styles.otaZone}><Text style={styles.otaTitle}>FIRMWARE UPDATE</Text><Text style={styles.otaDescription}>Running {detailFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install the latest HT-HC33 OTA image from this deployment&apos;s source repository.</Text>{detailOtaUpdate ? <Text style={styles.otaDescription}>Latest update: {detailOtaUpdate.status.toUpperCase()}{detailOtaUpdate.detail ? ` · ${detailOtaUpdate.detail}` : ""}{detailOtaUpdate.reportedAt ? ` · ${relativeTime(detailOtaUpdate.reportedAt)}` : ""}</Text> : null}<Pressable style={[styles.otaButton, (offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent) && styles.disabledButton]} onPress={() => requestFirmwareUpdate(detailDevice)} disabled={offline || busy || detailStatus !== "Online" || !otaImageUrl || detailOtaPending || detailFirmwareCurrent}><Text style={styles.otaButtonText}>{busy ? "PLEASE WAIT…" : detailOtaPending ? "UPDATE PENDING" : detailFirmwareCurrent ? "UP TO DATE" : "UPDATE HT-HC33"}</Text></Pressable></View> : null}
@@ -2038,7 +2097,7 @@ const styles = StyleSheet.create({
   flashWarning: { padding: 14, borderRadius: 12, borderWidth: 1, borderColor: "#e8b5aa", backgroundColor: "#fff4f1" }, flashWarningTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, flashWarningText: { color: "#7f5b53", fontSize: 11, lineHeight: 16, marginTop: 5 }, flashWarningCode: { fontWeight: "900" }, flashHash: { color: "#718783", fontSize: 9, fontFamily: Platform.OS === "android" ? "monospace" : undefined }, flashProgress: { padding: 14, borderRadius: 12, backgroundColor: "#e9f7f5", gap: 8 }, flashProgressHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, flashElapsed: { color: "#087f73", fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] }, flashLog: { paddingTop: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#a8cfca", gap: 3 }, flashLogLine: { color: "#315e59", fontSize: 9, lineHeight: 13, fontFamily: Platform.OS === "android" ? "monospace" : undefined },
   sectionLabel: { color: "#7d9a97", fontSize: 10, fontWeight: "900", letterSpacing: 1.2, marginTop: 6 }, deviceCard: { padding: 18, borderRadius: 18, backgroundColor: "#f7faf9" }, deviceCardHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }, deviceCardName: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, deviceSerial: { color: "#718783", fontSize: 10, fontWeight: "700", letterSpacing: .7, marginTop: 3 }, statusBadge: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 20, backgroundColor: "#e7efed" }, statusDot: { width: 7, height: 7, borderRadius: 4 }, statusOnline: { backgroundColor: "#16a085" }, statusOffline: { backgroundColor: "#9badaa" }, statusText: { color: "#4d6965", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, latestRow: { flexDirection: "row", alignItems: "flex-end", justifyContent: "space-between", marginTop: 24 }, latestLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, latestValue: { color: "#0a3037", fontSize: 39, lineHeight: 45, fontWeight: "900", letterSpacing: -1.5 }, cardArrow: { color: "#0a8c87", fontSize: 36, lineHeight: 42, fontWeight: "300" }, lastSeen: { color: "#718783", fontSize: 10, marginTop: 5 },
   gatewaySummary: { flexDirection: "row", gap: 10 }, gatewaySummaryItem: { flex: 1, padding: 12, borderWidth: 1, borderColor: "#d7e3e0", borderRadius: 12, backgroundColor: "#f7faf9", gap: 4 }, gatewaySummaryLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, gatewaySummaryValue: { color: "#0a3037", fontSize: 13, fontWeight: "900" }, gatewayAvailable: { color: "#087f73" }, gatewayUnavailable: { color: "#b9472f" }, gatewayUnknown: { color: "#718783" },
-  detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, telemetryRoute: { flexDirection: "row", alignItems: "baseline", gap: 7, paddingHorizontal: 2 }, telemetryRouteLabel: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, telemetryRouteValue: { color: "#0a3037", fontSize: 11, fontWeight: "800" }, telemetryRouteSerial: { color: "#718783", fontSize: 9 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, temperatureLatest: { backgroundColor: "#7a4b14" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, temperatureMetricLabel: { color: "#ffe0a3", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, temperatureMetricTime: { color: "#f2d4a8", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, statsRow: { flexDirection: "row", gap: 10 }, stat: { flex: 1, padding: 13, borderRadius: 14, backgroundColor: "white" }, statLabel: { color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, statValue: { color: "#0a3037", fontSize: 19, fontWeight: "900", marginTop: 4 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, sensorScriptZone: { padding: 16, borderWidth: 1, borderColor: "#d9c89d", borderRadius: 14, backgroundColor: "#fffaf0" }, sensorScriptReading: { color: "#8d6b1f", fontSize: 9, fontWeight: "900", letterSpacing: .6, marginBottom: 11 }, otaZone: { padding: 16, borderWidth: 1, borderColor: "#b8d9d5", borderRadius: 14, backgroundColor: "#f4fbfa" }, otaTitle: { color: "#0a6f6b", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, otaDescription: { color: "#59716f", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, otaButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, otaButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
+  detailPage: { flex: 1, backgroundColor: "#eef4f2" }, detailHeader: { minHeight: 58, paddingHorizontal: 20, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#d7e3e0" }, detailBack: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: .8 }, detailSerial: { color: "#718783", fontSize: 9, fontWeight: "800", letterSpacing: .7 }, detailContent: { padding: 22, paddingBottom: 40, gap: 14 }, detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, detailEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 }, detailTitle: { color: "#0a3037", fontSize: 30, fontWeight: "900", marginTop: 2 }, detailStatus: { flexDirection: "row", alignItems: "center", gap: 6 }, detailStatusText: { color: "#4d6965", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, telemetryRoute: { flexDirection: "row", alignItems: "baseline", gap: 7, paddingHorizontal: 2 }, telemetryRouteLabel: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .8 }, telemetryRouteValue: { color: "#0a3037", fontSize: 11, fontWeight: "800" }, telemetryRouteSerial: { color: "#718783", fontSize: 9 }, detailLatest: { padding: 19, borderRadius: 18, backgroundColor: "#0a3037" }, temperatureLatest: { backgroundColor: "#7a4b14" }, detailMetricLabel: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, temperatureMetricLabel: { color: "#ffe0a3", fontSize: 9, fontWeight: "900", letterSpacing: .9 }, detailMetricValue: { color: "white", fontSize: 45, lineHeight: 54, fontWeight: "900", letterSpacing: -1.5 }, detailMetricTime: { color: "#90aaa7", fontSize: 10 }, temperatureMetricTime: { color: "#f2d4a8", fontSize: 10 }, rangeTitle: { color: "#385753", fontSize: 9, fontWeight: "900", letterSpacing: .9, marginTop: 5 }, rangeSelector: { flexDirection: "row", padding: 4, borderRadius: 12, backgroundColor: "#dce8e5" }, rangeButton: { flex: 1, minHeight: 38, borderRadius: 9, alignItems: "center", justifyContent: "center" }, rangeButtonActive: { backgroundColor: "#0a8c87" }, rangeButtonText: { color: "#59716f", fontSize: 8, fontWeight: "900" }, rangeButtonTextActive: { color: "white" }, chartCard: { padding: 16, borderRadius: 18, backgroundColor: "white" }, chartCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, chartTitle: { color: "#0a3037", fontSize: 17, fontWeight: "900" }, chartSubtitle: { color: "#718783", fontSize: 9, marginTop: 2 }, sensorPicker: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginBottom: 10 }, sensorChoice: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 9, minHeight: 32, borderRadius: 9, borderWidth: 1, borderColor: "#d7e3e0", backgroundColor: "#f3f8f6" }, sensorChoiceSelected: { borderColor: "#0a8c87", backgroundColor: "#e7f5f3" }, sensorChoiceDot: { width: 8, height: 8, borderRadius: 4 }, sensorChoiceText: { color: "#59716f", fontSize: 9, fontWeight: "800" }, sensorChoiceTextSelected: { color: "#0a3037" }, sensorChoiceCount: { color: "#718783", fontSize: 8 }, chart: { height: 210, overflow: "hidden", borderRadius: 12, backgroundColor: "#f3f8f6" }, chartGrid: { position: "absolute", left: 18, right: 18, height: 1, backgroundColor: "#dce8e5" }, chartLine: { position: "absolute", height: 2, borderRadius: 1, backgroundColor: "#0a8c87" }, chartDot: { position: "absolute", width: 8, height: 8, borderRadius: 4, backgroundColor: "#ff8264", borderWidth: 2, borderColor: "white" }, chartEmpty: { color: "#718783", fontSize: 11, textAlign: "center", marginTop: 95 }, chartMax: { position: "absolute", top: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartMin: { position: "absolute", bottom: 4, right: 6, color: "#718783", fontSize: 8, fontWeight: "800" }, chartAxis: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 }, chartAxisText: { color: "#718783", fontSize: 8, fontWeight: "800" }, historyError: { color: "#b9472f", fontSize: 10, textAlign: "center", marginTop: 8 }, seriesStat: { padding: 14, borderRadius: 14, backgroundColor: "white" }, seriesStatHeader: { flexDirection: "row", alignItems: "center", gap: 7 }, seriesStatDot: { width: 9, height: 9, borderRadius: 5 }, seriesStatLabel: { flex: 1, color: "#718783", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, seriesStatValue: { color: "#0a3037", fontSize: 19, fontWeight: "900" }, seriesStatSummary: { color: "#59716f", fontSize: 9, fontWeight: "800", marginTop: 6 }, sensorNote: { color: "#718783", fontSize: 10, lineHeight: 15, textAlign: "center" }, sensorScriptZone: { padding: 16, borderWidth: 1, borderColor: "#d9c89d", borderRadius: 14, backgroundColor: "#fffaf0" }, sensorScriptReading: { color: "#8d6b1f", fontSize: 9, fontWeight: "900", letterSpacing: .6, marginBottom: 11 }, otaZone: { padding: 16, borderWidth: 1, borderColor: "#b8d9d5", borderRadius: 14, backgroundColor: "#f4fbfa" }, otaTitle: { color: "#0a6f6b", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, otaDescription: { color: "#59716f", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, otaButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, otaButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerZone: { padding: 16, borderWidth: 1, borderColor: "#e8b5aa", borderRadius: 14, backgroundColor: "#fff4f1" }, dangerTitle: { color: "#8f3422", fontSize: 9, fontWeight: "900", letterSpacing: .8 }, dangerDescription: { color: "#7f5b53", fontSize: 10, lineHeight: 15, marginTop: 5, marginBottom: 11 }, deleteButton: { minHeight: 46, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "#b9472f" }, deleteButtonText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: .8 },
   topologyCard: { padding: 16, borderRadius: 18, backgroundColor: "white", gap: 12 }, topologyHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }, topologyCount: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: .7 }, topologyRoot: { flexDirection: "row", alignItems: "center", gap: 10, padding: 11, borderRadius: 12, backgroundColor: "#e9f7f5" }, topologyRootIcon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: "#0a3037" }, topologyNodeName: { color: "#0a3037", fontSize: 12, fontWeight: "900" }, topologyNodeMeta: { color: "#718783", fontSize: 8, marginTop: 2 }, topologyLinkRow: { minHeight: 52, flexDirection: "row", alignItems: "center" }, topologyRail: { width: 50, alignSelf: "stretch", position: "relative" }, topologyVertical: { position: "absolute", left: 18, top: -12, bottom: 26, width: 2, backgroundColor: "#8fcac4" }, topologyHorizontal: { position: "absolute", left: 18, top: 25, width: 25, height: 2, backgroundColor: "#8fcac4" }, topologyPeerDot: { position: "absolute", left: 39, top: 19, width: 14, height: 14, borderRadius: 7, borderWidth: 3, borderColor: "#0a8c87", backgroundColor: "white" }, topologyPeerInfo: { flex: 1, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#f3f8f6" }, topologyEmpty: { paddingVertical: 18, color: "#718783", fontSize: 10, textAlign: "center" },
   empty: { color: "#829d9a", textAlign: "center", padding: 28 }, error: { color: "#ffc0af", textAlign: "center", fontSize: 12, paddingVertical: 12 },
 });
