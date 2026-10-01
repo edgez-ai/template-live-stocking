@@ -456,7 +456,7 @@ function messageOf(error: unknown) { return error instanceof Error ? error.messa
 function voltageOf(row: Telemetry) {
   try {
     const value = sensorValue(JSON.parse(row.payload) as SensorPayload, sensorType.batteryVoltage);
-    return (row.channel === "status" || row.channel === "battery") && value !== null && value >= 2.5 && value <= 5.0 ? value : null;
+    return (row.channel === "status" || row.channel === "battery") && value !== null && value >= 0 && value <= 10.0 ? value : null;
   } catch { return null; }
 }
 

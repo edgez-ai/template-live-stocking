@@ -136,11 +136,11 @@ function voltageOf(row: Telemetry) {
     if (row.channel !== "status" && row.channel !== "battery") return null;
     const payload = JSON.parse(row.payload) as SensorPayload;
     const sensorValue = payload.sensors?.find((sensor) => sensor?.type === batteryVoltageSensorType)?.value;
-    if (typeof sensorValue === "number" && Number.isFinite(sensorValue) && sensorValue >= 2.5 && sensorValue <= 5.0) {
+    if (typeof sensorValue === "number" && Number.isFinite(sensorValue) && sensorValue >= 0 && sensorValue <= 10.0) {
       return sensorValue;
     }
     const legacyMillivolts = Number(payload.batteryVoltageMv);
-    return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 2500 && legacyMillivolts <= 5000
+    return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 0 && legacyMillivolts <= 10000
       ? legacyMillivolts / 1000 : null;
   } catch { return null; }
 }

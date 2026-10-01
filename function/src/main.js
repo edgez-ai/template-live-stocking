@@ -99,7 +99,7 @@ function telemetryLine(target, entry, channel, receivedAt, sequence = 0) {
   if (latitude !== null && longitude !== null) {
     fields.push(`lat=${latitude}`, `lon=${longitude}`);
   }
-  if (Number.isInteger(entry.batteryVoltageMv) && entry.batteryVoltageMv >= 2500 && entry.batteryVoltageMv <= 5000 &&
+  if (Number.isInteger(entry.batteryVoltageMv) && entry.batteryVoltageMv >= 0 && entry.batteryVoltageMv <= 10000 &&
       !entry.sensors?.some((sensor) => sensor.type === SENSOR_BATTERY_VOLTAGE)) {
     fields.push(`sensor_battery_voltage=${entry.batteryVoltageMv / 1000}`);
   }
@@ -543,8 +543,8 @@ export default async function main({ req, res, error, log = () => {} }) {
     }
     const batteryVoltage = sensorValue(entry, SENSOR_BATTERY_VOLTAGE);
     if ((route.channel === "status" || route.channel === "battery") && batteryVoltage !== null &&
-        (batteryVoltage < 2.5 || batteryVoltage > 5.0)) {
-      return json(res, { error: "Battery sensor voltage must be between 2.5 and 5.0 volts" }, 400);
+        (batteryVoltage < 0 || batteryVoltage > 10.0)) {
+      return json(res, { error: "Battery sensor voltage must be between 0 and 10.0 volts" }, 400);
     }
     const latitude = sensorValue(entry, SENSOR_LATITUDE);
     const longitude = sensorValue(entry, SENSOR_LONGITUDE);

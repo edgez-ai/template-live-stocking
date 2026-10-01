@@ -1129,7 +1129,7 @@ void enqueue_gateway_telemetry() {
   strlcpy(reading.client_id, mqtt_config.client_id, sizeof(reading.client_id));
   int battery_mv = 0;
   const esp_err_t result = read_battery_millivolts(&battery_mv);
-  if (result == ESP_OK && battery_mv >= 2500 && battery_mv <= 5000) {
+  if (result == ESP_OK && battery_mv >= 0 && battery_mv <= 10000) {
     auto &battery = reading.sensor_data[reading.sensor_data_count++];
     battery.type = ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE;
     battery.which_value = ai_edgez_halow_SensorData_float_value_tag;

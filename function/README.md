@@ -19,7 +19,7 @@ native spatial distance queries. It also projects Device metadata's `icon` and
 points, while TablesDB keeps only the last reading and status for each device.
 A legacy single JSON object follows the same path for the publishing device.
 The unified `status` payload may include an integer `batteryVoltageMv` from
-2500 to 5000 with `unit: "millivolt"`, plus valid latitude and longitude.
+0 to 10000 with `unit: "millivolt"`, plus valid latitude and longitude.
 Other telemetry channels keep their JSON payloads.
 
 When an Appwrite Device is deleted, the same Function removes its deterministic

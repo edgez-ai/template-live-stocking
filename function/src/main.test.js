@@ -210,6 +210,20 @@ test("single-device telemetry remains accepted", async () => {
   assert.equal(rows[0].data.gatewayDeviceId, null);
 });
 
+test("battery voltage accepts the inclusive 0 to 10 volt range", async () => {
+  let result = await publish({ status: "online", sensors: [{ type: 12, value: 0 }] });
+  assert.equal(result.status, 201);
+  result = await publish({ status: "online", sensors: [{ type: 12, value: 10 }] });
+  assert.equal(result.status, 201);
+});
+
+test("battery voltage rejects values outside 0 to 10 volts", async () => {
+  let result = await publish({ status: "online", sensors: [{ type: 12, value: -0.01 }] });
+  assert.equal(result.status, 400);
+  result = await publish({ status: "online", sensors: [{ type: 12, value: 10.01 }] });
+  assert.equal(result.status, 400);
+});
+
 test("sensor indexes become named fields and GPS remains numeric", async () => {
   const result = await publish({ sensors: [
     { type: 1, value: 21.5 }, { type: 2, value: 61 },
