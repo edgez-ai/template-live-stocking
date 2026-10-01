@@ -74,22 +74,6 @@ phone carries the control and USB traffic.
   <img src="docs/screenshots/mobile-flash-hardware.jpg" width="360" alt="Android USB-C firmware workflow with supported hardware profiles and flash timeout settings">
 </p>
 
-## Limitations
-
-This template is intentionally a simple demonstration rather than a
-production-ready deployment:
-
-| Capability | This demo | EdgeZ Enterprise |
-| --- | --- | --- |
-| Network topology | Simple sensor → relay node → Wi-Fi → MQTT path | Multi-hop, full-mesh architecture |
-| Internet connectivity | Single Wi-Fi gateway | Multiple internet gateways |
-| Device power model | Always on | Low-power PAwR-based operation |
-| Communication | Simple uplink telemetry | Reliable bidirectional communication |
-| Deployment readiness | Demonstration only | Production-ready with enterprise support |
-
-Need the enterprise capabilities? Contact us to discuss your architecture,
-hardware integration, and deployment requirements.
-
 ## Repository layout
 
 | Folder | Purpose |
