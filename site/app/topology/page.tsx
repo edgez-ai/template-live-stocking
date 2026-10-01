@@ -50,6 +50,7 @@ type GraphEntity = {
   lastSeenAt: string;
   gatewayDeviceId: string;
   icon: string;
+  color: string;
   gatewayOnline: boolean;
   mqttDirect: boolean;
 };
@@ -66,6 +67,17 @@ const farmTableId = "farms";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const topologyRecentMs = 2 * 60 * 1000;
+const mapMarkerColors: Record<string, string> = {
+  red: "#E51B23", pink: "#FF4182", purple: "#9B24B2", deep_purple: "#6639BF",
+  blue: "#0066CC", light_blue: "#249CF2", cyan: "#14BECD", teal: "#00A58C",
+  green: "#3C8C3C", lime: "#93BF39", yellow: "#FFC800", orange: "#FF9600",
+  deep_orange: "#F06432", brown: "#804633", gray: "#737373", blue_gray: "#597380",
+};
+
+function deviceColor(device: Device, latest?: Telemetry) {
+  const saved = device.metadata?.markerColor || latest?.markerColor || "";
+  return mapMarkerColors[saved] || (device.enabled ? mapMarkerColors.blue : mapMarkerColors.gray);
+}
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
@@ -210,6 +222,7 @@ export default function TopologyPage() {
         lastSeenAt: latest?.receivedAt || "",
         gatewayDeviceId: linkedGatewayId,
         icon: device.metadata?.icon || latest?.icon || "tracker",
+        color: deviceColor(device, latest),
         gatewayOnline: gatewayStatus === "online",
         mqttDirect,
       });
@@ -218,13 +231,13 @@ export default function TopologyPage() {
       if (!entities.has(link.gatewayDeviceId)) entities.set(link.gatewayDeviceId, {
         id: link.gatewayDeviceId, name: link.gatewaySerial, serial: link.gatewaySerial, farmId: link.farmId,
         halowMac: "", kind: "gateway", online: true, lastSeenAt: link.reportedAt, gatewayDeviceId: "",
-        icon: "gateway",
+        icon: "gateway", color: mapMarkerColors.blue_gray,
         gatewayOnline: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)) === "online", mqttDirect: false,
       });
       if (!entities.has(link.peerDeviceId)) entities.set(link.peerDeviceId, {
         id: link.peerDeviceId, name: link.peerSerial, serial: link.peerSerial, farmId: link.farmId,
         halowMac: link.peerRadioMac, kind: "unresolved", online: true, lastSeenAt: link.lastSeenAt, gatewayDeviceId: link.gatewayDeviceId,
-        icon: "beacon",
+        icon: "beacon", color: mapMarkerColors.blue_gray,
         gatewayOnline: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)) === "online", mqttDirect: false,
       });
     }
@@ -235,6 +248,7 @@ export default function TopologyPage() {
       kind: entity.kind,
       online: entity.online,
       icon: entity.icon,
+      color: entity.color,
       gatewayOnline: entity.gatewayOnline,
       mqttDirect: entity.mqttDirect,
     }));
@@ -273,7 +287,7 @@ export default function TopologyPage() {
       <div className="topology-stats"><article><span>VISIBLE DEVICES</span><strong>{graph.entities.size}</strong></article><article><span>ONLINE NOW</span><strong>{onlineCount}</strong></article><article><span>GATEWAYS</span><strong>{gatewayCount}</strong></article><article><span>ACTIVE LINKS</span><strong>{graph.rows.length}</strong></article><article><span>AVERAGE SIGNAL</span><strong>{averageRssi === null ? "—" : `${averageRssi} dBm`}</strong></article></div>
       <div className="topology-workspace">
         <section className="topology-stage" aria-label="Interactive HaLow mesh topology">
-          <div className="topology-legend"><span><i className="device-online" />Device online</span><span><i className="device-offline" />Device offline</span><span><i className="gateway" />Gateway ring</span><span><i className="gateway-status online" />Gateway online</span><span><i className="gateway-status offline" />Gateway offline</span><span><i className="mqtt" />MQTT direct</span><span><b className="signal excellent" />Excellent</span><span><b className="signal good" />Good</span><span><b className="signal weak" />Weak</span></div>
+          <div className="topology-legend"><span><i className="marker-color" />Marker color</span><span><i className="device-online" />Online halo</span><span><i className="device-offline" />Offline halo</span><span><i className="gateway" />Gateway ring</span><span><i className="gateway-status online" />Gateway online</span><span><i className="gateway-status offline" />Gateway offline</span><span><i className="mqtt" />MQTT direct</span><span><b className="signal excellent" />Excellent</span><span><b className="signal good" />Good</span><span><b className="signal weak" />Weak</span></div>
           {graph.nodes.length ? <TopologyCanvas nodes={graph.nodes} links={graph.links} selectedId={selectedId} onSelect={setSelectedId} /> : <div className="topology-zero"><strong>No topology data</strong><span>No devices or active HaLow links are visible for this farm.</span></div>}
         </section>
         <aside className="topology-inspector">

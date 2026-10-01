@@ -15,6 +15,7 @@ export type CanvasNode = {
   kind: "gateway" | "device" | "unresolved";
   online: boolean;
   icon: string;
+  color: string;
   gatewayOnline: boolean;
   mqttDirect: boolean;
 };
@@ -101,16 +102,18 @@ export default function TopologyCanvas({
       context.fillStyle = "#ffcf5c";
       context.fill();
     }
+    context.beginPath();
+    context.arc(x, y, radius + 1.25, 0, Math.PI * 2);
+    context.fillStyle = node.online ? "#16a085" : "#8b9f9c";
+    context.fill();
     if (node.kind === "gateway") {
-      context.beginPath();
-      context.arc(x, y, radius + 1.25, 0, Math.PI * 2);
       context.lineWidth = 1.25 / scale;
       context.strokeStyle = "#173f42";
       context.stroke();
     }
     context.beginPath();
     context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fillStyle = node.online ? "#16a085" : "#8b9f9c";
+    context.fillStyle = node.color;
     context.fill();
     context.lineWidth = 1.2 / scale;
     context.strokeStyle = "#ffffff";
