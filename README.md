@@ -104,10 +104,14 @@ use their own latest release instead of a fixed template repository. Only users
 with update permission on the Device can publish its MQTT OTA command.
 
 The mobile app caches each signed-in user's farms, geofence areas and rules,
-devices, and latest telemetry for offline map rendering. It refreshes them when
-Appwrite is reachable and clears the cache on sign-out. Farm mesh passphrases
-and MQTT credentials are not stored in this offline cache; provisioning and
-edits require a connection.
+devices, latest telemetry, and mobile GPS trace points for offline map rendering.
+The **Trace** menu can opt into background movement tracking, choose a one-, five-,
+or fifteen-minute save interval, and preview one hour through seven days as a
+route on the offline map. Trace points are timestamped locally first, uploaded to
+the private row-secured `mobile-trace-points` table when Appwrite is reachable,
+and retained in the local queue while offline. Farm mesh passphrases and MQTT
+credentials are not stored in this offline cache; provisioning and edits require
+a connection.
 
 ## Environment
 
@@ -157,6 +161,16 @@ only when you intend to provision or update Appwrite resources.
 Run `cd infra && npm run clean` to remove this template's Site, Function,
 database, Time Series Store, proxy rule, and auth platforms. Cleanup preserves
 project users, Devices, and project-wide authentication settings.
+
+## RSSI fingerprint localization experiment
+
+`localization/` provides dependency-free Python tools that export GPS-labelled
+multi-relay RSSI fingerprints from the project's existing Time Series Store,
+evaluate a weighted KNN baseline, create a portable JSON model, and run a
+single prediction. It uses the raw telemetry payload already retained in time
+series and does not change the deployed application. See
+[`localization/README.md`](localization/README.md) for the supported telemetry
+shapes and commands.
 
 ## Release builds
 

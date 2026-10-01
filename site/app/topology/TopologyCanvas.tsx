@@ -15,9 +15,7 @@ export type CanvasNode = {
   kind: "gateway" | "device" | "unresolved";
   online: boolean;
   icon: string;
-  color: string;
-  wifiOnline: boolean;
-  internetOnline: boolean;
+  gatewayOnline: boolean;
   mqttDirect: boolean;
 };
 
@@ -47,7 +45,7 @@ const iconPaths: Record<string, string> = {
   gateway: mdiLanConnect, beacon: mdiBroadcast, tracker: mdiCrosshairsGps, sensor: mdiMotionSensor,
   camera: mdiCamera, gps: mdiCrosshairsGps, meter: mdiSpeedometer, pump: mdiWaterPump,
   valve: mdiPipeValve, switch: mdiElectricSwitch, battery: mdiBattery, alarm: mdiBellAlert,
-  __wifi: mdiWifi,
+  __gatewayStatus: mdiWifi,
 };
 const canvasPaths = new Map<string, Path2D>();
 
@@ -112,7 +110,7 @@ export default function TopologyCanvas({
     }
     context.beginPath();
     context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fillStyle = node.color;
+    context.fillStyle = node.online ? "#16a085" : "#8b9f9c";
     context.fill();
     context.lineWidth = 1.2 / scale;
     context.strokeStyle = "#ffffff";
@@ -120,7 +118,7 @@ export default function TopologyCanvas({
 
     const annotationRadius = Math.max(1.7, radius * .29);
     const annotations = [
-      { x: node.mqttDirect ? x - radius * .45 : x, icon: "__wifi", active: node.wifiOnline, color: "#247cbd" },
+      { x: node.mqttDirect ? x - radius * .45 : x, icon: "__gatewayStatus", active: node.gatewayOnline, color: "#247cbd" },
       ...(node.mqttDirect ? [{ x: x + radius * .45, icon: "gateway", active: true, color: "#7849a8" }] : []),
     ];
     for (const annotation of annotations) {
@@ -148,14 +146,6 @@ export default function TopologyCanvas({
     context.fillStyle = "#ffffff";
     context.fill(pathForIcon(node.icon));
     context.restore();
-
-    context.beginPath();
-    context.arc(x + radius * .72, y - radius * .72, Math.max(1.15, radius * .22), 0, Math.PI * 2);
-    context.fillStyle = node.online ? "#16a085" : "#8b9f9c";
-    context.fill();
-    context.lineWidth = .8 / scale;
-    context.strokeStyle = "#ffffff";
-    context.stroke();
 
     const fontSize = 9 / scale;
     context.font = `800 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
@@ -196,7 +186,7 @@ export default function TopologyCanvas({
       backgroundColor="rgba(0,0,0,0)"
       nodeCanvasObject={paintNode}
       nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 9 : 7, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
-      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"} · Internet ${node.internetOnline ? "reachable" : "unavailable"} · Wi-Fi ${node.wifiOnline ? "connected" : "no active link"}${node.mqttDirect ? " · MQTT direct" : ""}`}
+      nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"} · Gateway ${node.gatewayOnline ? "online" : "offline"}${node.mqttDirect ? " · MQTT direct" : ""}`}
       linkColor={(link) => signalColor(link.rssi)}
       linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
       linkDirectionalArrowLength={4}
