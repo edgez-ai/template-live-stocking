@@ -8,6 +8,72 @@ provisioning-specific responsibility.
 [![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-live-stocking&template_owner=edgez-ai)
 [![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-live-stocking)
 
+## Product tour
+
+Live Stocking gives operators a shared view of livestock trackers from the web
+and an Android companion for field work, provisioning, and maintenance.
+
+### Monitor device telemetry
+
+The web portal lists every device in the selected farm, shows whether it is
+online, identifies the gateway carrying its telemetry, and highlights its latest
+sensor reading. Operators can select a 30-minute, 1-hour, 6-hour, or 24-hour
+history window to inspect battery voltage and other numeric sensor fields.
+
+![Web portal showing a provisioned device, its battery voltage, telemetry route, and sensor history](docs/screenshots/web-device-telemetry.png)
+
+### Inspect the HaLow mesh
+
+The interactive topology view turns recent gateway reports into a live network
+graph. Summary cards show visible and online devices, gateways, active links,
+and average signal strength. Link colors make excellent, good, and weak RSSI
+paths easy to compare, while selecting a node reveals its identity, gateway
+state, HaLow MAC address, and direct RF links.
+
+![Web portal showing the live Wi-Fi HaLow network topology and RSSI-labelled links](docs/screenshots/web-network-topology.png)
+
+### Operate in the field
+
+The Android app centers field work on an offline-capable map. It plots devices
+using their latest reported coordinates, overlays configured farm areas, and
+keeps key farm, device, telemetry, area, and rule data available when the
+network is unavailable.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-farm-map.jpg" width="360" alt="Android farm map showing livestock device markers and a configured farm area">
+</p>
+
+Each device has a detailed operational view. It shows the current telemetry
+route and gateway availability, lets the operator choose the animal icon and
+marker color used on the map, and presents the latest battery voltage together
+with selectable history ranges.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-device-details.jpg" width="360" alt="Android device details showing telemetry route, map appearance, battery voltage, and history controls">
+</p>
+
+### Manage farms and access
+
+Farm settings bring the operational boundary into one place. Owners can manage
+farm details, team membership, geofence areas, and rules. Team members receive
+access to the farm and the device readings permitted through its Appwrite team.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-farm-settings.jpg" width="360" alt="Android farm settings showing farm details and team management">
+</p>
+
+### Flash supported hardware from Android
+
+The USB-C firmware workflow lets an authorized operator select the exact board
+profile and flash a release image through the connected Android phone. The
+organization runtime downloads the matching asset from the deployment's latest
+GitHub release, verifies it, and performs the board-specific flashing flow; the
+phone carries the control and USB traffic.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-flash-hardware.jpg" width="360" alt="Android USB-C firmware workflow with supported hardware profiles and flash timeout settings">
+</p>
+
 ## Limitations
 
 This template is intentionally a simple demonstration rather than a
