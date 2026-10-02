@@ -24,7 +24,9 @@ export function installDatabase() {
   }
   ensure("farms.halowChannel column",
     ["tables-db", "get-column", ...farms, "--key", "halowChannel"],
-    ["tables-db", "create-integer-column", ...farms, "--key", "halowChannel", "--min", "1", "--max", "255", "--required", "true"]);
+    ["tables-db", "create-integer-column", ...farms, "--key", "halowChannel", "--min", "0", "--max", "255", "--required", "true"]);
+  // Reconcile existing farms too: channel 0 means automatic selection.
+  run(["tables-db", "update-integer-column", ...farms, "--key", "halowChannel", "--min", "0", "--max", "255", "--required", "true"]);
   ensure("farms.meshPassphrase column",
     ["tables-db", "get-column", ...farms, "--key", "meshPassphrase"],
     ["tables-db", "create-string-column", ...farms, "--key", "meshPassphrase", "--size", "63", "--required", "true", "--encrypt", "true"]);

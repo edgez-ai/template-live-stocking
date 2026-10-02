@@ -53,7 +53,7 @@
         { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
         { "key": "country", "type": "varchar", "size": 2, "required": true, "array": false },
         { "key": "location", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "halowChannel", "type": "integer", "required": true, "array": false },
+        { "key": "halowChannel", "type": "integer", "min": 0, "max": 255, "required": true, "array": false },
         { "key": "meshId", "type": "varchar", "size": 32, "required": true, "array": false },
         { "key": "meshPassphrase", "type": "varchar", "size": 63, "required": true, "array": false, "encrypt": true },
         { "key": "teamId", "type": "varchar", "size": 36, "required": true, "array": false },
