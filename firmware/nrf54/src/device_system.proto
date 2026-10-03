@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package edgez.devices.v1;
+
+message SystemStatusBatch {
+  repeated SystemStatus reports = 1;
+}
+
+message SystemStatus {
+  string client_id = 1;
+  DeviceStatus status = 2;
+  bytes halow_mac = 3;
+  string firmware_version = 4;
+  Topology topology = 5;
+  HalowRf halow_rf = 6;
+  GatewayStatus gateway_status = 7;
+  optional bool wifi_enabled = 8;
+}
+
+enum DeviceStatus {
+  DEVICE_STATUS_UNSPECIFIED = 0;
+  DEVICE_STATUS_ONLINE = 1;
+  DEVICE_STATUS_OFFLINE = 2;
+}
+
+enum GatewayStatus {
+  GATEWAY_STATUS_UNSPECIFIED = 0;
+  GATEWAY_STATUS_ONLINE = 1;
+  GATEWAY_STATUS_OFFLINE = 2;
+  GATEWAY_STATUS_DISABLED = 3;
+}
+
+message Topology {
+  repeated TopologyLink links = 1;
+}
+
+message TopologyLink {
+  bytes peer_halow_mac = 1;
+  uint32 age_ms = 2;
+  optional sint32 rssi = 3;
+}
+
+message HalowRf {
+  uint32 version = 1;
+  uint64 observed_at = 2;
+  bool radio_enabled = 3;
+  bool available = 4;
+  optional uint32 channel = 5;
+  optional uint32 frequency = 6;
+  optional uint32 bandwidth_mhz = 7;
+  optional sint32 signal_dbm = 8;
+  optional sint32 noise_dbm = 9;
+  optional uint32 quality = 10;
+  optional uint32 quality_max = 11;
+  HalowRfLinks links = 12;
+}
+
+message HalowRfLinks {
+  optional uint32 peer_count = 1;
+  optional sint32 average_signal_dbm = 2;
+  optional sint32 minimum_signal_dbm = 3;
+  optional uint64 rx_packets = 4;
+  optional uint64 tx_packets = 5;
+  optional uint64 tx_retries = 6;
+  optional uint64 tx_failed = 7;
+}
+
+message SystemCommand {
+  CommandHeader header = 1;
+  oneof command {
+    OtaCommand ota = 10;
+  }
+}
+
+message CommandHeader {
+  uint32 version = 1;
+  string request_id = 2;
+}
+
+message OtaCommand {
+  string url = 1;
+}

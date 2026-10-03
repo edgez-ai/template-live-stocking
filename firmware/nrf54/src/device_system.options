@@ -1,0 +1,8 @@
+edgez.devices.v1.SystemStatusBatch.reports max_count:16
+edgez.devices.v1.SystemStatus.client_id max_size:128
+edgez.devices.v1.SystemStatus.halow_mac max_size:6
+edgez.devices.v1.SystemStatus.firmware_version max_size:128
+edgez.devices.v1.Topology.links max_count:16
+edgez.devices.v1.TopologyLink.peer_halow_mac max_size:6
+edgez.devices.v1.OtaCommand.url max_size:512
+edgez.devices.v1.CommandHeader.request_id max_size:64

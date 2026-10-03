@@ -14,7 +14,9 @@ import * as Location from "expo-location";
 import { centerChannelForCountry, channelsForCountry, halowCountries } from "./halowChannels";
 type ProvisioningDevice = EdgezProvisioningDevice;
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; icon?: EdgezMapIcon; markerColor?: MapMarkerColor; latitude?: number; longitude?: number; [key: string]: unknown }; latitude?: number; longitude?: number };
+import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "./device-status";
+
+type Device = Omit<DeviceSystemState, "markerType" | "markerColor"> & { markerType?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; [key: string]: unknown }; latitude?: number; longitude?: number };
 type Farm = Models.Row & { name: string; country: string; location: string; halowChannel: number; meshId: string; meshPassphrase: string; teamId: string; ownerId: string };
 type CurrentUser = Pick<Models.User<Models.Preferences>, "$id" | "email" | "prefs"> & { name?: string };
 type CachedFarm = Pick<Farm, "$id" | "name" | "country" | "location" | "halowChannel" | "meshId" | "teamId" | "ownerId">;
@@ -23,7 +25,6 @@ type FarmDetails = { name: string; country: string; location: string; halowChann
 type Credential = { clientId: string; username: string; password: string };
 type PreparedProvisioning = { device: Device; credential: Credential };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: EdgezMapIcon | null; markerColor?: MapMarkerColor | null; receivedAt: string };
-type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type GeofenceShape = "circle" | "oval" | "rectangle" | "polygon";
 type GeofenceArea = Models.Row & { farmId: string; name: string; shape: GeofenceShape; geometry: string };
@@ -32,7 +33,7 @@ type GeofenceAlarm = Models.Row & { farmId: string; areaId: string; ruleId: stri
 type CachedTelemetry = Pick<Telemetry, "$id" | "deviceId" | "gatewayDeviceId" | "halowMac" | "serial" | "channel" | "topic" | "payload" | "location" | "icon" | "markerColor" | "receivedAt">;
 type CachedGeofenceArea = Pick<GeofenceArea, "$id" | "farmId" | "name" | "shape" | "geometry">;
 type CachedGeofenceRule = Pick<GeofenceRule, "$id" | "farmId" | "name" | "areaId" | "deviceIds" | "enterAlert" | "exitAlert">;
-type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; topologyTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
+type AppConfig = { appwriteEndpoint: string; appwriteProjectId: string; appwritePlatform: string; teamInviteUrl?: string; otaRepositoryUrl?: string; otaProxyUrl?: string; bundleRuntimeVersion?: string; databaseId: string; telemetryTableId: string; otaUpdateTableId: string; farmTableId: string; geofenceAreaTableId: string; geofenceRuleTableId: string; geofenceAlarmTableId: string };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type DashboardView = "map" | "list";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -120,7 +121,7 @@ function savedAreaColor(area: GeofenceArea): string {
 }
 
 function colorForDevice(device: Device): MapMarkerColor {
-  const saved = device.metadata?.markerColor;
+  const saved = device.markerColor;
   return mapMarkerColors.some(({ key }) => key === saved) ? saved as MapMarkerColor : device.enabled ? "blue" : "gray";
 }
 
@@ -268,17 +269,15 @@ function telemetryCoordinates(row?: Telemetry) {
 
 function deviceMapNodes(devices: Device[], telemetry: Telemetry[]): EdgezMapNode[] {
   return devices.flatMap((device) => {
-    const coordinates = telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
-    return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.metadata?.icon }] : [];
+    const coordinates = device.location
+      ? { longitude: device.location[0], latitude: device.location[1] }
+      : telemetry.map((row) => row.deviceId === device.$id ? telemetryCoordinates(row) : null).find(Boolean);
+    return coordinates ? [{ id: device.$id, label: device.name, ...coordinates, marker: colorForDevice(device), icon: device.markerType || undefined }] : [];
   });
 }
 
-function firmwareVersionOf(row?: Telemetry) {
-  if (!row) return "";
-  try {
-    const value = (JSON.parse(row.payload) as { firmwareVersion?: unknown }).firmwareVersion;
-    return typeof value === "string" ? value : "";
-  } catch { return ""; }
+function firmwareVersionOf(device?: Device | null) {
+  return device?.firmwareVersion || "";
 }
 
 function sameFirmwareVersion(running: string, latest: string) {
@@ -424,8 +423,8 @@ async function readCachedSnapshot(userId?: string) {
 async function cacheSnapshot(user: CurrentUser, farms: Farm[], areas: GeofenceArea[], rules: GeofenceRule[], devices: Device[], telemetry: Telemetry[]) {
   const safeFarms: CachedFarm[] = farms.map(({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }) =>
     ({ $id, name, country, location, halowChannel, meshId, teamId, ownerId }));
-  const safeDevices: Device[] = devices.map(({ $id, serial, name, status, enabled, metadata }) =>
-    ({ $id, serial, name, status, enabled, metadata: { farmId: metadata?.farmId, icon: metadata?.icon, markerColor: metadata?.markerColor, firmwareTarget: metadata?.firmwareTarget, mqttGateway: metadata?.mqttGateway, upstreamConnection: metadata?.upstreamConnection } }));
+  const safeDevices: Device[] = devices.map(({ metadata, ...device }) =>
+    ({ ...device, metadata: { farmId: metadata?.farmId, firmwareTarget: metadata?.firmwareTarget, mqttGateway: metadata?.mqttGateway, upstreamConnection: metadata?.upstreamConnection } }));
   const safeAreas: CachedGeofenceArea[] = areas.map(({ $id, farmId, name, shape, geometry }) =>
     ({ $id, farmId, name, shape, geometry }));
   const safeRules: CachedGeofenceRule[] = rules.map(({ $id, farmId, name, areaId, deviceIds, enterAlert, exitAlert }) =>
@@ -465,22 +464,18 @@ function temperatureOf(row: Telemetry) {
   catch { return null; }
 }
 
-function statusOf(device: Device, latest?: Telemetry) {
+function statusOf(device: Device, _latest?: Telemetry) {
   if (!device.enabled) return "Disabled";
-  if (!latest) return "No data";
-  return Date.now() - new Date(latest.receivedAt).getTime() <= 2 * 60 * 1000 ? "Online" : "Offline";
+  if (!device.lastSeenAt) return "No data";
+  return device.status === "online" ? "Online" : "Offline";
 }
 
-function gatewayStatusOf(row?: Telemetry) {
-  if (!row) return "unknown";
-  try {
-    const value = (JSON.parse(row.payload) as { gateway_status?: unknown }).gateway_status;
-    return value === "online" || value === "offline" || value === "disabled" ? value : "unknown";
-  } catch { return "unknown"; }
+function gatewayStatusOf(device?: Device | null) {
+  return device?.gatewayStatus || "unknown";
 }
 
 function isGatewayDevice(device: Device, latest?: Telemetry) {
-  const gatewayStatus = gatewayStatusOf(latest);
+  const gatewayStatus = gatewayStatusOf(device);
   return device.metadata?.mqttGateway === true || gatewayStatus === "online" || gatewayStatus === "offline";
 }
 
@@ -493,14 +488,6 @@ function relativeTime(value: string) {
 
 function isRecentTopology(link: TopologyLink) {
   return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
-}
-
-function mqttGatewayFor(device: Device, devices: Device[], topology: TopologyLink[]) {
-  if (device.metadata?.mqttGateway === true || topology.some((link) => isRecentTopology(link) && link.gatewayDeviceId === device.$id)) return undefined;
-  const link = topology.find((candidate) => isRecentTopology(candidate) && candidate.peerDeviceId === device.$id);
-  if (link) return link.gatewayDeviceId;
-  const farmId = device.metadata?.farmId;
-  return devices.find((candidate) => candidate.metadata?.mqttGateway === true && candidate.metadata?.farmId === farmId)?.$id;
 }
 
 function SensorChart({ series, duration }: { series: SensorSeries[]; duration: number }) {
@@ -996,16 +983,15 @@ export default function App() {
   const refresh = useCallback((current: CurrentUser): Promise<Farm[]> => {
     if (refreshInFlight.current && refreshUserId.current === current.$id) return refreshInFlight.current;
     const request = (async () => {
-      const [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, topologyResult, otaResult] = await Promise.allSettled([
+      const [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, otaResult] = await Promise.allSettled([
         tables.listRows<Farm>({ databaseId: config.databaseId, tableId: config.farmTableId, queries: [Query.limit(100)] }),
         tables.listRows<GeofenceArea>({ databaseId: config.databaseId, tableId: config.geofenceAreaTableId, queries: [Query.limit(500)] }),
         tables.listRows<GeofenceRule>({ databaseId: config.databaseId, tableId: config.geofenceRuleTableId, queries: [Query.limit(500)] }),
-        deviceApi<{ devices: Device[] }>(),
+        deviceApi<{ devices: Device[] }>("?includeTopology=true"),
         tables.listRows({ databaseId: config.databaseId, tableId: config.telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
-        tables.listRows({ databaseId: config.databaseId, tableId: config.topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
         tables.listRows({ databaseId: config.databaseId, tableId: config.otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
       ]);
-      const failures = [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, topologyResult, otaResult]
+      const failures = [farmResult, areaResult, ruleResult, deviceResult, telemetryResult, otaResult]
         .filter((result): result is PromiseRejectedResult => result.status === "rejected");
       const authFailure = failures.find((failure) => isAuthError(failure.reason));
       if (authFailure) throw authFailure.reason;
@@ -1030,12 +1016,12 @@ export default function App() {
       if (deviceResult.status === "fulfilled") {
         devicesRef.current = deviceResult.value.devices;
         setDevices(devicesRef.current);
+        setTopology(topologyFromDevices(devicesRef.current));
       }
       if (telemetryResult.status === "fulfilled") {
         telemetryRef.current = telemetryResult.value.rows as unknown as Telemetry[];
         setTelemetry(telemetryRef.current);
       }
-      if (topologyResult.status === "fulfilled") setTopology(topologyResult.value.rows as unknown as TopologyLink[]);
       if (otaResult.status === "fulfilled") setOtaUpdates(otaResult.value.rows as unknown as OtaUpdate[]);
       await cacheCurrentSnapshot(current);
       if (failures.length) {
@@ -1275,7 +1261,7 @@ export default function App() {
     setSelectedBleDevice(device);
     setPreparedProvisioning(null);
     const existing = devices.find((item) => item.serial === device.serial);
-    setDeviceIcon(existing?.metadata?.icon || device.category);
+    setDeviceIcon(existing?.markerType || device.category);
     setDeviceColor(existing ? colorForDevice(existing) : "blue");
     const previousLocation = telemetry.filter((row) => row.deviceId === existing?.$id)
       .map(telemetryCoordinates).find((coordinates) => coordinates !== null) ?? null;
@@ -1307,7 +1293,8 @@ export default function App() {
         ],
         // H7608 is gateway-capable. The selected upstream mode is reported by
         // telemetry after provisioning and can refine this cached UI hint.
-        metadata: { farmId: farm.$id, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: device.firmwareTarget, mqttGateway: device.kind === "h7608" },
+        markerType: deviceIcon, markerColor: deviceColor,
+        metadata: { farmId: farm.$id, firmwareTarget: device.firmwareTarget, mqttGateway: device.kind === "h7608" },
       });
     }
     const credential = await deviceApi<Credential>(`/${encodeURIComponent(appwriteDevice.$id)}/credentials`, "POST", {});
@@ -1423,9 +1410,11 @@ export default function App() {
       const mqttGateway = upstreamConnection === "wifi" || upstreamConnection === "ethernet";
       const backend = preparedProvisioning ?? await prepareDeviceCredential(selectedBleDevice, farm);
       let appwriteDevice = backend.device;
-      if (!offline && (appwriteDevice.metadata?.icon !== deviceIcon || appwriteDevice.metadata?.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway || appwriteDevice.metadata?.upstreamConnection !== upstreamConnection)) {
+      if (!offline && (Boolean(coordinates) || appwriteDevice.location != null || appwriteDevice.markerType !== deviceIcon || appwriteDevice.markerColor !== deviceColor || !appwriteDevice.metadata?.firmwareTarget || appwriteDevice.metadata?.mqttGateway !== mqttGateway || appwriteDevice.metadata?.upstreamConnection !== upstreamConnection)) {
         appwriteDevice = await deviceApi<Device>(`/${encodeURIComponent(appwriteDevice.$id)}`, "PATCH", {
-          metadata: { ...appwriteDevice.metadata, icon: deviceIcon, markerColor: deviceColor, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway, upstreamConnection },
+          markerType: deviceIcon, markerColor: deviceColor,
+          location: coordinates ? [coordinates.longitude, coordinates.latitude] : null,
+          metadata: { ...appwriteDevice.metadata, firmwareTarget: selectedBleDevice.firmwareTarget, mqttGateway, upstreamConnection },
         });
       }
       const mqtt = backend.credential;
@@ -1475,7 +1464,7 @@ export default function App() {
     setBusy(true); setError("");
     try {
       const updated = await deviceApi<Device>(`/${encodeURIComponent(detailDevice.$id)}`, "PATCH", {
-        metadata: { ...detailDevice.metadata, icon: detailIcon, markerColor: detailColor },
+        markerType: detailIcon, markerColor: detailColor,
       });
       devicesRef.current = devicesRef.current.map((item) => item.$id === updated.$id ? updated : item);
       setDevices(devicesRef.current);
@@ -1486,7 +1475,7 @@ export default function App() {
   }
 
   function requestFirmwareUpdate(device: Device) {
-    const runningVersion = firmwareVersionOf(latestTelemetryByDevice.get(device.$id));
+    const runningVersion = firmwareVersionOf(device);
     if (sameFirmwareVersion(runningVersion, latestFirmwareVersion)) {
       Alert.alert("Firmware is up to date", `This device is already running ${latestFirmwareVersion}.`);
       return;
@@ -1501,9 +1490,8 @@ export default function App() {
         if (!otaImageUrl) { setError("This deployment does not expose a supported source repository for OTA."); return; }
         setBusy(true); setError("");
         try {
-          const gatewayDeviceId = mqttGatewayFor(device, devicesRef.current, topology);
           await deviceApi(`/${encodeURIComponent(device.$id)}/commands`, "POST", {
-            command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() }, gatewayDeviceId,
+            command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() },
           });
           Alert.alert("Update requested", "The device will download, install, and restart in the background.");
         } catch (caught) { setError(messageOf(caught)); }
@@ -1521,10 +1509,8 @@ export default function App() {
         { text: "Deploy", onPress: () => void (async () => {
           setScriptDeployingDeviceId(device.$id); setError("");
           try {
-            const gatewayDeviceId = mqttGatewayFor(device, devicesRef.current, topology);
             await deviceApi(`/${encodeURIComponent(device.$id)}/commands`, "POST", {
               command: "script",
-              gatewayDeviceId,
               payload: {
                 action: "download",
                 requestId: ID.unique(),
@@ -1749,17 +1735,17 @@ export default function App() {
   const activeHistoryDuration = activeHistoryRange.duration;
   const detailLatest = detailDevice ? latestVoltageByDevice.get(detailDevice.$id) : undefined;
   const detailLatestTelemetry = detailDevice ? latestTelemetryByDevice.get(detailDevice.$id) : undefined;
-  const detailGateway = detailLatestTelemetry?.gatewayDeviceId
-    ? devices.find((device) => device.$id === detailLatestTelemetry.gatewayDeviceId) : undefined;
+  const detailGateway = detailDevice?.gatewayDeviceId
+    ? devices.find((device) => device.$id === detailDevice?.gatewayDeviceId) : undefined;
   const detailGatewayLatest = detailGateway ? latestTelemetryByDevice.get(detailGateway.$id) : undefined;
   const detailIsGateway = detailDevice ? isGatewayDevice(detailDevice, detailLatestTelemetry) : false;
-  const detailGatewayStatus = gatewayStatusOf(detailIsGateway ? detailLatestTelemetry : detailGatewayLatest);
-  const detailGatewayAvailable = detailIsGateway || detailLatestTelemetry?.gatewayDeviceId
+  const detailGatewayStatus = gatewayStatusOf(detailIsGateway ? detailDevice : detailGateway);
+  const detailGatewayAvailable = detailIsGateway || detailDevice?.gatewayDeviceId
     ? detailGatewayStatus === "online" || (detailGatewayStatus === "unknown" && detailDevice !== null && statusOf(detailDevice, detailLatestTelemetry) === "Online")
     : null;
   const detailTemperature = detailDevice ? latestTemperatureByDevice.get(detailDevice.$id) : undefined;
   const detailStatus = detailDevice ? statusOf(detailDevice, detailLatestTelemetry) : "";
-  const detailFirmwareVersion = firmwareVersionOf(detailLatestTelemetry);
+  const detailFirmwareVersion = firmwareVersionOf(detailDevice);
   const detailTopology = detailDevice ? topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === detailDevice.$id || link.peerDeviceId === detailDevice.$id)) : [];
   const detailOtaUpdate = detailDevice ? otaUpdates.find((update) => update.deviceId === detailDevice.$id) : undefined;
   const detailOtaPending = Boolean(detailDevice && otaUpdates.some((update) => update.deviceId === detailDevice.$id && update.status === "pending"));
@@ -1810,7 +1796,7 @@ export default function App() {
       {visibleDevices.map((device) => {
         const latest = latestVoltageByDevice.get(device.$id);
         const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
-        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailIcon(device.metadata?.icon || "tracker"); setDetailColor(colorForDevice(device)); setDetailDevice(device); }}>
+        return <Pressable key={device.$id} style={styles.deviceCard} onPress={() => { setHistoryRange("1h"); setDetailIcon(device.markerType || "tracker"); setDetailColor(colorForDevice(device)); setDetailDevice(device); }}>
           <View style={styles.deviceCardHeader}><View><Text style={styles.deviceCardName}>{device.name}</Text><Text style={styles.deviceSerial}>{device.serial}</Text></View><View style={styles.statusBadge}><View style={[styles.statusDot, status === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.statusText}>{status.toUpperCase()}</Text></View></View>
           <View style={styles.latestRow}><View><Text style={styles.latestLabel}>LATEST BATTERY VOLTAGE</Text><Text style={styles.latestValue}>{latest ? `${latest.value.toFixed(2)} V` : "—"}</Text></View><Text style={styles.cardArrow}>›</Text></View>
           <Text style={styles.lastSeen}>{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for battery telemetry"}</Text>
@@ -2028,10 +2014,10 @@ export default function App() {
           <View style={styles.detailHeader}><Pressable onPress={() => setDetailDevice(null)}><Text style={styles.detailBack}>‹ DEVICES</Text></Pressable><Text style={styles.detailSerial}>{detailDevice.serial}</Text></View>
           <ScrollView contentContainerStyle={styles.detailContent}>
             <View style={styles.detailTitleRow}><View><Text style={styles.detailEyebrow}>DEVICE</Text><Text style={styles.detailTitle}>{detailDevice.name}</Text></View><View style={styles.detailStatus}><View style={[styles.statusDot, detailStatus === "Online" ? styles.statusOnline : styles.statusOffline]} /><Text style={styles.detailStatusText}>{detailStatus.toUpperCase()}</Text></View></View>
-            <View style={styles.telemetryRoute}><Text style={styles.telemetryRouteLabel}>TELEMETRY ROUTE</Text><Text style={styles.telemetryRouteValue}>{!detailLatestTelemetry ? "Waiting for telemetry" : detailLatestTelemetry.gatewayDeviceId ? `Via ${detailGateway?.name || detailGateway?.serial || detailLatestTelemetry.gatewayDeviceId}` : "Direct MQTT"}</Text>{detailGateway ? <Text style={styles.telemetryRouteSerial}>{detailGateway.serial}</Text> : null}</View>
+            <View style={styles.telemetryRoute}><Text style={styles.telemetryRouteLabel}>TELEMETRY ROUTE</Text><Text style={styles.telemetryRouteValue}>{!detailLatestTelemetry ? "Waiting for telemetry" : detailDevice?.gatewayDeviceId ? `Via ${detailGateway?.name || detailGateway?.serial || detailDevice?.gatewayDeviceId}` : "Direct MQTT"}</Text>{detailGateway ? <Text style={styles.telemetryRouteSerial}>{detailGateway.serial}</Text> : null}</View>
             <View style={styles.gatewaySummary}><View style={styles.gatewaySummaryItem}><Text style={styles.gatewaySummaryLabel}>DEVICE ROLE</Text><Text style={styles.gatewaySummaryValue}>{detailIsGateway ? "Gateway" : "Leaf device"}</Text></View><View style={styles.gatewaySummaryItem}><Text style={styles.gatewaySummaryLabel}>GATEWAY AVAILABLE</Text><Text style={[styles.gatewaySummaryValue, detailGatewayAvailable === true ? styles.gatewayAvailable : detailGatewayAvailable === false ? styles.gatewayUnavailable : styles.gatewayUnknown]}>{detailGatewayAvailable === true ? "Available" : detailGatewayAvailable === false ? "Unavailable" : "Not configured"}</Text></View></View>
             <MapAppearancePicker icon={detailIcon} color={detailColor} onIconChange={setDetailIcon} onColorChange={setDetailColor} />
-            <Pressable style={[styles.primary, (offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))) && styles.disabledButton]} onPress={() => void saveDeviceAppearance()} disabled={offline || busy || (detailIcon === detailDevice.metadata?.icon && detailColor === colorForDevice(detailDevice))}><Text style={styles.primaryText}>SAVE MAP APPEARANCE</Text></Pressable>
+            <Pressable style={[styles.primary, (offline || busy || (detailIcon === detailDevice.markerType && detailColor === colorForDevice(detailDevice))) && styles.disabledButton]} onPress={() => void saveDeviceAppearance()} disabled={offline || busy || (detailIcon === detailDevice.markerType && detailColor === colorForDevice(detailDevice))}><Text style={styles.primaryText}>SAVE MAP APPEARANCE</Text></Pressable>
             {error ? <Text style={styles.dialogError}>{error}</Text> : null}
             <View style={styles.detailLatest}><Text style={styles.detailMetricLabel}>BATTERY VOLTAGE</Text><Text style={styles.detailMetricValue}>{detailLatest ? `${detailLatest.value.toFixed(2)} V` : "—"}</Text><Text style={styles.detailMetricTime}>{detailLatest ? `Updated ${relativeTime(detailLatest.row.receivedAt)}` : "No readings received"}</Text></View>
             <Text style={styles.rangeTitle}>HISTORY RANGE</Text>

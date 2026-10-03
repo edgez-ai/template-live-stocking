@@ -10,11 +10,14 @@ import type { CanvasLink, CanvasNode } from "./TopologyCanvas";
 
 const TopologyCanvas = dynamic(() => import("./TopologyCanvas"), { ssr: false });
 
-type Device = {
+import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../../lib/device-status";
+
+type Device = DeviceSystemState & {
   $id: string;
   serial: string;
   name: string;
   enabled: boolean;
+  status: string;
   metadata?: { farmId?: string; mqttGateway?: boolean; upstreamConnection?: string; icon?: string; markerColor?: string; [key: string]: unknown };
 };
 type Farm = Models.Row & { name: string };
@@ -26,18 +29,6 @@ type Telemetry = Models.Row & {
   markerColor?: string | null;
   receivedAt: string;
   payload: string;
-};
-type TopologyLink = Models.Row & {
-  farmId: string;
-  gatewayDeviceId: string;
-  gatewaySerial: string;
-  peerDeviceId: string;
-  peerSerial: string;
-  peerRadioMac: string;
-  rssi?: number | null;
-  active: boolean;
-  lastSeenAt: string;
-  reportedAt: string;
 };
 type GraphEntity = {
   id: string;
@@ -65,7 +56,6 @@ const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const farmTableId = "farms";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
-const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const topologyRecentMs = 2 * 60 * 1000;
 const mapMarkerColors: Record<string, string> = {
   red: "#E51B23", pink: "#FF4182", purple: "#9B24B2", deep_purple: "#6639BF",
@@ -75,7 +65,7 @@ const mapMarkerColors: Record<string, string> = {
 };
 
 function deviceColor(device: Device, latest?: Telemetry) {
-  const saved = device.metadata?.markerColor || latest?.markerColor || "";
+  const saved = device.markerColor || latest?.markerColor || "";
   return mapMarkerColors[saved] || (device.enabled ? mapMarkerColors.blue : mapMarkerColors.gray);
 }
 function errorMessage(error: unknown) {
@@ -90,14 +80,9 @@ function relativeTime(value: string) {
   return `${Math.floor(seconds / 3600)}h ago`;
 }
 
-function payloadGatewayStatus(row?: Telemetry) {
-  if (!row) return null;
-  try {
-    const value = (JSON.parse(row.payload) as { gateway_status?: unknown }).gateway_status;
-    return value === "online" || value === "offline" ? value : null;
-  } catch {
-    return null;
-  }
+function payloadGatewayStatus(device?: Device) {
+  const status = device?.gatewayStatus;
+  return status === "online" || status === "offline" ? status : null;
 }
 
 function signalLabel(rssi?: number | null) {
@@ -109,7 +94,7 @@ function signalLabel(rssi?: number | null) {
 
 async function listDevices() {
   const jwt = await account.createJWT();
-  const response = await fetch(`${endpoint}/devices`, {
+  const response = await fetch(`${endpoint}/devices?includeTopology=true`, {
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
   });
   const payload = await response.json() as { devices?: Device[]; message?: string };
@@ -134,16 +119,15 @@ export default function TopologyPage() {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const [nextDevices, farmRows, telemetryRows, topologyRows] = await Promise.all([
+      const [nextDevices, farmRows, telemetryRows] = await Promise.all([
         listDevices(),
         tables.listRows<Farm>({ databaseId, tableId: farmTableId, queries: [Query.limit(100)] }),
         tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
-        tables.listRows({ databaseId, tableId: topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
       ]);
       setDevices(nextDevices);
       setFarms([...farmRows.rows].sort((left, right) => left.name.localeCompare(right.name)));
       setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
-      setLinks(topologyRows.rows as unknown as TopologyLink[]);
+      setLinks(topologyFromDevices(nextDevices));
       setUpdatedAt(new Date().toISOString());
       setError("");
     } finally {
@@ -196,32 +180,32 @@ export default function TopologyPage() {
   const graph = useMemo(() => {
     const farmLinks = links.filter((link) => link.farmId === farmId);
     const farmDevices = devices.filter((device) => device.metadata?.farmId === farmId);
-    const gatewayIds = new Set(farmLinks.map((link) => link.gatewayDeviceId));
+    const gatewayIds = new Set<string>();
     for (const device of farmDevices) {
-      const status = payloadGatewayStatus(latestByDevice.get(device.$id));
+      const status = payloadGatewayStatus(device);
       if (device.metadata?.mqttGateway === true || status === "online" || status === "offline") gatewayIds.add(device.$id);
     }
 
     const entities = new Map<string, GraphEntity>();
     for (const device of farmDevices) {
       const latest = latestByDevice.get(device.$id);
-      const online = Boolean(device.enabled && latest && Date.now() - new Date(latest.receivedAt).getTime() <= topologyRecentMs);
-      const mqttDirect = Boolean(latest && !latest.gatewayDeviceId);
-      const linkedGatewayId = latest?.gatewayDeviceId || farmLinks.find((link) => link.peerDeviceId === device.$id)?.gatewayDeviceId || "";
+      const online = Boolean(device.enabled && device.status === "online");
+      const mqttDirect = Boolean(device.reportedAt && !device.gatewayDeviceId);
+      const linkedGatewayId = device.gatewayDeviceId || "";
       const gatewayStatus = gatewayIds.has(device.$id)
-        ? payloadGatewayStatus(latest)
-        : payloadGatewayStatus(latestByDevice.get(linkedGatewayId));
+        ? payloadGatewayStatus(device)
+        : payloadGatewayStatus(devices.find((device) => device.$id === linkedGatewayId));
       entities.set(device.$id, {
         id: device.$id,
         name: device.name,
         serial: device.serial,
         farmId: device.metadata?.farmId || "",
-        halowMac: latest?.halowMac || "",
+        halowMac: device.halowMac || "",
         kind: gatewayIds.has(device.$id) ? "gateway" : "device",
         online,
-        lastSeenAt: latest?.receivedAt || "",
+        lastSeenAt: device.lastSeenAt || "",
         gatewayDeviceId: linkedGatewayId,
-        icon: device.metadata?.icon || latest?.icon || "tracker",
+        icon: device.markerType || latest?.icon || "tracker",
         color: deviceColor(device, latest),
         gatewayStatus,
         mqttDirect,
@@ -232,13 +216,13 @@ export default function TopologyPage() {
         id: link.gatewayDeviceId, name: link.gatewaySerial, serial: link.gatewaySerial, farmId: link.farmId,
         halowMac: "", kind: "gateway", online: true, lastSeenAt: link.reportedAt, gatewayDeviceId: "",
         icon: "gateway", color: mapMarkerColors.blue_gray,
-        gatewayStatus: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)), mqttDirect: false,
+        gatewayStatus: payloadGatewayStatus(devices.find((device) => device.$id === link.gatewayDeviceId)), mqttDirect: false,
       });
       if (!entities.has(link.peerDeviceId)) entities.set(link.peerDeviceId, {
         id: link.peerDeviceId, name: link.peerSerial, serial: link.peerSerial, farmId: link.farmId,
         halowMac: link.peerRadioMac, kind: "unresolved", online: true, lastSeenAt: link.lastSeenAt, gatewayDeviceId: link.gatewayDeviceId,
         icon: "beacon", color: mapMarkerColors.blue_gray,
-        gatewayStatus: payloadGatewayStatus(latestByDevice.get(link.gatewayDeviceId)), mqttDirect: false,
+        gatewayStatus: payloadGatewayStatus(devices.find((device) => device.$id === link.gatewayDeviceId)), mqttDirect: false,
       });
     }
 

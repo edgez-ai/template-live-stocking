@@ -1,8 +1,10 @@
 idf_component_register(
   SRCS "sensor_script.cpp" "main.cpp" "halow_network.cpp" "mqtt_l2_relay.cpp"
        "../nrf54/src/usb_control.pb.c"
+       "../nrf54/src/device_system.pb.c"
        "../nrf54/src/nanopb/pb_common.c"
        "../nrf54/src/nanopb/pb_decode.c"
+       "../nrf54/src/nanopb/pb_encode.c"
   INCLUDE_DIRS "." "../nrf54/src" "../nrf54/src/nanopb"
   REQUIRES bt cjson driver lua mqtt morse_halow network_provisioning nvs_flash esp_event esp_netif esp_system mbedtls esp_adc esp_https_ota
 )

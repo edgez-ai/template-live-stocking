@@ -5,10 +5,11 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import FarmSelector, { preferredFarmId, selectedFarmStorageKey } from "./FarmSelector";
 
-type Device = { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; firmwareTarget?: string; [key: string]: unknown } };
+import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../lib/device-status";
+
+type Device = DeviceSystemState & { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { farmId?: string; firmwareTarget?: string; [key: string]: unknown } };
 type Farm = Models.Row & { name: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
-type TopologyLink = Models.Row & { farmId: string; gatewayDeviceId: string; gatewaySerial: string; peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null; active: boolean; lastSeenAt: string; reportedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type SensorPoint = { timestamp: number; value: number };
@@ -28,7 +29,6 @@ const tables = new TablesDB(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const farmTableId = "farms";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
-const topologyTableId = process.env.NEXT_PUBLIC_TOPOLOGY_TABLE_ID!;
 const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
@@ -153,12 +153,8 @@ function temperatureOf(row: Telemetry) {
   } catch { return null; }
 }
 
-function firmwareVersionOf(row?: Telemetry) {
-  if (!row) return "";
-  try {
-    const value = (JSON.parse(row.payload) as { firmwareVersion?: unknown }).firmwareVersion;
-    return typeof value === "string" ? value : "";
-  } catch { return ""; }
+function firmwareVersionOf(device?: Device | null) {
+  return device?.firmwareVersion || "";
 }
 
 function sameFirmwareVersion(running: string, latest: string) {
@@ -166,22 +162,18 @@ function sameFirmwareVersion(running: string, latest: string) {
   return Boolean(running && latest) && normalize(running) === normalize(latest);
 }
 
-function statusOf(device: Device, latest?: Telemetry) {
+function statusOf(device: Device, _latest?: Telemetry) {
   if (!device.enabled) return "Disabled";
-  if (!latest) return "No data";
-  return Date.now() - new Date(latest.receivedAt).getTime() <= 2 * 60 * 1000 ? "Online" : "Offline";
+  if (!device.lastSeenAt) return "No data";
+  return device.status === "online" ? "Online" : "Offline";
 }
 
-function gatewayStatusOf(row?: Telemetry) {
-  if (!row) return "unknown";
-  try {
-    const value = (JSON.parse(row.payload) as { gateway_status?: unknown }).gateway_status;
-    return value === "online" || value === "offline" || value === "disabled" ? value : "unknown";
-  } catch { return "unknown"; }
+function gatewayStatusOf(device?: Device | null) {
+  return device?.gatewayStatus || "unknown";
 }
 
 function isGatewayDevice(device: Device, latest?: Telemetry) {
-  const gatewayStatus = gatewayStatusOf(latest);
+  const gatewayStatus = gatewayStatusOf(device);
   return device.metadata?.mqttGateway === true || gatewayStatus === "online" || gatewayStatus === "offline";
 }
 
@@ -194,14 +186,6 @@ function relativeTime(value: string) {
 
 function isRecentTopology(link: TopologyLink) {
   return link.active && Date.now() - new Date(link.reportedAt).getTime() <= topologyRecentMs;
-}
-
-function mqttGatewayFor(device: Device, devices: Device[], topology: TopologyLink[]) {
-  if (device.metadata?.mqttGateway === true || topology.some((link) => isRecentTopology(link) && link.gatewayDeviceId === device.$id)) return undefined;
-  const link = topology.find((candidate) => isRecentTopology(candidate) && candidate.peerDeviceId === device.$id);
-  if (link) return link.gatewayDeviceId;
-  const farmId = device.metadata?.farmId;
-  return devices.find((candidate) => candidate.metadata?.mqttGateway === true && candidate.metadata?.farmId === farmId)?.$id;
 }
 
 function prettyPayload(payload: string) {
@@ -274,7 +258,7 @@ function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[
 
 async function listDevices<T>() {
   const jwt = await account.createJWT();
-  const response = await fetch(`${endpoint}/devices`, {
+  const response = await fetch(`${endpoint}/devices?includeTopology=true`, {
     headers: {
       "content-type": "application/json",
       "x-appwrite-project": projectId,
@@ -302,13 +286,13 @@ async function deleteDevice(deviceId: string) {
   }
 }
 
-async function sendOtaCommand(deviceId: string, gatewayDeviceId?: string) {
+async function sendOtaCommand(deviceId: string) {
   if (!otaImageUrl) throw new Error("This deployment does not expose a supported source repository for OTA.");
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
-    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() }, gatewayDeviceId }),
+    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() } }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { message?: string };
@@ -316,14 +300,13 @@ async function sendOtaCommand(deviceId: string, gatewayDeviceId?: string) {
   }
 }
 
-async function sendRandomTemperatureScript(deviceId: string, requestId: string, gatewayDeviceId?: string) {
+async function sendRandomTemperatureScript(deviceId: string, requestId: string) {
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
     body: JSON.stringify({
       command: "script",
-      gatewayDeviceId,
       payload: {
         action: "download",
         requestId,
@@ -367,17 +350,16 @@ export default function Home() {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, farmRows, telemetryRows, topologyRows, otaRows] = await Promise.all([
+    const [deviceResult, farmRows, telemetryRows, otaRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
       tables.listRows<Farm>({ databaseId, tableId: farmTableId, queries: [Query.limit(100)] }),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
-      tables.listRows({ databaseId, tableId: topologyTableId, queries: [Query.equal("active", true), Query.greaterThanEqual("reportedAt", new Date(Date.now() - topologyRecentMs).toISOString()), Query.orderDesc("reportedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
     ]);
     setDevices(deviceResult.devices);
     setFarms([...farmRows.rows].sort((left, right) => left.name.localeCompare(right.name)));
     setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
-    setTopology(topologyRows.rows as unknown as TopologyLink[]);
+    setTopology(topologyFromDevices(deviceResult.devices));
     setOtaUpdates(otaRows.rows as unknown as OtaUpdate[]);
   }, []);
 
@@ -486,7 +468,7 @@ export default function Home() {
     if (!window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
     setOtaDeviceId(selectedDevice.$id); setOtaMessage(""); setError("");
     try {
-      await sendOtaCommand(selectedDevice.$id, mqttGatewayFor(selectedDevice, devices, topology));
+      await sendOtaCommand(selectedDevice.$id);
       setOtaMessage("Update requested. The device will download, install, and restart in the background.");
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setOtaDeviceId(""); }
@@ -497,7 +479,7 @@ export default function Home() {
     if (!window.confirm(`Replace the active sensor script on ${selectedDevice.name} with the random temperature sample?`)) return;
     setScriptDeviceId(selectedDevice.$id); setScriptMessage(""); setError("");
     try {
-      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique(), mqttGatewayFor(selectedDevice, devices, topology));
+      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique());
       setScriptMessage(`Command sent. The first random temperature reading should arrive now, then every ${randomTemperatureIntervalSeconds} seconds.`);
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setScriptDeviceId(""); }
@@ -528,18 +510,18 @@ export default function Home() {
   }, [telemetry]);
   const selectedDevice = farmDevices.find((device) => device.$id === selectedDeviceId);
   const selectedLatestTelemetry = selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined;
-  const selectedGateway = selectedLatestTelemetry?.gatewayDeviceId
-    ? devices.find((device) => device.$id === selectedLatestTelemetry.gatewayDeviceId) : undefined;
+  const selectedGateway = selectedDevice?.gatewayDeviceId
+    ? devices.find((device) => device.$id === selectedDevice?.gatewayDeviceId) : undefined;
   const selectedGatewayLatest = selectedGateway ? latestTelemetryByDevice.get(selectedGateway.$id) : undefined;
   const selectedIsGateway = selectedDevice ? isGatewayDevice(selectedDevice, selectedLatestTelemetry) : false;
-  const selectedGatewayStatus = gatewayStatusOf(selectedIsGateway ? selectedLatestTelemetry : selectedGatewayLatest);
-  const selectedGatewayAvailable = selectedIsGateway || selectedLatestTelemetry?.gatewayDeviceId
+  const selectedGatewayStatus = gatewayStatusOf(selectedIsGateway ? selectedDevice : selectedGateway);
+  const selectedGatewayAvailable = selectedIsGateway || selectedDevice?.gatewayDeviceId
     ? selectedGatewayStatus === "online" || (selectedGatewayStatus === "unknown" && selectedDevice !== undefined && statusOf(selectedDevice, selectedLatestTelemetry) === "Online")
     : null;
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatestTelemetry) : "";
-  const selectedFirmwareVersion = firmwareVersionOf(selectedLatestTelemetry);
+  const selectedFirmwareVersion = firmwareVersionOf(selectedDevice);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
   const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
@@ -593,7 +575,7 @@ export default function Home() {
           {selectedDevice ? <>
             <button className="mobile-back" onClick={() => { setDeleteConfirm(false); setMobileDetailOpen(false); }}>‹ All devices</button>
             <div className="detail-heading"><div><p className="eyebrow">DEVICE · {selectedDevice.serial}</p><h2>{selectedDevice.name}</h2></div><div className="detail-actions"><span className={`status ${selectedStatus === "Online" ? "online" : "offline"}`}><i />{selectedStatus}</span><button className="delete-device" onClick={() => setDeleteConfirm(true)}>Delete</button></div></div>
-            <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedLatestTelemetry.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedLatestTelemetry.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
+            <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedDevice?.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedDevice?.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
             <div className="gateway-summary"><div><span>DEVICE ROLE</span><strong>{selectedIsGateway ? "Gateway" : "Leaf device"}</strong></div><div><span>GATEWAY AVAILABLE</span><strong className={selectedGatewayAvailable === true ? "available" : selectedGatewayAvailable === false ? "unavailable" : "unknown"}>{selectedGatewayAvailable === true ? "Available" : selectedGatewayAvailable === false ? "Unavailable" : "Not configured"}</strong></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>

@@ -36,8 +36,9 @@ The `+ ADD` button opens a four-step ESP32 flow: choose the BLE device, confirm 
 name and PoP, choose whether to use upstream Wi-Fi, then confirm the farm mesh
 settings. The Wi-Fi branch scans nearby networks and accepts SSID/password.
 Provisioning sends optional device coordinates through the existing BLE
-`mqtt-config` endpoint. The device stores them and reports them in unified status telemetry;
-the app uses the latest telemetry coordinates for map markers.
+`mqtt-config` endpoint and stores the selected point in the Device's native
+`location` field. Later GPS sensor readings update that same field through the
+application Function, and the app uses it for map markers.
 For nRF54 the flow has three steps. The app connects over BLE without a PoP or
 pairing code, skips upstream Wi-Fi selection, and writes the same configuration
 to its encrypted `mqtt-config` GATT characteristic. Device GPS is an additional
@@ -62,7 +63,7 @@ shows the selected farm name and each device as a card with its connectivity
 status and latest battery voltage. Selecting a card opens the full-screen device
 history view, where the battery voltage line chart can show the last 30 minutes,
 1 hour, 6 hours, or 24 hours. The detail view also lists direct HaLow peers from
-the current-state `topology-links` table, including radio MAC, RSSI when
+the Devices API topology projection, including radio MAC, RSSI when
 available, and last-seen time. It hides links whose gateway report is more than
 two minutes old.
 The detail view can also delete the Device after native destructive
@@ -112,3 +113,9 @@ installing it.
 `npm run android` starts Metro, forwards its port, and opens the project through
 `edgez-devtools://` in EdgeZ Android DevTools on `127.0.0.1:5555`. It does not
 run Gradle or build an APK. Override `ANDROID_SERIAL` or `EXPO_PORT` when needed.
+
+### Devices service migration
+
+Deploy Appwrite and run its schema migration before deploying this Function/client/firmware update. Firmware publishes system reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite owns status and topology, stores RF samples as history, and dispatches only sensor data to the application Function under the logical `telemetry/sensors` event topic. Reconnect devices after the Appwrite upgrade to refresh their MQTT ACL.
+
+Clients read native Device status, firmware version, HaLow MAC, and topology projection. Map configuration uses native `markerType`, `markerColor`, and `location`. The installer no longer creates `topology-links`; old remote rows are left untouched. Application sensor history, geofences, OTA tracking, and application downlink tracking remain in Live Stocking.

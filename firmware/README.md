@@ -122,8 +122,8 @@ the device-generated serial. The broker is pinned in firmware to
 the broker's Let's Encrypt certificate chain through ESP-IDF's trusted root
 certificate bundle; certificate verification is not disabled. The handler
 validates the Appwrite serial syntax, stores the credential in NVS, and
-publishes an online event to
-`projects/<projectId>/devices/<serial>/telemetry/<channel>` after Wi-Fi and MQTT
+publishes application sensors to
+`projects/<projectId>/devices/<serial>/telemetry/sensors` after Wi-Fi and MQTT
 connect. The HT-HC33 queues decoded remote HaLow beacon readings in arrival
 order, including repeated readings from the same `clientId`. It publishes a
 batch when five remote readings are queued or 30 seconds have passed, whichever
@@ -131,42 +131,11 @@ comes first. Each batch also includes a fresh HT-HC33 battery reading from its
 GPIO20 controlled divider and GPIO1 ADC input. Its status entry also includes
 the direct HaLow peers observed in the last two minutes, keyed by the peer's
 Appwrite device ID and radio MAC, with RSSI when the Morse driver provides it.
-The QoS 0 JSON payload sent to
-`projects/<projectId>/devices/<serial>/telemetry/status` is an array:
-
-```json
-[
-  {
-    "clientId": "11111111-1111-4111-8111-111111111111",
-    "status": "online",
-    "batteryVoltageMv": 3840,
-    "unit": "millivolt",
-    "latitude": 59.3293,
-    "longitude": 18.0686,
-    "topology": {
-      "links": [{
-        "peerHalowMac": "02:00:00:00:00:02",
-        "ageMs": 1250,
-        "rssi": -61
-      }]
-    }
-  },
-  {
-    "clientId": "22222222-2222-4222-8222-222222222222",
-    "status": "online",
-    "batteryVoltageMv": 3700,
-    "unit": "millivolt",
-    "sensors": [{ "type": 12, "value": 3.7 }],
-    "topology": {
-      "links": [{
-        "peerHalowMac": "02:00:00:00:00:01",
-        "ageMs": 18,
-        "rssi": -68
-      }]
-    }
-  }
-]
-```
+QoS 0 system reports use the nanopb-generated `SystemStatusBatch` contract in
+`nrf54/src/device_system.proto` and publish to
+`projects/<projectId>/devices/<serial>/system/status`. Sensor readings remain a
+JSON array on `telemetry/sensors`, with `{clientId, sensors}` per device. GPS
+uses sensor types 3 and 4, and battery voltage in volts uses type 12.
 
 For a relayed beacon entry, `halowMac` identifies the beacon transmitter and
 the topology link's `peerHalowMac` is the observing relay's own HaLow MAC. The
@@ -179,12 +148,16 @@ and any configured location still publish. The in-memory queue holds up to 32
 remote readings while waiting to publish; overflow is logged and drops the new
 reading.
 The firmware also subscribes at QoS 1 to
-`projects/<projectId>/devices/<serial>/commands/#`, matching Appwrite's EMQX
+`projects/<projectId>/devices/<serial>/commands/#` and
+`projects/<projectId>/devices/<serial>/system/commands/#`, matching Appwrite's EMQX
 ACL. The Appwrite device must be created with `enabled: true`.
 For a HaLow-only leaf, Appwrite publishes through the upstream gateway at
 `projects/<projectId>/devices/<gatewaySerial>/commands/proxy/<leafSerial>/<command>`.
 The gateway reconstructs the leaf's normal command topic and forwards the
 original payload bytes over BATMAN-adv without parsing or re-encoding them.
+System proxy commands route by HaLow MAC under
+`system/commands/proxy/<leafHaLowMac>` and use the same protobuf body as direct
+system commands.
 
 Release builds provide `live-stocking-flash.bin`, a merged bootloader, partition
 table, and factory app image to flash at address `0x0`, and
@@ -194,9 +167,10 @@ factory-only partition table need the new partition table flashed before an OTA
 image can be used. Flashing the merged image erases provisioning data in NVS;
 provision the device again afterward.
 
-The HT-HC33 subscribes to
-`projects/<projectId>/devices/<serial>/commands/ota`. A command contains an
-HTTPS `url` and unique `requestId`. Firmware queues the request outside the MQTT
+The HT-HC33 receives OTA through the protobuf `SystemCommand` envelope on
+`projects/<projectId>/devices/<serial>/system/commands`. Its versioned header
+contains the unique request ID and its `ota` variant contains the HTTPS URL.
+Firmware queues the request outside the MQTT
 callback, downloads it with the ESP-IDF certificate bundle, installs it in the
 inactive OTA slot, and restarts only after ESP-IDF validates the image. OTA
 progress is published on `telemetry/ota`. Normal gateway status telemetry and
@@ -269,3 +243,9 @@ before five seconds cancels the reset and reports the current status over serial
 
 Production hardware should enable encrypted NVS/flash encryption. Credentials
 must never be compiled into source or logged.
+
+### Devices service migration
+
+Deploy Appwrite and run its schema migration before deploying this Function/client/firmware update. Firmware publishes system reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite owns status and topology, stores RF samples as history, and dispatches only sensor data to the application Function under the logical `telemetry/sensors` event topic. Reconnect devices after the Appwrite upgrade to refresh their MQTT ACL.
+
+Clients read native Device status, firmware version, HaLow MAC, and topology projection. Map configuration uses native `markerType`, `markerColor`, and `location`. The installer no longer creates `topology-links`; old remote rows are left untouched. Application sensor history, geofences, OTA tracking, and application downlink tracking remain in Live Stocking.

@@ -1,7 +1,8 @@
 # Next.js operator portal
 
-The Next.js client uses Appwrite email/password sessions. It reads only the
-latest device state and topology from TablesDB, then queries historical sensor
+The Next.js client uses Appwrite email/password sessions. It reads latest
+application sensor state from TablesDB and native status plus topology from the
+Devices API, then queries historical sensor
 fields from the project Time Series Store through the Appwrite API. Appwrite
 permissions restrict both data paths to the signed-in user. The Function is not
 used for dashboard reads.
@@ -16,8 +17,8 @@ one chart. On mobile, devices are
 shown as app-style cards and selecting one opens a full-screen detail view.
 Both layouts require an explicit confirmation before deleting the selected
 device through the authenticated Appwrite Devices API. The detail view also
-draws the selected device's direct HaLow links from the current-state
-`topology-links` table. Only active rows whose gateway report arrived within
+draws the selected device's direct HaLow links from the Devices API topology
+projection requested with `includeTopology=true`. Only links whose gateway report arrived within
 the last two minutes are displayed.
 The authenticated `/topology` page renders those same recent links as an
 interactive force-directed network graph. Operators can pan, zoom, drag and

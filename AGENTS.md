@@ -7,8 +7,7 @@ Read this file before changing this repository.
 Live Stocking is an authenticated Appwrite example for onboarding ESP32-S3
 devices and viewing MQTT telemetry. Web and mobile use Appwrite Auth, read the
 latest state from TablesDB, and query history from the project Time Series Store
-under Appwrite permissions. The Function is reserved for trusted MQTT ingestion
-and is the only telemetry writer.
+under Appwrite permissions. The Function writes application sensor telemetry. Appwrite Devices owns system status, topology, and RF history.
 
 ## Repository layout
 
@@ -37,10 +36,10 @@ MQTT telemetry inherits only the built-in device's read permissions.
 Firmware derives serial as 12 uppercase Wi-Fi MAC hex characters, advertises
 `PROV_<serial>`, and accepts its Appwrite MQTT credential through the custom
 BLE `mqtt-config` endpoint. It connects only to `mqtts://mqtt.edgez.ai:8883`,
-publishes under `projects/<projectId>/devices/<serial>/telemetry/#`, and
+publishes under `projects/<projectId>/devices/<serial>/telemetry/#`, and `projects/<projectId>/devices/<serial>/system/status`, and
 subscribes under `projects/<projectId>/devices/<serial>/commands/#`.
-It reads the HT-HC33 battery ADC every 30 seconds and publishes one `status`
-telemetry message with online state, optional battery voltage in millivolts,
+It reads the HT-HC33 battery ADC every 30 seconds and publishes one `system/status`
+message with online state, optional battery voltage in millivolts,
 and optional coordinates stored on the device during BLE provisioning.
 
 ## Environment
@@ -69,3 +68,9 @@ Appwrite state.
 `cd infra && npm run clean` deletes the template's deterministic remote
 resources but deliberately preserves project users, Devices, and global auth
 method settings. Do not execute it unless the user explicitly requests cleanup.
+
+## Native device state
+
+Device status, firmware version, HaLow identity, and transport gateway come from the Devices API. Topology is projected from Appwrite's `deviceTopologyLinks` collection; RF history is available at `/devices/{deviceId}/halow-metrics`. The Function must not write system status or topology. It receives `{clientId, sensors}` projections of combined system reports on the logical `telemetry/sensors` event topic.
+
+Map settings use native `markerType`, `markerColor`, and `location` ([longitude, latitude]) fields. Application GPS measurements remain in sensor telemetry. Do not restore metadata-based marker settings or the application topology table.

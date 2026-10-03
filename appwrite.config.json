@@ -94,32 +94,6 @@
       ]
     },
     {
-      "$id": "topology-links",
-      "databaseId": "live-stocking",
-      "name": "Topology links",
-      "permissions": [],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "gatewaySerial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "peerDeviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "peerSerial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "peerRadioMac", "type": "varchar", "size": 17, "required": true, "array": false },
-        { "key": "rssi", "type": "integer", "required": false, "array": false, "min": -127, "max": 0 },
-        { "key": "active", "type": "boolean", "required": true, "array": false },
-        { "key": "lastSeenAt", "type": "varchar", "size": 40, "required": true, "array": false },
-        { "key": "reportedAt", "type": "varchar", "size": 40, "required": true, "array": false }
-      ],
-      "indexes": [
-        { "key": "gateway-peer", "type": "unique", "attributes": ["gatewayDeviceId", "peerDeviceId"] },
-        { "key": "gateway-id", "type": "key", "attributes": ["gatewayDeviceId"] },
-        { "key": "farm-active", "type": "key", "attributes": ["farmId", "active"] },
-        { "key": "active-reported", "type": "key", "attributes": ["active", "reportedAt"], "orders": ["ASC", "DESC"] }
-      ]
-    },
-    {
       "$id": "ota-updates",
       "databaseId": "live-stocking",
       "name": "OTA updates",
@@ -242,11 +216,10 @@
       "enabled": true,
       "logging": true,
       "runtimeSpecification": "s-1vcpu-2gb",
-      "scopes": ["devices.read", "rows.read", "rows.write", "timeseries.write"],
+      "scopes": ["devices.read", "devices.write", "rows.read", "rows.write", "timeseries.write"],
       "vars": [
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
         { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" },
         { "key": "LIVE_STOCKING_OTA_UPDATE_TABLE_ID", "value": "ota-updates" },
         { "key": "LIVE_STOCKING_DOWNLINK_TABLE_ID", "value": "downlinks" },
         { "key": "LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID", "value": "geofence-areas" },
@@ -275,7 +248,6 @@
         { "key": "LIVE_STOCKING_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
         { "key": "LIVE_STOCKING_DATABASE_ID", "value": "live-stocking" },
         { "key": "LIVE_STOCKING_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "LIVE_STOCKING_TOPOLOGY_TABLE_ID", "value": "topology-links" },
         { "key": "LIVE_STOCKING_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
       ]
     }

@@ -6,7 +6,6 @@ process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
 process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
 process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
 process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
-process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
 process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
 process.env.LIVE_STOCKING_DOWNLINK_TABLE_ID = "downlink-a";
 process.env.LIVE_STOCKING_REPOSITORY_URL = "https://github.example/acme/live-stocking";
@@ -15,9 +14,9 @@ const { default: main } = await import("./main.js");
 const gatewayId = "11111111-1111-4111-8111-111111111111";
 const remoteId = "22222222-2222-4222-8222-222222222222";
 const devices = new Map([
-  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", metadata: { farmId: "farm-a", icon: "gateway", markerColor: "blue" },
+  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", markerType: "gateway", markerColor: "blue", metadata: { farmId: "farm-a" },
     $permissions: ['read("team:farm-a")'] }],
-  [remoteId, { $id: remoteId, serial: "112233445566", metadata: { farmId: "farm-a", icon: "tracker", markerColor: "orange" },
+  [remoteId, { $id: remoteId, serial: "112233445566", markerType: "tracker", markerColor: "orange", gatewayDeviceId: gatewayId, metadata: { farmId: "farm-a" },
     $permissions: ['read("team:farm-a")'] }],
 ]);
 const originalFetch = globalThis.fetch;
@@ -26,22 +25,25 @@ const originalDeleteRow = TablesDB.prototype.deleteRow;
 const originalListRows = TablesDB.prototype.listRows;
 const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
-const topologyRows = [];
 const otaRows = [];
 const downlinkRows = [];
 const timeseriesWrites = [];
+const deviceLocationUpdates = [];
 
 beforeEach(() => {
+  delete devices.get(gatewayId).firmwareVersion;
+  delete devices.get(gatewayId).location;
+  delete devices.get(remoteId).location;
+  devices.get(remoteId).gatewayDeviceId = gatewayId;
   rows.length = 0;
-  topologyRows.length = 0;
   otaRows.length = 0;
   downlinkRows.length = 0;
   timeseriesWrites.length = 0;
+  deviceLocationUpdates.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.LIVE_STOCKING_DATABASE_ID = "database-a";
   process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID = "telemetry-a";
-  process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID = "topology-a";
   process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID = "ota-a";
   devices.get(gatewayId).metadata = { farmId: "farm-a", icon: "gateway", markerColor: "blue" };
   devices.get(remoteId).metadata = { farmId: "farm-a", icon: "tracker", markerColor: "orange" };
@@ -55,14 +57,14 @@ beforeEach(() => {
       return { ok: true, status: 201 };
     }
     const device = devices.get(decodeURIComponent(href.split("/").pop()));
+    if (options.method === "PATCH" && device) {
+      const update = JSON.parse(options.body);
+      Object.assign(device, update);
+      deviceLocationUpdates.push({ deviceId: device.$id, ...update });
+    }
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
   TablesDB.prototype.createRow = async (args) => {
-    if (args.tableId === "topology-a") {
-      const row = { $id: `topology-${topologyRows.length + 1}`, ...args.data };
-      topologyRows.push(row);
-      return row;
-    }
     if (args.tableId === "ota-a") {
       const row = { $id: `ota-${otaRows.length + 1}`, ...args.data };
       otaRows.push(row);
@@ -83,11 +85,9 @@ beforeEach(() => {
         .find((query) => query.method === "equal" && query.attribute === "halowMac");
       return { rows: equal ? rows.filter((row) => row.data.halowMac === equal.values[0]).map((row) => ({ $id: row.$id, ...row.data })) : [] };
     }
-    return { rows: args.tableId === "topology-a"
-      ? topologyRows.filter((row) => row.gatewayDeviceId === gatewayId)
-      : args.tableId === "ota-a"
-        ? otaRows
-        : args.tableId === "downlink-a" ? downlinkRows : [] };
+    return { rows: args.tableId === "ota-a"
+      ? otaRows
+      : args.tableId === "downlink-a" ? downlinkRows : [] };
   };
   TablesDB.prototype.deleteRow = async (args) => {
     const index = rows.findIndex((candidate) => candidate.$id === args.rowId);
@@ -103,13 +103,11 @@ beforeEach(() => {
       telemetry.permissions = args.permissions;
       return telemetry;
     }
-    const row = topologyRows.find((candidate) => candidate.$id === args.rowId);
-    if (row) Object.assign(row, args.data);
     const ota = otaRows.find((candidate) => candidate.$id === args.rowId);
     if (ota) Object.assign(ota, args.data);
     const downlink = downlinkRows.find((candidate) => candidate.$id === args.rowId);
     if (downlink) Object.assign(downlink, args.data);
-    return row || ota || downlink;
+    return ota || downlink;
   };
 });
 
@@ -134,7 +132,7 @@ async function publish(payload) {
     },
     bodyJson: {
       event: "message.publish",
-      topic: "projects/project-a/devices/AABBCCDDEEFF/telemetry/status",
+      topic: "projects/project-a/devices/AABBCCDDEEFF/telemetry/sensors",
       payload: JSON.stringify(report),
     },
   };
@@ -167,6 +165,7 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
   assert.equal(rows[1].data.gatewayDeviceId, gatewayId);
   assert.equal(JSON.parse(rows[1].data.payload).sensors[1].value, 59.3);
   assert.deepEqual(rows[1].data.location, [18, 59.3]);
+  assert.deepEqual(deviceLocationUpdates, [{ deviceId: remoteId, location: [18, 59.3] }]);
   assert.deepEqual({ icon: rows[1].data.icon, markerColor: rows[1].data.markerColor },
     { icon: "tracker", markerColor: "orange" });
   assert.deepEqual(rows[1].permissions, devices.get(remoteId).$permissions);
@@ -177,14 +176,14 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
   assert.doesNotMatch(timeseriesWrites[0].data, /sensor_gps=/);
 });
 
-test("a gateway cannot write a remote device from another farm", async () => {
-  devices.get(remoteId).metadata.farmId = "farm-b";
+test("a gateway cannot write a remote device assigned to another gateway", async () => {
+  devices.get(remoteId).gatewayDeviceId = "33333333-3333-4333-8333-333333333333";
   try {
     const result = await publish([{ clientId: gatewayId }, { clientId: remoteId }]);
     assert.equal(result.status, 403);
     assert.equal(rows.length, 0);
   } finally {
-    devices.get(remoteId).metadata.farmId = "farm-a";
+    devices.get(remoteId).gatewayDeviceId = gatewayId;
   }
 });
 
@@ -280,6 +279,7 @@ test("ordinary telemetry completes a pending OTA when the target version is runn
   await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId, status: "pending", detail: "downloading" } });
   assert.equal(otaRows[0].status, "pending");
 
+  devices.get(gatewayId).firmwareVersion = "0.0.4";
   const reconciled = await publish({ clientId: gatewayId, firmwareVersion: "0.0.4", status: "online" });
   assert.equal(reconciled.status, 201);
   assert.equal(otaRows[0].status, "succeeded");
@@ -288,108 +288,28 @@ test("ordinary telemetry completes a pending OTA when the target version is runn
   assert.ok(otaRows[0].completedAt);
 });
 
-test("gateway topology upserts direct links and marks missing peers inactive", async () => {
-  const link = { peerHalowMac: "02:11:22:33:44:55", rssi: -67, ageMs: 1200 };
-  let result = await publish([
-    { clientId: remoteId, status: "online" },
-    { clientId: gatewayId, status: "online", topology: { links: [link] } },
-  ]);
+test("sensor ingestion does not persist system state or write topology", async () => {
+  const result = await publish({ status: "online", firmwareVersion: "v1", halowRf: { available: true },
+    topology: { links: [] }, gateway_status: "online", wifi_enabled: true,
+    sensors: [{ type: 1, value: 21 }] });
   assert.equal(result.status, 201);
-  assert.equal(topologyRows.length, 1);
-  assert.deepEqual(
-    { gatewayDeviceId: topologyRows[0].gatewayDeviceId, peerDeviceId: topologyRows[0].peerDeviceId, rssi: topologyRows[0].rssi, active: topologyRows[0].active },
-    { gatewayDeviceId: gatewayId, peerDeviceId: remoteId, rssi: -67, active: true },
-  );
-
-  result = await publish({ clientId: gatewayId, status: "online", topology: { links: [] } });
-  assert.equal(result.status, 201);
-  assert.equal(topologyRows.length, 1);
-  assert.equal(topologyRows[0].active, false);
-});
-
-test("relayed devices report topology under their own device identity", async () => {
-  const result = await publish([
-    { clientId: gatewayId },
-    { clientId: remoteId, topology: { links: [{
-      peerHalowMac: "0C:BF:74:1A:AE:36", rssi: -61, ageMs: 500,
-    }] } },
-  ]);
-  assert.equal(result.status, 201);
-  assert.equal(topologyRows.length, 1);
-  assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
-  assert.equal(topologyRows[0].peerDeviceId, gatewayId);
-});
-
-test("MQTT report writes HaLow MAC to latest telemetry and resolves topology", async () => {
-  const result = await publish([
-    { clientId: gatewayId },
-    { clientId: remoteId, topology: { links: [{
-      peerHalowMac: "0C:BF:74:1A:AE:36", rssi: -66, ageMs: 0,
-    }] } },
-  ]);
-  assert.equal(result.status, 201);
-  assert.equal(rows.find((row) => row.data.deviceId === remoteId).data.halowMac, "02:11:22:33:44:55");
-  assert.equal(topologyRows.length, 1);
-  assert.equal(topologyRows[0].gatewayDeviceId, remoteId);
-  assert.equal(topologyRows[0].peerDeviceId, gatewayId);
-  assert.equal(topologyRows[0].peerRadioMac, "0C:BF:74:1A:AE:36");
-  assert.equal(topologyRows[0].rssi, -66);
-});
-
-test("topology resolves a peer by indexed latest telemetry without listing devices", async () => {
-  rows.push({ $id: remoteId, data: {
-    deviceId: remoteId,
-    farmId: "farm-a",
-    serial: "112233445566",
-    halowMac: "02:11:22:33:44:55",
-  } });
-  const result = await publish({ clientId: gatewayId, topology: { links: [{
-    peerHalowMac: "02:11:22:33:44:55", rssi: -71, ageMs: 25,
-  }] } });
-  assert.equal(result.status, 201);
-  assert.equal(topologyRows.length, 1);
-  assert.equal(topologyRows[0].peerDeviceId, remoteId);
-  assert.equal(topologyRows[0].peerSerial, "112233445566");
-});
-
-test("an unresolved topology MAC does not reject otherwise valid telemetry", async () => {
-  const result = await publish({ clientId: gatewayId, topology: { links: [{
-    peerHalowMac: "02:AA:BB:CC:DD:EE", rssi: -80, ageMs: 0,
-  }] } });
-  assert.equal(result.status, 201);
-  assert.equal(rows.length, 1);
-  assert.equal(topologyRows.length, 0);
-});
-
-test("a topology report cannot link to its own HaLow MAC", async () => {
-  const result = await publish({ clientId: gatewayId, topology: { links: [{
-    peerHalowMac: "0C:BF:74:1A:AE:36", ageMs: 0,
-  }] } });
-  assert.equal(result.status, 400);
-  assert.equal(topologyRows.length, 0);
-});
-
-test("a topology report rejects duplicate peers", async () => {
-  const link = { peerHalowMac: "02:11:22:33:44:55", ageMs: 0 };
-  const result = await publish({ clientId: gatewayId, topology: { links: [link, link] } });
-  assert.equal(result.status, 400);
-  assert.equal(topologyRows.length, 0);
-});
-
-test("telemetry without a HaLow MAC is stored without blocking the report", async () => {
-  const result = await publish({ status: "online", halowMac: undefined });
-  assert.equal(result.status, 201);
-  assert.equal(rows.length, 1);
   assert.equal(rows[0].data.halowMac, undefined);
+  assert.equal(rows[0].data.status, undefined);
+  assert.deepEqual(JSON.parse(rows[0].data.payload), { sensors: [{ type: 1, value: 21 }] });
+  assert.doesNotMatch(timeseriesWrites[0].data, /halow|firmwareVersion|topology|status/);
 });
 
-test("latest telemetry rejects a HaLow MAC already owned by another device", async () => {
-  rows.push({ $id: remoteId, data: {
-    deviceId: remoteId, farmId: "farm-a", serial: "112233445566", halowMac: "0C:BF:74:1A:AE:36",
-  } });
-  const result = await publish({ clientId: gatewayId, topology: { links: [] } });
-  assert.equal(result.status, 409);
-  assert.match(result.body.error, /belongs to another latest telemetry row/);
+test("system and retired status topics never enter application ingestion", async () => {
+  for (const suffix of ["system/status", "telemetry/status"]) {
+    const result = await main({ req: {
+      headers: { "x-appwrite-event": `devices.${gatewayId}.mqtt.message.publish`, "x-appwrite-key": "test-key" },
+      bodyJson: { event: "message.publish", topic: `projects/project-a/devices/AABBCCDDEEFF/${suffix}`, payload: "{}" },
+    }, res: { json: (body, status) => ({ body, status }) }, error: assert.fail });
+    assert.equal(result.status, 202);
+    assert.equal(result.body.reason, "system_status_owned_by_devices");
+  }
+  assert.equal(rows.length, 0);
+  assert.equal(timeseriesWrites.length, 0);
 });
 
 test("device deletion removes its latest telemetry row", async () => {

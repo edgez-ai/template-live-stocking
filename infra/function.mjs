@@ -6,14 +6,13 @@ export function installFunction() {
     "--function-id", id, "--name", `${config.name} MQTT ingest`,
     "--runtime", "node-24", "--events", "devices.*.mqtt.message.publish", "devices.*.delete", "--timeout", "15",
     "--enabled", "true", "--logging", "true", "--entrypoint", "src/main.js",
-    "--commands", "npm install", "--scopes", "devices.read", "rows.read", "rows.write", "timeseries.write",
+    "--commands", "npm install", "--scopes", "devices.read", "devices.write", "rows.read", "rows.write", "timeseries.write",
   ];
   run(exists(["functions", "get", "--function-id", id])
     ? ["functions", "update", ...settings]
     : ["functions", "create", ...settings]);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_DATABASE_ID", config.databaseId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_TELEMETRY_TABLE_ID", config.telemetryTableId);
-  upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_TOPOLOGY_TABLE_ID", config.topologyTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_AREA_TABLE_ID", config.geofenceAreaTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_RULE_TABLE_ID", config.geofenceRuleTableId);
   upsertResourceVariable("functions", "--function-id", id, "LIVE_STOCKING_GEOFENCE_ALARM_TABLE_ID", config.geofenceAlarmTableId);

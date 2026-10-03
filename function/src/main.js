@@ -2,7 +2,6 @@ import { Client, ID, Query, TablesDB } from "node-appwrite";
 
 const DATABASE_ID = process.env.LIVE_STOCKING_DATABASE_ID || process.env.DATABASE_ID;
 const TELEMETRY_TABLE_ID = process.env.LIVE_STOCKING_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
-const TOPOLOGY_TABLE_ID = process.env.LIVE_STOCKING_TOPOLOGY_TABLE_ID || "topology-links";
 const OTA_UPDATE_TABLE_ID = process.env.LIVE_STOCKING_OTA_UPDATE_TABLE_ID || "ota-updates";
 const DOWNLINK_TABLE_ID = process.env.LIVE_STOCKING_DOWNLINK_TABLE_ID || "downlinks";
 const OTA_REPOSITORY_URL = process.env.LIVE_STOCKING_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL || "";
@@ -86,10 +85,6 @@ function stringField(value) {
 function telemetryLine(target, entry, channel, receivedAt, sequence = 0) {
   const tags = `serial=${escapeTag(target.serial)},channel=${escapeTag(channel)}`;
   const fields = [`payload=${stringField(JSON.stringify(entry))}`];
-  if (typeof entry.status === "string" && entry.status) fields.push(`status=${stringField(entry.status)}`);
-  if (typeof entry.firmwareVersion === "string" && entry.firmwareVersion) {
-    fields.push(`firmwareVersion=${stringField(entry.firmwareVersion)}`);
-  }
   for (const sensor of entry.sensors || []) {
     const name = SENSOR_FIELD_NAMES.get(sensor.type);
     if (name) fields.push(`sensor_${name}=${sensor.value}`);
@@ -144,24 +139,6 @@ async function upsertLatestTelemetry(tables, target, data, readPermissions) {
   }
 }
 
-function validTopology(topology) {
-  const valid = topology && typeof topology === "object" && !Array.isArray(topology) &&
-    Array.isArray(topology.links) && topology.links.length <= 16 &&
-    topology.links.every((link) => link && typeof link === "object" &&
-      typeof link.peerHalowMac === "string" && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(link.peerHalowMac) &&
-      Number.isInteger(link.ageMs) && link.ageMs >= 0 && link.ageMs <= 300000 &&
-      (link.rssi === undefined || (Number.isInteger(link.rssi) && link.rssi >= -127 && link.rssi <= 0)));
-  return Boolean(valid) &&
-    new Set(topology.links.map((link) => link.peerHalowMac.toUpperCase())).size === topology.links.length;
-}
-
-function normalizedHalowMac(value) {
-  if (typeof value !== "string" || !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(value)) return "";
-  const normalized = value.toUpperCase();
-  return normalized !== "00:00:00:00:00:00" && (Number.parseInt(normalized.slice(0, 2), 16) & 1) === 0
-    ? normalized : "";
-}
-
 function validDownlinkStatus(value) {
   return value && typeof value === "object" && !Array.isArray(value) &&
     typeof value.requestId === "string" && value.requestId.length >= 1 && value.requestId.length <= 64 &&
@@ -193,50 +170,6 @@ async function syncDownlink(tables, gateway, target, value, readPermissions, rep
   } else {
     await tables.createRow({ databaseId: DATABASE_ID, tableId: DOWNLINK_TABLE_ID,
       rowId: ID.unique(), data, permissions: readPermissions });
-  }
-}
-
-async function syncTopology(tables, gateway, links, peerDevices, readPermissions, reportedAt) {
-  const existing = await tables.listRows({
-    databaseId: DATABASE_ID,
-    tableId: TOPOLOGY_TABLE_ID,
-    queries: [Query.equal("gatewayDeviceId", gateway.$id), Query.limit(100)],
-  });
-  const rowsByPeer = new Map((existing.rows || []).map((row) => [row.peerDeviceId, row]));
-  const activePeerIds = new Set();
-  for (let index = 0; index < links.length; index += 1) {
-    const link = links[index];
-    const peer = peerDevices[index];
-    activePeerIds.add(peer.$id);
-    const data = {
-      farmId: gateway.metadata.farmId,
-      gatewayDeviceId: gateway.$id,
-      gatewaySerial: gateway.serial,
-      peerDeviceId: peer.$id,
-      peerSerial: peer.serial,
-      peerRadioMac: link.peerHalowMac.toUpperCase(),
-      rssi: link.rssi ?? null,
-      active: true,
-      lastSeenAt: new Date(new Date(reportedAt).getTime() - link.ageMs).toISOString(),
-      reportedAt,
-    };
-    const row = rowsByPeer.get(peer.$id);
-    if (row) {
-      await tables.updateRow({ databaseId: DATABASE_ID, tableId: TOPOLOGY_TABLE_ID, rowId: row.$id, data, permissions: readPermissions });
-    } else {
-      await tables.createRow({ databaseId: DATABASE_ID, tableId: TOPOLOGY_TABLE_ID, rowId: ID.unique(), data, permissions: readPermissions });
-    }
-  }
-  for (const row of existing.rows || []) {
-    if (!activePeerIds.has(row.peerDeviceId) && row.active) {
-      await tables.updateRow({
-        databaseId: DATABASE_ID,
-        tableId: TOPOLOGY_TABLE_ID,
-        rowId: row.$id,
-        data: { active: false, reportedAt },
-        permissions: readPermissions,
-      });
-    }
   }
 }
 
@@ -321,10 +254,10 @@ function locationOf(payload) {
 }
 
 function mapAppearanceOf(device) {
-  const icon = typeof device.metadata?.icon === "string" && device.metadata.icon.length <= 32
-    ? device.metadata.icon : null;
-  const markerColor = typeof device.metadata?.markerColor === "string" && device.metadata.markerColor.length <= 32
-    ? device.metadata.markerColor : null;
+  const icon = typeof device.markerType === "string" && device.markerType.length <= 32
+    ? device.markerType : null;
+  const markerColor = typeof device.markerColor === "string" && device.markerColor.length <= 32
+    ? device.markerColor : null;
   return {
     ...(icon ? { icon } : {}),
     ...(markerColor ? { markerColor } : {}),
@@ -433,14 +366,19 @@ async function getDevice(req, deviceId) {
   return response.json();
 }
 
-async function latestTelemetryByHalowMac(tables, halowMac) {
-  const result = await tables.listRows({
-    databaseId: DATABASE_ID,
-    tableId: TELEMETRY_TABLE_ID,
-    queries: [Query.equal("halowMac", halowMac), Query.limit(2)],
+async function updateDeviceLocation(req, deviceId, location) {
+  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
+  const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": process.env.APPWRITE_FUNCTION_PROJECT_ID,
+      "x-appwrite-key": req.headers["x-appwrite-key"],
+    },
+    body: JSON.stringify({ location: [location.longitude, location.latitude] }),
   });
-  if ((result.rows?.length || 0) > 1) throw new Error(`Duplicate latest telemetry HaLow MAC ${halowMac}`);
-  return result.rows?.[0] || null;
+  if (!response.ok) throw new Error(`Device location update failed with ${response.status}`);
+  return response.json();
 }
 
 export default async function main({ req, res, error, log = () => {} }) {
@@ -486,6 +424,9 @@ export default async function main({ req, res, error, log = () => {} }) {
   }
 
   const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+  if (topic.includes("/system/") || topic.endsWith("/telemetry/status")) {
+    return json(res, { accepted: false, reason: "system_status_owned_by_devices" }, 202);
+  }
   const route = topicParts(topic);
   if (!route || route.projectId !== process.env.APPWRITE_FUNCTION_PROJECT_ID) {
     return json(res, { error: "MQTT topic does not match this Appwrite project" }, 400);
@@ -514,20 +455,13 @@ export default async function main({ req, res, error, log = () => {} }) {
     if (entry.clientId !== undefined && typeof entry.clientId !== "string") {
       return json(res, { error: "Telemetry clientId must be a string" }, 400);
     }
-    if (entry.status !== undefined && (typeof entry.status !== "string" || entry.status.length > 32)) {
-      return json(res, { error: "Telemetry status must be a string up to 32 characters" }, 400);
-    }
-    if (entry.halowMac !== undefined && entry.halowMac !== null && entry.halowMac !== "" &&
-        !normalizedHalowMac(entry.halowMac)) {
-      return json(res, { error: "Telemetry must include a valid unicast halowMac" }, 400);
-    }
+    // Persist application fields only, even if an older sensor publisher includes system fields.
+    for (const field of ["status", "halowMac", "topology", "halowRf", "gateway_status", "wifi_enabled"]) delete entry[field];
+    if (!entry.ota) delete entry.firmwareVersion;
     if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
         !sensor || typeof sensor !== "object" || !Number.isInteger(sensor.type) || sensor.type < 1 || sensor.type > SENSOR_TYPE_MAX ||
         typeof sensor.value !== "number" || !Number.isFinite(sensor.value)))) {
       return json(res, { error: "Telemetry sensors must contain supported numeric type and value fields" }, 400);
-    }
-    if (entry.topology !== undefined && !validTopology(entry.topology)) {
-      return json(res, { error: "Topology must contain at most 16 valid direct peer links" }, 400);
     }
     if (entry.downlink !== undefined && !validDownlinkStatus(entry.downlink)) {
       return json(res, { error: "Downlink status is invalid" }, 400);
@@ -542,7 +476,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       }
     }
     const batteryVoltage = sensorValue(entry, SENSOR_BATTERY_VOLTAGE);
-    if ((route.channel === "status" || route.channel === "battery") && batteryVoltage !== null &&
+    if ((route.channel === "sensors" || route.channel === "battery") && batteryVoltage !== null &&
         (batteryVoltage < 0 || batteryVoltage > 10.0)) {
       return json(res, { error: "Battery sensor voltage must be between 0 and 10.0 volts" }, 400);
     }
@@ -572,79 +506,29 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!target || target.$id !== targetId) {
         return json(res, { error: "Telemetry clientId does not match an Appwrite device" }, 403);
       }
-      if (targetId !== deviceId &&
-          (!device.metadata?.farmId || target.metadata?.farmId !== device.metadata.farmId)) {
-        return json(res, { error: "Remote beacon is not in the gateway's farm" }, 403);
+      if (targetId !== deviceId && target.gatewayDeviceId !== deviceId) {
+        return json(res, { error: "Remote device is not assigned to this gateway" }, 403);
       }
       const readPermissions = (target.$permissions || []).filter((permission) => permission.startsWith("read("));
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      targets.push({ entry, target, readPermissions, topologyLinks: [], topologyPeers: [] });
+      targets.push({ entry, target, readPermissions });
     }
 
-    const devicesByHalowMac = new Map();
-    const telemetryByHalowMac = new Map();
-    const findTelemetryByHalowMac = async (halowMac) => {
-      if (!telemetryByHalowMac.has(halowMac)) {
-        telemetryByHalowMac.set(halowMac, await latestTelemetryByHalowMac(tables, halowMac));
-      }
-      return telemetryByHalowMac.get(halowMac);
-    };
-    for (const item of targets) {
-      const halowMac = normalizedHalowMac(item.entry.halowMac);
-      if (!halowMac) continue;
-      const owner = devicesByHalowMac.get(halowMac);
-      if (owner && owner.$id !== item.target.$id) {
-        return json(res, { error: `HaLow MAC ${halowMac} is reported by multiple devices` }, 409);
-      }
-      const existing = await findTelemetryByHalowMac(halowMac);
-      if (existing && existing.deviceId !== item.target.$id) {
-        return json(res, { error: `HaLow MAC ${halowMac} belongs to another latest telemetry row` }, 409);
-      }
-      devicesByHalowMac.set(halowMac, item.target);
-    }
-    for (const item of targets) {
-      const selfMac = normalizedHalowMac(item.entry.halowMac);
-      for (const link of item.entry.topology?.links || []) {
-        const peerMac = normalizedHalowMac(link.peerHalowMac);
-        if (selfMac && peerMac === selfMac) {
-          return json(res, { error: "A topology link cannot target its reporting device" }, 400);
-        }
-        let peer = devicesByHalowMac.get(peerMac);
-        if (!peer) {
-          const peerTelemetry = await findTelemetryByHalowMac(peerMac);
-          if (peerTelemetry?.farmId === device.metadata?.farmId) {
-            peer = { $id: peerTelemetry.deviceId, serial: peerTelemetry.serial,
-              metadata: { farmId: peerTelemetry.farmId } };
-          }
-        }
-        // Peer identity is eventually consistent: a newly seen radio may not
-        // have published its own latest-telemetry row yet. Keep the sensor
-        // report and retry topology resolution on the next status cycle.
-        if (!peer) continue;
-        if (peer.$id === item.target.$id) {
-          return json(res, { error: "A topology link cannot target its reporting device" }, 400);
-        }
-        item.topologyLinks.push(link);
-        item.topologyPeers.push(peer);
-      }
-    }
     const receivedAt = new Date().toISOString();
     await writeTimeseries(req, targets.map(({ entry, target }, index) =>
       telemetryLine(target, entry, route.channel, receivedAt, index)));
     const telemetryIds = [];
-    for (const { entry, target, readPermissions, topologyLinks, topologyPeers } of targets) {
+    for (const { entry, target, readPermissions } of targets) {
       const location = locationOf(entry);
-      const halowMac = normalizedHalowMac(entry.halowMac);
+      if (location) await updateDeviceLocation(req, target.$id, location);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
         farmId: target.metadata.farmId,
-        ...(halowMac ? { halowMac } : {}),
         gatewayDeviceId: target.$id === device.$id ? null : device.$id,
         serial: target.serial,
         channel: route.channel,
-        status: typeof entry.status === "string" && entry.status ? entry.status : "online",
         topic,
         payload: JSON.stringify(entry),
         receivedAt,
@@ -653,11 +537,8 @@ export default async function main({ req, res, error, log = () => {} }) {
       }, readPermissions);
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
       await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);
-      await reconcileOtaUpdate(tables, target, entry, readPermissions, receivedAt);
+      await reconcileOtaUpdate(tables, target, { firmwareVersion: target.firmwareVersion }, readPermissions, receivedAt);
       if (entry.downlink) await syncDownlink(tables, device, target, entry.downlink, readPermissions, receivedAt);
-      if (entry.topology) {
-        await syncTopology(tables, target, topologyLinks, topologyPeers, readPermissions, receivedAt);
-      }
       telemetryIds.push(row.$id || target.$id);
     }
     return json(res, { accepted: true, telemetryId: telemetryIds[0], telemetryIds, receivedAt }, 201);

@@ -25,6 +25,10 @@ constexpr size_t kMaxTopic = 383;
 constexpr size_t kMaxPayload = 16 * 1024;
 constexpr size_t kPeerCount = 16;
 constexpr size_t kAssemblyCount = 4;
+constexpr uint8_t kPayloadSystem = 0;
+constexpr uint8_t kPayloadTelemetry = 1;
+constexpr uint8_t kCommandSystem = 0;
+constexpr uint8_t kCommandApplication = 1;
 
 enum class FrameType : uint8_t {
   kAdvertise = 1,
@@ -105,6 +109,16 @@ bool serial_mac(const char *serial, uint8_t mac[6]) {
     if (high < 0 || low < 0) return false;
     mac[index] = static_cast<uint8_t>((high << 4) | low);
   }
+  return true;
+}
+
+bool halow_mac(const char *text, uint8_t mac[6]) {
+  unsigned int octets[6];
+  if (!text || std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x",
+                           &octets[0], &octets[1], &octets[2], &octets[3],
+                           &octets[4], &octets[5]) != 6) return false;
+  for (size_t index = 0; index < 6; ++index)
+    mac[index] = static_cast<uint8_t>(octets[index]);
   return true;
 }
 
@@ -226,11 +240,17 @@ void delivery_task(void *) {
   while (true) {
     if (xQueueReceive(delivery_queue, &delivery, portMAX_DELAY) != pdTRUE) continue;
     if (delivery->type == FrameType::kPublish && is_gateway && publish_callback) {
-      // A leaf sends only its JSON payload over BATMAN-adv. An empty topic tells
-      // the gateway callback to publish beneath its own telemetry/status topic.
-      const int message_id = publish_callback(
-          "", delivery->payload, delivery->length, delivery->qos,
-          delivery->retain);
+      if (delivery->length < 2 || delivery->payload[0] > kPayloadTelemetry) {
+        ESP_LOGW(kTag, "Rejected relayed uplink with invalid leading kind byte");
+        heap_caps_free(delivery->payload);
+        heap_caps_free(delivery);
+        continue;
+      }
+      const char *topic = delivery->payload[0] == kPayloadTelemetry
+          ? "telemetry/sensors" : "system/status";
+      const int message_id = publish_callback(topic, delivery->payload + 1,
+                                               delivery->length - 1,
+                                               delivery->qos, delivery->retain);
       if (message_id >= 0) {
         ESP_LOGI(kTag, "Relayed BATMAN payload to gateway MQTT status (%d)",
                  message_id);
@@ -238,7 +258,12 @@ void delivery_task(void *) {
         ESP_LOGW(kTag, "Could not relay BATMAN payload: MQTT is offline");
       }
     } else if (delivery->type == FrameType::kCommand && !is_gateway && command_callback) {
-      command_callback(delivery->topic, delivery->payload, delivery->length);
+      if (delivery->length < 2 || delivery->payload[0] > kCommandApplication) {
+        ESP_LOGW(kTag, "Rejected relayed command with invalid leading kind byte");
+      } else {
+        command_callback(delivery->topic, delivery->payload + 1,
+                         delivery->length - 1);
+      }
     }
     heap_caps_free(delivery->payload);
     heap_caps_free(delivery);
@@ -318,6 +343,16 @@ bool mqtt_l2_relay_gateway_available() {
 int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
                           int qos, bool retain) {
   if (is_gateway) return publish_callback ? publish_callback(topic, payload, length, qos, retain) : -1;
+  if (!topic || (!payload && length) || length + 1 > kMaxPayload) return -1;
+  const char *telemetry_suffix = "/telemetry/sensors";
+  const size_t topic_length = std::strlen(topic);
+  const size_t telemetry_suffix_length = std::strlen(telemetry_suffix);
+  const uint8_t payload_kind =
+      topic_length >= telemetry_suffix_length &&
+              std::strcmp(topic + topic_length - telemetry_suffix_length,
+                          telemetry_suffix) == 0
+          ? kPayloadTelemetry
+          : kPayloadSystem;
   uint8_t gateway[6];
   uint8_t gateway_l2[6];
   if (!halow_selected_mqtt_gateway(gateway, gateway_l2)) {
@@ -328,14 +363,22 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
     }
     return -1;
   }
+  uint8_t *relay_payload = static_cast<uint8_t *>(heap_caps_malloc(
+      length + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!relay_payload) return -1;
+  relay_payload[0] = payload_kind;
+  if (length) std::memcpy(relay_payload + 1, payload, length);
   // The MQTT topic belongs to the upstream gateway and is deliberately not
-  // carried over BATMAN-adv. Only the JSON payload is fragmented and sent.
+  // carried over BATMAN-adv. A leading kind byte selects system/status (0) or
+  // telemetry/sensors (1); the remaining bytes are forwarded unchanged.
   // Mixed ESP32/Linux meshes reliably forward BATMAN broadcast frames across
   // a shared HaLow hard interface. Keep the inner Ethernet destination
   // unicast so only the selected MQTT gateway consumes the opaque payload.
-  return send_message(FrameType::kPublish, gateway, gateway_l2, true, "",
-                      payload, length, qos, retain) == ESP_OK
-      ? static_cast<int>(esp_random() & 0x7fffffff) : -1;
+  const esp_err_t result = send_message(FrameType::kPublish, gateway, gateway_l2,
+                                        true, "", relay_payload, length + 1,
+                                        qos, retain);
+  heap_caps_free(relay_payload);
+  return result == ESP_OK ? static_cast<int>(esp_random() & 0x7fffffff) : -1;
 }
 
 bool mqtt_l2_relay_forward_command(const char *topic, const void *payload,
@@ -343,24 +386,44 @@ bool mqtt_l2_relay_forward_command(const char *topic, const void *payload,
   if (!is_gateway || !topic) return false;
   constexpr char devices_marker[] = "/devices/";
   constexpr char proxy_marker[] = "/commands/proxy/";
+  constexpr char system_proxy_marker[] = "/system/commands/proxy/";
   const char *devices = std::strstr(topic, devices_marker);
-  const char *serial = std::strstr(topic, proxy_marker);
+  const char *serial = std::strstr(topic, system_proxy_marker);
+  const bool system_command = serial != nullptr;
+  if (!serial) serial = std::strstr(topic, proxy_marker);
   if (!devices || !serial || serial <= devices) return false;
-  serial += sizeof(proxy_marker) - 1;
-  const char *command = std::strchr(serial, '/');
-  if (!command || command == serial || !command[1]) return false;
+  serial += system_command ? sizeof(system_proxy_marker) - 1 : sizeof(proxy_marker) - 1;
+  const char *command = system_command ? nullptr : std::strchr(serial, '/');
+  if ((!system_command && (!command || command == serial || !command[1])) ||
+      (system_command && (!serial[0] || std::strchr(serial, '/')))) return false;
   uint8_t destination[6];
-  const size_t serial_length = static_cast<size_t>(command - serial);
-  if (!peer_for_serial(serial, serial_length, destination)) return false;
+  const size_t serial_length = system_command
+      ? std::strlen(serial) : static_cast<size_t>(command - serial);
+  if (system_command) {
+    if (!halow_mac(serial, destination)) return false;
+  } else if (!peer_for_serial(serial, serial_length, destination)) {
+    return false;
+  }
   char leaf_topic[kMaxTopic + 1]{};
-  const int written = std::snprintf(
-      leaf_topic, sizeof(leaf_topic), "%.*s/devices/%.*s/commands/%s",
-      static_cast<int>(devices - topic), topic,
-      static_cast<int>(serial_length), serial, command + 1);
+  const int written = system_command
+      ? std::snprintf(leaf_topic, sizeof(leaf_topic), "system/commands")
+      : std::snprintf(leaf_topic, sizeof(leaf_topic),
+                      "%.*s/devices/%.*s/commands/%s",
+                      static_cast<int>(devices - topic), topic,
+                      static_cast<int>(serial_length), serial, command + 1);
   if (written < 0 || written >= static_cast<int>(sizeof(leaf_topic))) return false;
-  // Keep the broker payload opaque; only the routing topic is reconstructed.
-  return send_message(FrameType::kCommand, destination, destination, true, leaf_topic,
-                      payload, length, qos, retain) == ESP_OK;
+  if ((!payload && length) || length + 1 > kMaxPayload) return false;
+  uint8_t *relay_payload = static_cast<uint8_t *>(heap_caps_malloc(
+      length + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!relay_payload) return false;
+  relay_payload[0] = system_command ? kCommandSystem : kCommandApplication;
+  if (length) std::memcpy(relay_payload + 1, payload, length);
+  // The leading byte selects the namespace; the body remains opaque.
+  const esp_err_t result = send_message(FrameType::kCommand, destination,
+                                        destination, true, leaf_topic,
+                                        relay_payload, length + 1, qos, retain);
+  heap_caps_free(relay_payload);
+  return result == ESP_OK;
 }
 
 void mqtt_l2_relay_receive(const uint8_t originator[6], const uint8_t *data,

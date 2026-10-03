@@ -9,7 +9,6 @@ const appwriteConfig = JSON.parse(
   readFileSync(path.join(rootDir, "appwrite.config.json"), "utf8"),
 );
 const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
-const topologyTable = appwriteConfig.tables?.find((table) => table.$id === "topology-links");
 const farmTable = appwriteConfig.tables?.find((table) => table.$id === "farms");
 const geofenceAreaTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas");
 const geofenceRuleTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-rules");
@@ -20,9 +19,9 @@ const database = appwriteConfig.tablesDB?.find(
 const timeseriesStore = appwriteConfig.timeseriesStores?.find(
   (candidate) => candidate.enabled !== false && candidate.$id === "<PROJECT_ID>",
 );
-if (!database || !telemetryTable || !topologyTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+if (!database || !telemetryTable || !farmTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
     !timeseriesStore || !timeseriesStore.name || !Array.isArray(timeseriesStore.permissions) ||
-    [topologyTable, farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
+    [farmTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable].some((table) => table.databaseId !== database.$id)) {
   throw new Error("appwrite.config.json must define the Time Series Store and all Live Stocking tables");
 }
 
@@ -62,7 +61,6 @@ export const config = {
   timeseriesStorePermissions: timeseriesStore.permissions,
   databaseId: database.$id,
   telemetryTableId: telemetryTable.$id,
-  topologyTableId: topologyTable.$id,
   farmTableId: farmTable.$id,
   geofenceAreaTableId: geofenceAreaTable.$id,
   geofenceRuleTableId: geofenceRuleTable.$id,

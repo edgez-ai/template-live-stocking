@@ -197,36 +197,38 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    project-unique serial and farm ID, and creates its one-time MQTT credential
    through the Devices API. The operator can leave device location unset, use the
    phone's current location, or choose coordinates on the offline map. Selected
-   coordinates are stored in device metadata and shown on the farm map.
+   coordinates are stored in the Device's native `location` field and shown on
+   the farm map.
 4. The operator chooses whether the ESP32 has upstream Wi-Fi. The app sends the
    farm's mesh settings, device location, and MQTT credential together through
    the `mqtt-config` BLE endpoint, then provisions upstream Wi-Fi when selected.
    Firmware connects to `mqtts://mqtt.edgez.ai:8883`, verifying the Let's Encrypt
    chain with ESP-IDF's trusted root bundle.
-5. The device publishes JSON to
-   `projects/<projectId>/devices/<serial>/telemetry/<channel>`. Appwrite's EMQX
+5. The device publishes application sensor JSON to
+   `projects/<projectId>/devices/<serial>/telemetry/sensors` and nanopb system
+   reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite's EMQX
    ACL allows that serial to publish only beneath its own telemetry/events
    topics and subscribe only beneath its own commands topic.
-   A HaLow-only leaf sends only its JSON payload over BATMAN-adv-lite. The
-   upstream gateway constructs its own `telemetry/status` MQTT topic and
-   publishes the unchanged payload, so the gateway ACL accepts the message.
+   A HaLow-only leaf prefixes the opaque BATMAN-adv-lite body with `0` for
+   system data or `1` for application telemetry. The upstream gateway removes
+   that byte and publishes the remaining bytes unchanged to the matching topic.
    Commands take the reverse path under the gateway's own authorized namespace:
-   `commands/proxy/<leafSerial>/<command>`. The gateway removes that routing
-   prefix, restores the leaf's normal command topic, and forwards the MQTT
-   payload bytes unchanged over BATMAN-adv.
-   The payload's Appwrite `clientId` assigns each telemetry and topology report
-   and its read permissions to the originating leaf device.
-   Firmware reads the HT-HC33 battery ADC every 30 seconds and publishes one
-   `status` message with online state, optional `batteryVoltageMv` in millivolts,
-   optional provisioning coordinates, and its recently observed direct HaLow
-   peers.
+   Application commands use `commands/proxy/<leafSerial>/<command>` and system
+   commands use `system/commands/proxy/<leafHaLowMac>`. The gateway forwards a
+   leading `1` or `0` respectively, followed by the unchanged command body.
+   The payload's Appwrite `clientId` assigns each sensor report and its read
+   permissions to the originating leaf device. System status uses protobuf and
+   Appwrite records device presence, gateway routing, topology, and HaLow RF
+   metrics before dispatching application sensor telemetry to the Function.
 6. Appwrite resolves the MQTT client and emits
    `devices.<deviceId>.mqtt.message.publish` to the Function.
 7. The Function verifies the topic project and serial against the built-in
    device, writes the complete reading to the project's Time Series Store, and
    upserts one latest `telemetry` row per device carrying that device's read
-   permissions. It also upserts the gateway's current links in `topology-links`.
-8. Web and mobile read current state and topology from TablesDB, then query
+   permissions. When GPS sensor values are present, it also updates the native
+   Device `location` field using `[longitude, latitude]`.
+8. Web and mobile read current state from TablesDB and request Devices with
+   `includeTopology=true`, then query
    historical sensor fields from Time Series with an Appwrite JWT. Each device
    uses the deterministic `device_<deviceId>` measurement. Numeric sensor type
    indexes are stored under text fields such as `sensor_temperature` and
@@ -235,7 +237,7 @@ Open `live-stocking.code-workspace` in VS Code to work on all five folders.
    The latest TablesDB telemetry row also stores the same fix in a spatially
    indexed `location` point using `[longitude, latitude]`, allowing queries such
    as `Query.distanceLessThan("location", [longitude, latitude], radiusMeters)`.
-   Its `icon` and `markerColor` fields mirror Device metadata so a spatial query
+   Its `icon` and `markerColor` fields mirror native Device marker fields so a spatial query
    returns everything needed to draw the device marker.
    They display only active links reported within the last two minutes, so an
    offline gateway cannot leave stale topology visible.
@@ -337,3 +339,9 @@ and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
 The upload keystore and password have an ignored local backup in `app/signing/`;
 back them up securely before deleting that directory. The unsigned APK is for
 separate signing and cannot be installed as-is.
+
+### Devices service migration
+
+Deploy Appwrite and run its schema migration before deploying this Function/client/firmware update. Firmware publishes system reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite owns status and topology, stores RF samples as history, and dispatches only sensor data to the application Function under the logical `telemetry/sensors` event topic. Reconnect devices after the Appwrite upgrade to refresh their MQTT ACL.
+
+Clients read native Device status, firmware version, HaLow MAC, and topology projection. Map configuration uses native `markerType`, `markerColor`, and `location`. The installer no longer creates `topology-links`; old remote rows are left untouched. Application sensor history, geofences, OTA tracking, and application downlink tracking remain in Live Stocking.

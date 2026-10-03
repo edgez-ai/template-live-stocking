@@ -38,7 +38,9 @@
 #include "mbedtls/x509_crt.h"
 #include "ota_proxy_cert.h"
 #include "pb_decode.h"
+#include "pb_encode.h"
 #include "sensor_script.h"
+#include "device_system.pb.h"
 #include "usb_control.pb.h"
 
 namespace {
@@ -160,10 +162,13 @@ int publish_mqtt_direct(const char *topic, const void *payload, size_t length,
                         int qos, bool retain) {
   if (!mqtt_client || !(xEventGroupGetBits(state_events) & kMqttConnected)) return -1;
   char gateway_status_topic[384]{};
-  if (!topic || !topic[0]) {
+  if (!topic || !topic[0] || std::strcmp(topic, "system/status") == 0 ||
+      std::strcmp(topic, "telemetry/sensors") == 0) {
+    const char *suffix = topic && std::strcmp(topic, "telemetry/sensors") == 0
+        ? "telemetry/sensors" : "system/status";
     std::snprintf(gateway_status_topic, sizeof(gateway_status_topic),
-                  "projects/%s/devices/%s/telemetry/status",
-                  mqtt_config.project_id, mqtt_config.username);
+                  "projects/%s/devices/%s/%s",
+                  mqtt_config.project_id, mqtt_config.username, suffix);
     topic = gateway_status_topic;
   }
   return esp_mqtt_client_publish(mqtt_client, topic,
@@ -174,6 +179,13 @@ int publish_mqtt_direct(const char *topic, const void *payload, size_t length,
 void receive_relayed_mqtt_command(const char *topic, const uint8_t *payload,
                                   size_t length) {
   if (!topic || (!payload && length)) return;
+  char local_topic[384]{};
+  if (std::strcmp(topic, "system/commands") == 0) {
+    std::snprintf(local_topic, sizeof(local_topic),
+                  "projects/%s/devices/%s/system/commands",
+                  mqtt_config.project_id, mqtt_config.username);
+    topic = local_topic;
+  }
   const int topic_length = std::strlen(topic);
   if (sensor_script_handle_mqtt_command(
           topic, topic_length, reinterpret_cast<const char *>(payload), length,
@@ -493,7 +505,7 @@ void ota_task(void *) {
 
 void handle_ota_command(const esp_mqtt_event_handle_t event) {
   char expected_topic[384]{};
-  std::snprintf(expected_topic, sizeof(expected_topic), "projects/%s/devices/%s/commands/ota",
+  std::snprintf(expected_topic, sizeof(expected_topic), "projects/%s/devices/%s/system/commands",
                 mqtt_config.project_id, mqtt_config.username);
   const size_t expected_length = std::strlen(expected_topic);
   if (event->topic_len != static_cast<int>(expected_length) ||
@@ -504,18 +516,19 @@ void handle_ota_command(const esp_mqtt_event_handle_t event) {
     return;
   }
 
-  cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
-  cJSON *url = root ? cJSON_GetObjectItemCaseSensitive(root, "url") : nullptr;
-  cJSON *request_id = root ? cJSON_GetObjectItemCaseSensitive(root, "requestId") : nullptr;
+  edgez_devices_v1_SystemCommand message = edgez_devices_v1_SystemCommand_init_zero;
+  pb_istream_t stream = pb_istream_from_buffer(
+      reinterpret_cast<const pb_byte_t *>(event->data), event->data_len);
   OtaCommand command{};
-  const bool valid = cJSON_IsString(url) && url->valuestring && valid_https_url(url->valuestring) &&
-      cJSON_IsString(request_id) && request_id->valuestring && request_id->valuestring[0] &&
-      std::strlen(request_id->valuestring) < sizeof(command.request_id);
+  const bool decoded = pb_decode(&stream, edgez_devices_v1_SystemCommand_fields, &message);
+  const bool valid = decoded && message.has_header && message.header.version == 1 &&
+      message.header.request_id[0] &&
+      message.which_command == edgez_devices_v1_SystemCommand_ota_tag &&
+      valid_https_url(message.command.ota.url);
   if (valid) {
-    strlcpy(command.url, url->valuestring, sizeof(command.url));
-    strlcpy(command.request_id, request_id->valuestring, sizeof(command.request_id));
+    strlcpy(command.url, message.command.ota.url, sizeof(command.url));
+    strlcpy(command.request_id, message.header.request_id, sizeof(command.request_id));
   }
-  cJSON_Delete(root);
   if (!valid) {
     ESP_LOGW(kTag, "Rejected invalid OTA command");
     return;
@@ -873,7 +886,8 @@ void remote_beacon_task(void *) {
   }
 }
 
-void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t count) {
+void append_remote_telemetry(cJSON *system_batch, cJSON *sensor_batch,
+                             const RemoteBeacon *records, size_t count) {
   uint8_t observer_halow_mac[6]{};
   const bool observer_mac_valid = halow_get_local_mac(observer_halow_mac);
   for (size_t record_index = 0; record_index < count; ++record_index) {
@@ -927,7 +941,6 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
       append_topology(entry);
     }
     cJSON *sensors = cJSON_CreateArray();
-    if (sensors) cJSON_AddItemToObject(entry, "sensors", sensors);
     for (pb_size_t i = 0; i < reading.sensor_data_count; ++i) {
       const auto &sensor = reading.sensor_data[i];
       cJSON *value = nullptr;
@@ -954,8 +967,184 @@ void append_remote_telemetry(cJSON *batch, const RemoteBeacon *records, size_t c
         } else cJSON_Delete(value);
       } else cJSON_Delete(value);
     }
-    cJSON_AddItemToArray(batch, entry);
+    cJSON_AddItemToArray(system_batch, entry);
+    if (sensors && cJSON_GetArraySize(sensors) > 0) {
+      cJSON *sensor_entry = cJSON_CreateObject();
+      if (sensor_entry) {
+        cJSON_AddStringToObject(sensor_entry, "clientId", reading.client_id);
+        cJSON_AddItemToObject(sensor_entry, "sensors", sensors);
+        cJSON_AddItemToArray(sensor_batch, sensor_entry);
+      } else {
+        cJSON_Delete(sensors);
+      }
+    } else {
+      cJSON_Delete(sensors);
+    }
   }
+}
+
+bool parse_mac_bytes(const char *text, uint8_t output[6]) {
+  unsigned int octets[6];
+  if (!text || std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x",
+                           &octets[0], &octets[1], &octets[2], &octets[3],
+                           &octets[4], &octets[5]) != 6) return false;
+  for (size_t index = 0; index < 6; ++index)
+    output[index] = static_cast<uint8_t>(octets[index]);
+  return true;
+}
+
+cJSON *json_member(cJSON *object, const char *name) {
+  return object ? cJSON_GetObjectItemCaseSensitive(object, name) : nullptr;
+}
+
+void fill_topology(cJSON *object, edgez_devices_v1_Topology *topology) {
+  cJSON *links = json_member(object, "links");
+  if (!cJSON_IsArray(links)) return;
+  cJSON *source = nullptr;
+  cJSON_ArrayForEach(source, links) {
+    if (topology->links_count >= 16) break;
+    auto *target = &topology->links[topology->links_count];
+    cJSON *value = json_member(source, "peerHalowMac");
+    if (!cJSON_IsString(value) ||
+        !parse_mac_bytes(value->valuestring, target->peer_halow_mac.bytes)) continue;
+    target->peer_halow_mac.size = 6;
+    value = json_member(source, "ageMs");
+    if (cJSON_IsNumber(value)) target->age_ms = static_cast<uint32_t>(value->valuedouble);
+    value = json_member(source, "rssi");
+    if (cJSON_IsNumber(value)) {
+      target->has_rssi = true;
+      target->rssi = value->valueint;
+    }
+    ++topology->links_count;
+  }
+}
+
+void fill_rf_links(cJSON *object, edgez_devices_v1_HalowRfLinks *links) {
+  cJSON *value = nullptr;
+#define RF_LINK_U32(json_name, member) \
+  value = json_member(object, json_name); \
+  if (cJSON_IsNumber(value)) { links->has_##member = true; links->member = static_cast<uint32_t>(value->valuedouble); }
+#define RF_LINK_I32(json_name, member) \
+  value = json_member(object, json_name); \
+  if (cJSON_IsNumber(value)) { links->has_##member = true; links->member = value->valueint; }
+#define RF_LINK_U64(json_name, member) \
+  value = json_member(object, json_name); \
+  if (cJSON_IsNumber(value)) { links->has_##member = true; links->member = static_cast<uint64_t>(value->valuedouble); }
+  RF_LINK_U32("peerCount", peer_count);
+  RF_LINK_I32("averageSignalDbm", average_signal_dbm);
+  RF_LINK_I32("minimumSignalDbm", minimum_signal_dbm);
+  RF_LINK_U64("rxPackets", rx_packets);
+  RF_LINK_U64("txPackets", tx_packets);
+  RF_LINK_U64("txRetries", tx_retries);
+  RF_LINK_U64("txFailed", tx_failed);
+#undef RF_LINK_U32
+#undef RF_LINK_I32
+#undef RF_LINK_U64
+}
+
+void fill_halow_rf(cJSON *object, edgez_devices_v1_HalowRf *rf) {
+  cJSON *value = json_member(object, "version");
+  if (cJSON_IsNumber(value)) rf->version = static_cast<uint32_t>(value->valuedouble);
+  value = json_member(object, "observedAt");
+  if (cJSON_IsNumber(value)) rf->observed_at = static_cast<uint64_t>(value->valuedouble);
+  value = json_member(object, "radioEnabled");
+  if (cJSON_IsBool(value)) rf->radio_enabled = cJSON_IsTrue(value);
+  value = json_member(object, "available");
+  if (cJSON_IsBool(value)) rf->available = cJSON_IsTrue(value);
+#define RF_U32(json_name, member) \
+  value = json_member(object, json_name); \
+  if (cJSON_IsNumber(value)) { rf->has_##member = true; rf->member = static_cast<uint32_t>(value->valuedouble); }
+#define RF_I32(json_name, member) \
+  value = json_member(object, json_name); \
+  if (cJSON_IsNumber(value)) { rf->has_##member = true; rf->member = value->valueint; }
+  RF_U32("channel", channel);
+  RF_U32("frequency", frequency);
+  RF_U32("bandwidthMHz", bandwidth_mhz);
+  RF_I32("signalDbm", signal_dbm);
+  RF_I32("noiseDbm", noise_dbm);
+  RF_U32("quality", quality);
+  RF_U32("qualityMax", quality_max);
+#undef RF_U32
+#undef RF_I32
+  value = json_member(object, "links");
+  if (cJSON_IsObject(value)) {
+    rf->has_links = true;
+    fill_rf_links(value, &rf->links);
+  }
+}
+
+bool encode_system_status(cJSON *array, uint8_t **payload, size_t *length) {
+  if (!cJSON_IsArray(array) || !payload || !length) return false;
+  *payload = nullptr;
+  *length = 0;
+  auto *batch = static_cast<edgez_devices_v1_SystemStatusBatch *>(
+      heap_caps_calloc(1, sizeof(edgez_devices_v1_SystemStatusBatch),
+                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!batch) return false;
+  cJSON *source = nullptr;
+  cJSON_ArrayForEach(source, array) {
+    if (batch->reports_count >= 16) break;
+    auto *target = &batch->reports[batch->reports_count];
+    cJSON *value = json_member(source, "clientId");
+    if (!cJSON_IsString(value) ||
+        strlcpy(target->client_id, value->valuestring, sizeof(target->client_id)) >=
+            sizeof(target->client_id)) continue;
+    value = json_member(source, "status");
+    if (cJSON_IsString(value) && std::strcmp(value->valuestring, "online") == 0)
+      target->status = edgez_devices_v1_DeviceStatus_DEVICE_STATUS_ONLINE;
+    else if (cJSON_IsString(value) && std::strcmp(value->valuestring, "offline") == 0)
+      target->status = edgez_devices_v1_DeviceStatus_DEVICE_STATUS_OFFLINE;
+    value = json_member(source, "halowMac");
+    if (cJSON_IsString(value) &&
+        parse_mac_bytes(value->valuestring, target->halow_mac.bytes))
+      target->halow_mac.size = 6;
+    value = json_member(source, "firmwareVersion");
+    if (cJSON_IsString(value))
+      strlcpy(target->firmware_version, value->valuestring,
+              sizeof(target->firmware_version));
+    value = json_member(source, "topology");
+    if (cJSON_IsObject(value)) {
+      target->has_topology = true;
+      fill_topology(value, &target->topology);
+    }
+    value = json_member(source, "halowRf");
+    if (cJSON_IsObject(value)) {
+      target->has_halow_rf = true;
+      fill_halow_rf(value, &target->halow_rf);
+    }
+    value = json_member(source, "gateway_status");
+    if (cJSON_IsString(value) && std::strcmp(value->valuestring, "online") == 0)
+      target->gateway_status = edgez_devices_v1_GatewayStatus_GATEWAY_STATUS_ONLINE;
+    else if (cJSON_IsString(value) && std::strcmp(value->valuestring, "offline") == 0)
+      target->gateway_status = edgez_devices_v1_GatewayStatus_GATEWAY_STATUS_OFFLINE;
+    else if (cJSON_IsString(value) && std::strcmp(value->valuestring, "disabled") == 0)
+      target->gateway_status = edgez_devices_v1_GatewayStatus_GATEWAY_STATUS_DISABLED;
+    value = json_member(source, "wifi_enabled");
+    if (cJSON_IsBool(value)) {
+      target->has_wifi_enabled = true;
+      target->wifi_enabled = cJSON_IsTrue(value);
+    }
+    ++batch->reports_count;
+  }
+  bool success = batch->reports_count > 0 &&
+      pb_get_encoded_size(length, edgez_devices_v1_SystemStatusBatch_fields, batch);
+  if (success) {
+    *payload = static_cast<uint8_t *>(heap_caps_malloc(
+        *length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (*payload) {
+      pb_ostream_t stream = pb_ostream_from_buffer(*payload, *length);
+      success = pb_encode(&stream, edgez_devices_v1_SystemStatusBatch_fields, batch);
+    } else {
+      success = false;
+    }
+  }
+  if (!success && *payload) {
+    heap_caps_free(*payload);
+    *payload = nullptr;
+    *length = 0;
+  }
+  heap_caps_free(batch);
+  return success;
 }
 
 esp_err_t mqtt_config_handler(uint32_t, const uint8_t *input, ssize_t input_length,
@@ -1170,35 +1359,59 @@ void telemetry_publish_task(void *) {
     if (halow_config.wifi_upstream &&
         !(xEventGroupGetBits(state_events) & kMqttConnected)) continue;
 
-    cJSON *batch = cJSON_CreateArray();
-    if (!batch) {
-      cJSON_Delete(batch);
+    cJSON *system_batch = cJSON_CreateArray();
+    cJSON *sensor_batch = cJSON_CreateArray();
+    if (!system_batch || !sensor_batch) {
+      cJSON_Delete(system_batch);
+      cJSON_Delete(sensor_batch);
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
-    append_remote_telemetry(batch, &remote, 1);
-    char *payload = cJSON_PrintUnformatted(batch);
+    append_remote_telemetry(system_batch, sensor_batch, &remote, 1);
+    uint8_t *system_payload = nullptr;
+    size_t system_payload_length = 0;
     int message_id = -1;
-    if (payload && (!halow_config.wifi_upstream ||
-                    (xEventGroupGetBits(state_events) & kMqttConnected))) {
+    if (encode_system_status(system_batch, &system_payload, &system_payload_length) &&
+        (!halow_config.wifi_upstream ||
+         (xEventGroupGetBits(state_events) & kMqttConnected))) {
       char topic[384]{};
       std::snprintf(topic, sizeof(topic),
-                    "projects/%s/devices/%s/telemetry/%s",
-                    mqtt_config.project_id, mqtt_config.username, mqtt_config.channel);
+                    "projects/%s/devices/%s/system/status",
+                    mqtt_config.project_id, mqtt_config.username);
       // Telemetry is periodic and may be dropped during an outage. QoS 0 keeps
       // stalled publishes out of the MQTT retransmission outbox so they cannot
       // exhaust the heap needed for TLS reconnection.
-      message_id = mqtt_l2_relay_publish(topic, payload, std::strlen(payload), 0, false);
+      message_id = mqtt_l2_relay_publish(topic, system_payload,
+                                         system_payload_length, 0, false);
       if (message_id >= 0) {
         if (halow_config.wifi_upstream)
-          ESP_LOGI(kTag, "Telemetry published to %s (%d)", topic, message_id);
+          ESP_LOGI(kTag, "System protobuf published to %s (%d)", topic, message_id);
         else
-          ESP_LOGI(kTag, "Telemetry JSON payload sent over BATMAN-adv (%d)",
+          ESP_LOGI(kTag, "System protobuf sent over BATMAN-adv (%d)",
                    message_id);
       }
     }
-    cJSON_free(payload);
-    cJSON_Delete(batch);
+    heap_caps_free(system_payload);
+    if (cJSON_GetArraySize(sensor_batch) > 0) {
+      char *payload = cJSON_PrintUnformatted(sensor_batch);
+      if (payload && (!halow_config.wifi_upstream ||
+                      (xEventGroupGetBits(state_events) & kMqttConnected))) {
+        char topic[384]{};
+        std::snprintf(topic, sizeof(topic),
+                      "projects/%s/devices/%s/telemetry/sensors",
+                      mqtt_config.project_id, mqtt_config.username);
+        const int sensor_message_id = mqtt_l2_relay_publish(
+            topic, payload, std::strlen(payload), 0, false);
+        if (sensor_message_id >= 0)
+          ESP_LOGI(kTag, "Sensor telemetry published to %s (%d)", topic,
+                   sensor_message_id);
+        else
+          message_id = -1;
+      }
+      cJSON_free(payload);
+    }
+    cJSON_Delete(system_batch);
+    cJSON_Delete(sensor_batch);
     if (message_id < 0) vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
@@ -1236,6 +1449,14 @@ void mqtt_event_handler(void *, esp_event_base_t, int32_t event_id, void *event_
                   mqtt_config.project_id, mqtt_config.username);
     const int subscription_id = esp_mqtt_client_subscribe(mqtt_client, command_topic, 1);
     ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)", command_topic, subscription_id);
+    char system_command_topic[384]{};
+    std::snprintf(system_command_topic, sizeof(system_command_topic),
+                  "projects/%s/devices/%s/system/commands/#",
+                  mqtt_config.project_id, mqtt_config.username);
+    const int system_subscription_id = esp_mqtt_client_subscribe(
+        mqtt_client, system_command_topic, 1);
+    ESP_LOGI(kTag, "MQTT connected; subscribed %s (%d)",
+             system_command_topic, system_subscription_id);
     publish_saved_ota_result();
   } else if (event_id == MQTT_EVENT_DISCONNECTED) {
     xEventGroupClearBits(state_events, kMqttConnected);
