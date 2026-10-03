@@ -333,6 +333,13 @@ void mqtt_l2_relay_set_gateway_online(bool online) {
   halow_set_batman_gateway(is_gateway && online);
 }
 
+void mqtt_l2_relay_set_local_mac(const uint8_t mac[6]) {
+  if (!mac) return;
+  std::memcpy(local_mac, mac, sizeof(local_mac));
+  ESP_LOGI(kTag, "Relay Ethernet identity updated to HaLow MAC " MACSTR,
+           MAC2STR(local_mac));
+}
+
 bool mqtt_l2_relay_gateway_available() {
   uint8_t gateway[6];
   uint8_t gateway_l2[6];
@@ -344,15 +351,21 @@ int mqtt_l2_relay_publish(const char *topic, const void *payload, size_t length,
                           int qos, bool retain) {
   if (is_gateway) return publish_callback ? publish_callback(topic, payload, length, qos, retain) : -1;
   if (!topic || (!payload && length) || length + 1 > kMaxPayload) return -1;
-  const char *telemetry_suffix = "/telemetry/sensors";
+  constexpr char telemetry_suffix[] = "/telemetry/sensors";
+  constexpr char system_suffix[] = "/system/status";
   const size_t topic_length = std::strlen(topic);
-  const size_t telemetry_suffix_length = std::strlen(telemetry_suffix);
-  const uint8_t payload_kind =
-      topic_length >= telemetry_suffix_length &&
-              std::strcmp(topic + topic_length - telemetry_suffix_length,
-                          telemetry_suffix) == 0
-          ? kPayloadTelemetry
-          : kPayloadSystem;
+  const auto has_suffix = [topic, topic_length](const char *suffix) {
+    const size_t suffix_length = std::strlen(suffix);
+    return topic_length >= suffix_length &&
+           std::strcmp(topic + topic_length - suffix_length, suffix) == 0;
+  };
+  uint8_t payload_kind = kPayloadSystem;
+  if (has_suffix(telemetry_suffix)) {
+    payload_kind = kPayloadTelemetry;
+  } else if (!has_suffix(system_suffix)) {
+    ESP_LOGW(kTag, "Rejected unsupported relayed MQTT topic: %s", topic);
+    return -1;
+  }
   uint8_t gateway[6];
   uint8_t gateway_l2[6];
   if (!halow_selected_mqtt_gateway(gateway, gateway_l2)) {

@@ -554,6 +554,13 @@ void handle_ota_command(const esp_mqtt_event_handle_t event) {
 }
 
 void halow_ready() {
+  uint8_t halow_mac[6]{};
+  if (halow_get_local_mac(halow_mac)) {
+    // Proxy system commands are addressed by the HaLow MAC stored by the
+    // Devices service. Use the same address in the inner relay Ethernet frame
+    // so both uplink peer discovery and downlink destination matching agree.
+    mqtt_l2_relay_set_local_mac(halow_mac);
+  }
   xEventGroupSetBits(state_events, kNetworkConnected);
   if (halow_config.wifi_upstream) {
     show_device_status("HALOW CONNECTED",
@@ -938,6 +945,16 @@ void append_remote_telemetry(cJSON *system_batch, cJSON *sensor_batch,
     }
     if (std::strcmp(reading.client_id, mqtt_config.client_id) == 0) {
       cJSON_AddStringToObject(entry, "firmwareVersion", esp_app_get_description()->version);
+      const bool mqtt_online =
+          (xEventGroupGetBits(state_events) & kMqttConnected) != 0;
+      const bool relay_online = mqtt_l2_relay_gateway_available();
+      cJSON_AddStringToObject(
+          entry, "gateway_status",
+          halow_config.wifi_upstream
+              ? (mqtt_online ? "online" : "offline")
+              : (relay_online ? "online" : "offline"));
+      cJSON_AddBoolToObject(entry, "wifi_enabled",
+                            halow_config.wifi_upstream);
       append_topology(entry);
     }
     cJSON *sensors = cJSON_CreateArray();
