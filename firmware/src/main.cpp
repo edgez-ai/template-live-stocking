@@ -821,6 +821,43 @@ void append_topology(cJSON *entry) {
   cJSON_AddItemToObject(entry, "topology", topology);
 }
 
+void append_halow_rf(cJSON *entry) {
+  HalowRfSnapshot snapshot{};
+  if (!entry || !halow_get_rf_snapshot(&snapshot)) return;
+  cJSON *rf = cJSON_CreateObject();
+  cJSON *links = cJSON_CreateObject();
+  if (!rf || !links) {
+    cJSON_Delete(rf);
+    cJSON_Delete(links);
+    return;
+  }
+  cJSON_AddNumberToObject(rf, "version", 1);
+  // HaLow-only nodes do not have an NTP source. Uptime is sent as a nonzero
+  // observation marker; Devices replaces pre-2000 values with broker receive
+  // time when it writes history.
+  const uint64_t observed_at = std::max<uint64_t>(
+      1, static_cast<uint64_t>(esp_timer_get_time() / 1000000));
+  cJSON_AddNumberToObject(rf, "observedAt", static_cast<double>(observed_at));
+  cJSON_AddBoolToObject(rf, "radioEnabled", snapshot.radio_enabled);
+  cJSON_AddBoolToObject(rf, "available", snapshot.available);
+  if (snapshot.channel)
+    cJSON_AddNumberToObject(rf, "channel", snapshot.channel);
+  if (snapshot.frequency_khz)
+    cJSON_AddNumberToObject(rf, "frequency", snapshot.frequency_khz);
+  if (snapshot.bandwidth_mhz)
+    cJSON_AddNumberToObject(rf, "bandwidthMHz", snapshot.bandwidth_mhz);
+  if (snapshot.signal_valid) {
+    cJSON_AddNumberToObject(rf, "signalDbm", snapshot.signal_dbm);
+    cJSON_AddNumberToObject(links, "averageSignalDbm",
+                            snapshot.average_signal_dbm);
+    cJSON_AddNumberToObject(links, "minimumSignalDbm",
+                            snapshot.minimum_signal_dbm);
+  }
+  cJSON_AddNumberToObject(links, "peerCount", snapshot.peer_count);
+  cJSON_AddItemToObject(rf, "links", links);
+  cJSON_AddItemToObject(entry, "halowRf", rf);
+}
+
 void decode_remote_beacon(const BeaconFrame &frame) {
   ai_edgez_halow_Beacon beacon = ai_edgez_halow_Beacon_init_zero;
   pb_istream_t stream = pb_istream_from_buffer(frame.data, frame.length);
@@ -956,6 +993,7 @@ void append_remote_telemetry(cJSON *system_batch, cJSON *sensor_batch,
       cJSON_AddBoolToObject(entry, "wifi_enabled",
                             halow_config.wifi_upstream);
       append_topology(entry);
+      append_halow_rf(entry);
     }
     cJSON *sensors = cJSON_CreateArray();
     for (pb_size_t i = 0; i < reading.sensor_data_count; ++i) {

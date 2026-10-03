@@ -19,11 +19,25 @@ struct HalowRouteSnapshot {
   uint8_t hops;
 };
 
+struct HalowRfSnapshot {
+  bool radio_enabled;
+  bool available;
+  uint8_t channel;
+  uint32_t frequency_khz;
+  uint8_t bandwidth_mhz;
+  uint16_t peer_count;
+  bool signal_valid;
+  int16_t signal_dbm;
+  int16_t average_signal_dbm;
+  int16_t minimum_signal_dbm;
+};
+
 bool halow_channel_supported(const char *country, uint8_t channel);
 void halow_set_beacon_callback(halow_beacon_callback_t callback);
 void halow_set_batman_callback(halow_batman_callback_t callback);
 bool halow_get_peer_rssi(const uint8_t peer_mac[6], int16_t *rssi_dbm);
 bool halow_get_local_mac(uint8_t mac[6]);
+bool halow_get_rf_snapshot(HalowRfSnapshot *snapshot);
 size_t halow_snapshot_routes(HalowRouteSnapshot *routes, size_t capacity);
 void halow_set_batman_gateway(bool available);
 bool halow_mark_mqtt_gateway(const uint8_t originator[6],

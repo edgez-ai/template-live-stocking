@@ -17,6 +17,9 @@ namespace {
 constexpr char kTag[] = "halow";
 HaLowInterface radio;
 bool radio_started;
+uint8_t radio_channel;
+uint32_t radio_frequency_khz;
+uint8_t radio_bandwidth_mhz;
 halow_ready_callback_t ready_callback;
 halow_beacon_callback_t beacon_callback;
 halow_batman_callback_t batman_callback;
@@ -102,6 +105,38 @@ bool halow_get_local_mac(uint8_t mac[6]) {
   return mac && mmwlan_get_mac_addr(mac) == MMWLAN_SUCCESS;
 }
 
+bool halow_get_rf_snapshot(HalowRfSnapshot *snapshot) {
+  if (!snapshot) return false;
+  *snapshot = {};
+  snapshot->radio_enabled = radio_started;
+  snapshot->available = radio_started;
+  snapshot->channel = radio_channel;
+  snapshot->frequency_khz = radio_frequency_khz;
+  snapshot->bandwidth_mhz = radio_bandwidth_mhz;
+  if (!radio_started) return true;
+
+  HalowRouteSnapshot routes[16]{};
+  const size_t route_count = halow_snapshot_routes(routes, 16);
+  int32_t signal_sum = 0;
+  int16_t minimum_signal = 0;
+  uint16_t measured = 0;
+  for (size_t index = 0; index < route_count; ++index) {
+    int16_t rssi = 0;
+    if (!halow_get_peer_rssi(routes[index].originator, &rssi)) continue;
+    signal_sum += rssi;
+    if (measured == 0 || rssi < minimum_signal) minimum_signal = rssi;
+    ++measured;
+  }
+  snapshot->peer_count = static_cast<uint16_t>(route_count);
+  if (measured > 0) {
+    snapshot->signal_valid = true;
+    snapshot->average_signal_dbm = static_cast<int16_t>(signal_sum / measured);
+    snapshot->minimum_signal_dbm = minimum_signal;
+    snapshot->signal_dbm = snapshot->average_signal_dbm;
+  }
+  return true;
+}
+
 size_t halow_snapshot_routes(HalowRouteSnapshot *routes, size_t capacity) {
   if (!routes || capacity == 0) return 0;
   constexpr size_t kSnapshotCapacity = 16;
@@ -164,6 +199,9 @@ esp_err_t halow_connect(const char *mesh_id, const char *passphrase,
   radio.setMeshId(mesh_id);
   radio.setMeshSaePassphrase(passphrase);
   radio.setMeshRadio(selected->centre_freq_hz / 1000U, selected->bw_mhz);
+  radio_channel = selected->s1g_chan_num;
+  radio_frequency_khz = selected->centre_freq_hz / 1000U;
+  radio_bandwidth_mhz = selected->bw_mhz;
   radio.setProactiveJoinEnabled(true);
   radio.setRelayModeEnabled(true);
   ready_callback = on_ready;
