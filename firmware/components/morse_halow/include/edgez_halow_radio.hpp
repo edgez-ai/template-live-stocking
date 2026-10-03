@@ -29,6 +29,24 @@ enum {
     EDGEZ_RADIO_DISABLED = 34,
 };
 
+struct EdgezHaLowMetrics {
+    uint32_t frequency_khz = 0;
+    uint8_t channel = 0;
+    uint8_t bandwidth_mhz = 0;
+    uint8_t peer_count = 0;
+    bool radio_enabled = false;
+    bool available = false;
+    bool signal_valid = false;
+    bool noise_valid = false;
+    int16_t average_signal_dbm = 0;
+    int16_t minimum_signal_dbm = 0;
+    int16_t noise_dbm = 0;
+    uint32_t rx_packets = 0;
+    uint32_t tx_packets = 0;
+    uint32_t tx_retries = 0;
+    uint32_t tx_failed = 0;
+};
+
 class HaLowInterface
 {
   public:
@@ -88,6 +106,7 @@ class HaLowInterface
                                 const uint8_t exclude_c[6],
                                 uint64_t selection_key,
                                 uint8_t peer[6]);
+    bool metricsSnapshot(EdgezHaLowMetrics *metrics);
 
   private:
     bool internetGateway = false;
@@ -126,6 +145,8 @@ class HaLowInterface
     char countryCode[3] = {0};
     uint32_t meshFrequencyKHz = 0;
     uint8_t meshBandwidthMHz = 0;
+    int16_t lastMeshNoiseDbm = 0;
+    bool lastMeshNoiseValid = false;
 
     bool startMeshInfoRequest();
     bool loadMeshProfile();
